@@ -1,20 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { trace, context, SpanStatusCode } from '@opentelemetry/api';
+import { trace, context, SpanStatusCode, SpanKind } from '@opentelemetry/api';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { instrumentMcpServer } from '../src/instrument.js';
 import {
-  ATTR_MCP_TOOL_NAME,
-  ATTR_MCP_REQUEST_ID,
+  ATTR_MCP_METHOD_NAME,
+  ATTR_GEN_AI_TOOL_NAME,
+  ATTR_GEN_AI_OPERATION_NAME,
+  ATTR_JSONRPC_REQUEST_ID,
   ATTR_MCP_TOOL_ARGUMENT_COUNT,
-  ATTR_MCP_TOOL_STATUS,
-  ATTR_MCP_TOOL_ERROR_TYPE,
-  ATTR_MCP_TOOL_ERROR_MESSAGE,
-  MCP_TOOL_STATUS,
-  MCP_TOOL_CALL_SPAN_NAME,
+  ATTR_ERROR_TYPE,
+  ERROR_TYPE_TOOL_ERROR,
+  GEN_AI_OPERATION_NAME_EXECUTE_TOOL,
+  MCP_METHOD_NAME_TOOLS_CALL,
 } from '../src/attributes.js';
+
+const ATTR_MCP_TOOL_STATUS = 'mcp.tool.status';
 
 /** Fresh, unconnected low-level Server — every test builds its own. */
 function createServer(name = 'test-server') {
@@ -105,7 +108,7 @@ afterEach(async () => {
 
 describe('instrumentMcpServer', () => {
   describe('happy path', () => {
-    it('emits exactly one span named "mcp.tool.call" per tool call', async () => {
+    it('emits exactly one span named "tools/call echo" with kind SERVER per tool call', async () => {
       const server = createServer();
       instrumentMcpServer(server, { serviceName: 'svc' });
       server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [] }));
@@ -114,10 +117,28 @@ describe('instrumentMcpServer', () => {
 
       const spans = memoryExporter.getFinishedSpans();
       expect(spans).toHaveLength(1);
-      expect(spans[0].name).toBe(MCP_TOOL_CALL_SPAN_NAME);
+      expect(spans[0].name).toBe('tools/call echo');
+      expect(spans[0].kind).toBe(SpanKind.SERVER);
     });
 
-    it('sets mcp.tool.name, mcp.tool.argument_count, and mcp.request.id attributes', async () => {
+    it('falls back to just mcp.method.name as the span name when no tool name is available', async () => {
+      // CallToolRequestSchema requires params.name to be a string but does
+      // not enforce a minimum length, so an empty string is the only way to
+      // reach this branch through the SDK's own schema validation (a
+      // missing/undefined name is rejected by zod before our handler ever
+      // runs) — '' is falsy in JS, which is exactly what the ternary in
+      // wrapToolCallHandler checks.
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc' });
+      server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [] }));
+
+      await invokeToolCall(server, { name: '', arguments: {} });
+
+      const [span] = memoryExporter.getFinishedSpans();
+      expect(span.name).toBe(MCP_METHOD_NAME_TOOLS_CALL);
+    });
+
+    it('sets mcp.method.name, gen_ai.tool.name, gen_ai.operation.name, mcp.tool.argument_count, and jsonrpc.request.id attributes', async () => {
       const server = createServer();
       instrumentMcpServer(server, { serviceName: 'svc' });
       server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [] }));
@@ -125,12 +146,14 @@ describe('instrumentMcpServer', () => {
       await invokeToolCall(server, { name: 'echo', arguments: { foo: 'bar', baz: 42 } }, { requestId: 7 });
 
       const [span] = memoryExporter.getFinishedSpans();
-      expect(span.attributes[ATTR_MCP_TOOL_NAME]).toBe('echo');
+      expect(span.attributes[ATTR_MCP_METHOD_NAME]).toBe('tools/call');
+      expect(span.attributes[ATTR_GEN_AI_TOOL_NAME]).toBe('echo');
+      expect(span.attributes[ATTR_GEN_AI_OPERATION_NAME]).toBe(GEN_AI_OPERATION_NAME_EXECUTE_TOOL);
       expect(span.attributes[ATTR_MCP_TOOL_ARGUMENT_COUNT]).toBe(2);
-      expect(span.attributes[ATTR_MCP_REQUEST_ID]).toBe('7');
+      expect(span.attributes[ATTR_JSONRPC_REQUEST_ID]).toBe('7');
     });
 
-    it('sets mcp.tool.status to "ok" and span status to SpanStatusCode.OK', async () => {
+    it('sets span status to SpanStatusCode.OK and does not set error.type', async () => {
       const server = createServer();
       instrumentMcpServer(server, { serviceName: 'svc' });
       server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [] }));
@@ -138,8 +161,8 @@ describe('instrumentMcpServer', () => {
       await invokeToolCall(server, { name: 'echo', arguments: {} });
 
       const [span] = memoryExporter.getFinishedSpans();
-      expect(span.attributes[ATTR_MCP_TOOL_STATUS]).toBe(MCP_TOOL_STATUS.OK);
       expect(span.status.code).toBe(SpanStatusCode.OK);
+      expect(span.attributes[ATTR_ERROR_TYPE]).toBeUndefined();
     });
 
     it('emits mcp.tool.argument_count = 0 when request.params.arguments is undefined', async () => {
@@ -151,6 +174,29 @@ describe('instrumentMcpServer', () => {
 
       const [span] = memoryExporter.getFinishedSpans();
       expect(span.attributes[ATTR_MCP_TOOL_ARGUMENT_COUNT]).toBe(0);
+    });
+  });
+
+  describe('tool-level failure (isError: true)', () => {
+    it('sets error.type to "tool_error" and span status ERROR, returns the result unchanged, and does not throw', async () => {
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc' });
+      const toolResult = { isError: true, content: [{ type: 'text', text: 'tool blew up' }] };
+      server.setRequestHandler(CallToolRequestSchema, async () => toolResult);
+
+      const result = await invokeToolCall(server, { name: 'echo', arguments: {} });
+
+      // toEqual, not toBe: the SDK's own setRequestHandler wrapper
+      // reconstructs the result object en route back to the caller (see
+      // parseWithCompat in protocol.js), so reference identity isn't
+      // preserved even without instrumentation — value equality is what
+      // "returned unchanged" means here.
+      expect(result).toEqual(toolResult);
+
+      const [span] = memoryExporter.getFinishedSpans();
+      expect(span.status.code).toBe(SpanStatusCode.ERROR);
+      expect(span.attributes[ATTR_ERROR_TYPE]).toBe(ERROR_TYPE_TOOL_ERROR);
+      expect(span.attributes[ATTR_ERROR_TYPE]).toBe('tool_error');
     });
   });
 
@@ -180,7 +226,7 @@ describe('instrumentMcpServer', () => {
       expect(span.ended).toBe(true);
     });
 
-    it('sets mcp.tool.status to "error", mcp.tool.error.type, and mcp.tool.error.message', async () => {
+    it('sets error.type and status ERROR with the error message as status description, and does not set the removed mcp.tool.status attribute', async () => {
       const server = createServer();
       instrumentMcpServer(server, { serviceName: 'svc' });
       server.setRequestHandler(CallToolRequestSchema, async () => {
@@ -190,9 +236,10 @@ describe('instrumentMcpServer', () => {
       await invokeToolCall(server, { name: 'echo', arguments: {} }).catch(() => {});
 
       const [span] = memoryExporter.getFinishedSpans();
-      expect(span.attributes[ATTR_MCP_TOOL_STATUS]).toBe(MCP_TOOL_STATUS.ERROR);
-      expect(span.attributes[ATTR_MCP_TOOL_ERROR_TYPE]).toBe('TypeError');
-      expect(span.attributes[ATTR_MCP_TOOL_ERROR_MESSAGE]).toBe('boom');
+      expect(span.attributes[ATTR_ERROR_TYPE]).toBe('TypeError');
+      expect(span.status.code).toBe(SpanStatusCode.ERROR);
+      expect(span.status.message).toBe('boom');
+      expect(span.attributes[ATTR_MCP_TOOL_STATUS]).toBeUndefined();
     });
   });
 
@@ -214,9 +261,9 @@ describe('instrumentMcpServer', () => {
 
       const [span] = memoryExporter.getFinishedSpans();
       expect(span.status.code).toBe(SpanStatusCode.ERROR);
-      expect(span.attributes[ATTR_MCP_TOOL_STATUS]).toBe(MCP_TOOL_STATUS.ERROR);
-      expect(span.attributes[ATTR_MCP_TOOL_ERROR_TYPE]).toBe('RangeError');
-      expect(span.attributes[ATTR_MCP_TOOL_ERROR_MESSAGE]).toBe('nope');
+      expect(span.status.message).toBe('nope');
+      expect(span.attributes[ATTR_ERROR_TYPE]).toBe('RangeError');
+      expect(span.attributes[ATTR_MCP_TOOL_STATUS]).toBeUndefined();
       expect(span.events.some((e) => e.name === 'exception')).toBe(true);
     });
   });
@@ -336,10 +383,11 @@ describe('instrumentMcpServer', () => {
       await invokeToolCall(mcpServer.server, { name: 'echo', arguments: { text: 'hi' } }, { requestId: 3 });
 
       const [span] = memoryExporter.getFinishedSpans();
-      expect(span.name).toBe(MCP_TOOL_CALL_SPAN_NAME);
-      expect(span.attributes[ATTR_MCP_TOOL_NAME]).toBe('echo');
-      expect(span.attributes[ATTR_MCP_REQUEST_ID]).toBe('3');
-      expect(span.attributes[ATTR_MCP_TOOL_STATUS]).toBe(MCP_TOOL_STATUS.OK);
+      expect(span.name).toBe('tools/call echo');
+      expect(span.kind).toBe(SpanKind.SERVER);
+      expect(span.attributes[ATTR_MCP_METHOD_NAME]).toBe('tools/call');
+      expect(span.attributes[ATTR_GEN_AI_TOOL_NAME]).toBe('echo');
+      expect(span.attributes[ATTR_JSONRPC_REQUEST_ID]).toBe('3');
       expect(span.status.code).toBe(SpanStatusCode.OK);
     });
 
@@ -355,9 +403,8 @@ describe('instrumentMcpServer', () => {
 
       const [span] = memoryExporter.getFinishedSpans();
       expect(span.status.code).toBe(SpanStatusCode.ERROR);
-      expect(span.attributes[ATTR_MCP_TOOL_STATUS]).toBe(MCP_TOOL_STATUS.ERROR);
-      expect(span.attributes[ATTR_MCP_TOOL_ERROR_TYPE]).toBe('TypeError');
-      expect(span.attributes[ATTR_MCP_TOOL_ERROR_MESSAGE]).toBe('mcp boom');
+      expect(span.status.message).toBe('mcp boom');
+      expect(span.attributes[ATTR_ERROR_TYPE]).toBe('TypeError');
     });
 
     it('idempotency: instrumenting the outer McpServer twice is a no-op', async () => {

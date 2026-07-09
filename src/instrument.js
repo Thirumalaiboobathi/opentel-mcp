@@ -3,7 +3,7 @@
  */
 
 import { createRequire } from 'node:module';
-import { trace, SpanStatusCode } from '@opentelemetry/api';
+import { trace, SpanStatusCode, SpanKind } from '@opentelemetry/api';
 import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { NodeTracerProvider, SimpleSpanProcessor, BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
@@ -12,22 +12,24 @@ import { resourceFromAttributes } from '@opentelemetry/resources';
 import { resolveOptions } from './config.js';
 import { StderrSpanExporter } from './exporters/stderr.js';
 import {
-  ATTR_MCP_TOOL_NAME,
-  ATTR_MCP_REQUEST_ID,
+  ATTR_MCP_METHOD_NAME,
+  ATTR_GEN_AI_TOOL_NAME,
+  ATTR_GEN_AI_OPERATION_NAME,
+  ATTR_JSONRPC_REQUEST_ID,
   ATTR_MCP_TOOL_ARGUMENT_COUNT,
-  ATTR_MCP_TOOL_STATUS,
-  ATTR_MCP_TOOL_ERROR_TYPE,
-  ATTR_MCP_TOOL_ERROR_MESSAGE,
-  MCP_TOOL_STATUS,
-  MCP_TOOL_CALL_SPAN_NAME,
+  ATTR_ERROR_TYPE,
+  ERROR_TYPE_TOOL_ERROR,
+  GEN_AI_OPERATION_NAME_EXECUTE_TOOL,
+  MCP_METHOD_NAME_TOOLS_CALL,
 } from './attributes.js';
 
 const require = createRequire(import.meta.url);
 const { version: PACKAGE_VERSION } = require('../package.json');
 
 // Protocol-level JSON-RPC method name. Deliberately hardcoded rather than
-// derived from CallToolRequestSchema's zod internals — see ADR 001.
-const TOOLS_CALL_METHOD = 'tools/call';
+// derived from CallToolRequestSchema's zod internals — see ADR 001. Reused
+// as the mcp.method.name attribute value and span-name prefix (ADR 004).
+const TOOLS_CALL_METHOD = MCP_METHOD_NAME_TOOLS_CALL;
 
 // Symbol.for(): must be visible across duplicate installs of this package
 // (e.g. monorepos with dedup issues), not just within one module instance.
@@ -209,35 +211,52 @@ function setupTracer(server, resolved) {
  * the innermost layer relative to Server's own request/response validation
  * wrapping (see ADR 001), so the span times exactly the real handler logic.
  *
+ * Span shape follows the MCP semantic conventions' server span (ADR 004):
+ * name `{mcp.method.name} {target}` (falling back to just the method name
+ * when no tool name is available), kind SERVER, and status ERROR whenever
+ * error.type is set — which happens either because the handler threw, or
+ * because it resolved successfully but returned a CallToolResult with
+ * isError: true (a JSON-RPC-level success carrying a tool-level failure;
+ * the spec calls this error.type value "tool_error"). In the isError case
+ * the result is returned unchanged and nothing is thrown — the JSON-RPC
+ * call itself succeeded.
+ *
  * @param {Function} handler
  * @param {import('@opentelemetry/api').Tracer} tracer
  */
 function wrapToolCallHandler(handler, tracer) {
-  return (request, extra) =>
-    tracer.startActiveSpan(MCP_TOOL_CALL_SPAN_NAME, async (span) => {
-      const toolName = request?.params?.name;
+  return (request, extra) => {
+    const toolName = request?.params?.name;
+    const spanName = toolName ? `${TOOLS_CALL_METHOD} ${toolName}` : TOOLS_CALL_METHOD;
+
+    return tracer.startActiveSpan(spanName, { kind: SpanKind.SERVER }, async (span) => {
       const argumentCount = Object.keys(request?.params?.arguments ?? {}).length;
 
-      span.setAttribute(ATTR_MCP_TOOL_NAME, toolName);
+      span.setAttribute(ATTR_MCP_METHOD_NAME, TOOLS_CALL_METHOD);
+      span.setAttribute(ATTR_GEN_AI_OPERATION_NAME, GEN_AI_OPERATION_NAME_EXECUTE_TOOL);
+      span.setAttribute(ATTR_GEN_AI_TOOL_NAME, toolName);
       span.setAttribute(ATTR_MCP_TOOL_ARGUMENT_COUNT, argumentCount);
-      if (extra?.requestId !== undefined) {
-        span.setAttribute(ATTR_MCP_REQUEST_ID, String(extra.requestId));
+      if (extra?.requestId !== undefined && extra?.requestId !== null) {
+        span.setAttribute(ATTR_JSONRPC_REQUEST_ID, String(extra.requestId));
       }
 
       try {
         const result = await handler(request, extra);
-        span.setAttribute(ATTR_MCP_TOOL_STATUS, MCP_TOOL_STATUS.OK);
-        span.setStatus({ code: SpanStatusCode.OK });
+        if (result?.isError === true) {
+          span.setAttribute(ATTR_ERROR_TYPE, ERROR_TYPE_TOOL_ERROR);
+          span.setStatus({ code: SpanStatusCode.ERROR });
+        } else {
+          span.setStatus({ code: SpanStatusCode.OK });
+        }
         return result;
       } catch (err) {
         span.recordException(err);
         span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
-        span.setAttribute(ATTR_MCP_TOOL_STATUS, MCP_TOOL_STATUS.ERROR);
-        span.setAttribute(ATTR_MCP_TOOL_ERROR_TYPE, err?.name ?? 'Error');
-        span.setAttribute(ATTR_MCP_TOOL_ERROR_MESSAGE, err?.message ?? String(err));
+        span.setAttribute(ATTR_ERROR_TYPE, err?.name ?? 'Error');
         throw err;
       } finally {
         span.end();
       }
     });
+  };
 }
