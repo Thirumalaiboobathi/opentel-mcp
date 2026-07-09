@@ -1,12 +1,13 @@
 # opentel-mcp
 
 > OpenTelemetry instrumentation for Model Context Protocol (MCP) servers.
-> Zero-config visibility into which tools your AI agent is calling, how
+> One-line visibility into which tools your AI agent is calling, how
 > long they take, and which ones fail — via standard OTel traces.
 
 [![CI](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/opentel-mcp.svg)](https://www.npmjs.com/package/opentel-mcp)
 [![license](https://img.shields.io/npm/l/opentel-mcp.svg)](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/LICENSE)
+
+**Status: pre-release. Not yet published to npm.**
 
 ## Why
 
@@ -16,12 +17,6 @@ ran. opentel-mcp wraps any MCP server and emits one OTel span per tool
 invocation with rich attributes, using standard OpenTelemetry APIs so
 it plugs into your existing observability stack (Jaeger, Grafana Tempo,
 Honeycomb, Datadog, whatever).
-
-## Install
-
-```bash
-npm install opentel-mcp @opentelemetry/api
-```
 
 ## Quickstart (5-line usage)
 
@@ -65,25 +60,48 @@ server.tool('my-tool', async (args) => { /*...*/ });
 Either way, `instrumentMcpServer()` must run before any tool is
 registered — see "Ordering constraint" below.
 
+## Semantic conventions
+
+opentel-mcp follows the [MCP semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai)
+published by the OTel GenAI SIG (they moved there from the main
+`semantic-conventions` repo, where the MCP conventions are now marked
+deprecated). **That spec's status is Development, not Stable** — attribute
+names and requirement levels may still change upstream, and this package
+will follow suit when they do. See ADR 004 in `docs/adr/` for the full
+reasoning.
+
+One attribute, `mcp.tool.argument_count`, is **not** part of the spec — it's
+our own addition, documented as such in `src/attributes.js`. It's a
+privacy-preserving alternative to the spec's opt-in
+`gen_ai.tool.call.arguments`: it gives shape/anomaly signal (argument count
+changed) without capturing any argument values.
+
 ## Span attributes emitted
 
-| Attribute | Description | Example |
-|---|---|---|
-| mcp.tool.name | Tool name from request | "echo" |
-| mcp.tool.status | "ok" or "error" | "ok" |
-| mcp.tool.argument_count | Number of arguments (values not captured) | 2 |
-| mcp.request.id | JSON-RPC request id | "abc-123" |
-| mcp.tool.error.type | Error class name (on failure) | "TypeError" |
-| mcp.tool.error.message | Error message (on failure) | "Invalid input" |
+Span (server-side `tools/call` handling) follows the spec's MCP server
+span: name `{mcp.method.name} {tool name}` (e.g. `tools/call echo`, falling
+back to just `mcp.method.name` when no tool name is available), kind
+`SERVER`, status `ERROR` whenever `error.type` is set.
 
-Span name: `mcp.tool.call` (constant — low-cardinality per OTel best
-practice; use mcp.tool.name attribute for per-tool filtering).
+| Attribute | Requirement Level | Description | Example |
+|---|---|---|---|
+| mcp.method.name | Required | JSON-RPC method name | "tools/call" |
+| gen_ai.tool.name | Conditionally Required | Tool name from request | "echo" |
+| gen_ai.operation.name | Recommended | GenAI operation type | "execute_tool" |
+| jsonrpc.request.id | Conditionally Required | JSON-RPC request id (string) | "abc-123" |
+| error.type | Conditionally Required (on failure) | Error class name, or `"tool_error"` when the tool call itself returned `isError: true` | "TypeError" |
+| mcp.tool.argument_count | **Custom — not spec** | Number of arguments (values not captured) | 2 |
+
+Span status description carries the error message on failure (thrown
+errors); no separate error-message attribute is emitted — the spec
+expresses success/failure through span status, not a status attribute.
 
 ## Two modes
 
-**Zero-config (dev):** `setupNodeSdk: true` sets up a NodeTracerProvider
+**One-line (dev):** `setupNodeSdk: true` sets up a NodeTracerProvider
 that prints spans to stderr (safe alongside stdio-transport MCP servers —
 see ADR 003), optionally + an OTLP exporter if `exporterUrl` is provided.
+No separate OTel SDK setup needed — `serviceName` is still required.
 
 **Bring-your-own-SDK (prod):** Omit `setupNodeSdk` (default false).
 opentel-mcp uses whatever tracer provider you've already registered
@@ -108,12 +126,13 @@ See ADR 002 in docs/adr/ for why.
 
 ## Roadmap
 
-- v0.2: OTel metrics (invocation counter + duration histogram) alongside traces
-- v0.3: Client-side instrumentation + trace-context propagation via MCP's
-  `_meta` field, so a single trace can span the client call and the
-  server's tool execution
-- Future: alignment with OTel GenAI SIG's MCP semantic conventions
-  when published
+- v0.2: OTel metrics (`mcp.server.operation.duration`,
+  `mcp.server.session.duration`) alongside traces, plus opt-in
+  `gen_ai.tool.call.arguments` support with a redaction callback
+- v0.3: W3C trace context propagation via `params._meta` per
+  [SEP-414](https://modelcontextprotocol.io/community/seps/414-request-meta),
+  plus client-side instrumentation, so a single trace can span the client
+  call and the server's tool execution
 
 ## Contributing
 

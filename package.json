@@ -1,7 +1,7 @@
 {
   "name": "opentel-mcp",
   "version": "0.1.0",
-  "description": "Zero-config OpenTelemetry instrumentation for Model Context Protocol (MCP) servers",
+  "description": "One-line OpenTelemetry instrumentation for Model Context Protocol (MCP) servers",
   "type": "module",
   "main": "src/index.js",
   "exports": {

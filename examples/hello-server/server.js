@@ -11,10 +11,11 @@
  * client, pipe a single CallToolRequest in as one line of JSON — see
  * README.md for the exact command.
  *
- * You should see an OTel span (name "mcp.tool.call", mcp.tool.name "echo",
- * mcp.tool.status "ok") printed to stderr, and the JSON-RPC response on
- * stdout, untouched. setupNodeSdk's exporter writes to stderr specifically
- * so it's safe to run alongside StdioServerTransport — see ADR 003.
+ * You should see an OTel span (name "tools/call echo", kind SERVER,
+ * gen_ai.tool.name "echo", status OK) printed to stderr, and the JSON-RPC
+ * response on stdout, untouched. setupNodeSdk's exporter writes to stderr
+ * specifically so it's safe to run alongside StdioServerTransport — see
+ * ADR 003. Span shape follows the MCP semantic conventions — see ADR 004.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';

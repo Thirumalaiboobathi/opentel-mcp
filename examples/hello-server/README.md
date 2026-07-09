@@ -38,21 +38,30 @@ from running the command above, captured separately):
 ```
 {
   resource: { attributes: { 'service.name': 'hello-server' } },
-  traceId: 'a9571e998f8c302869cc269e066679c0',
-  name: 'mcp.tool.call',
-  id: 'd74d6d98328903b8',
-  timestamp: [ 1783581129, 100000000 ],
-  duration: [ 0, 3106818 ],
+  traceId: '358ebcd0e263f341006b5daf49fca357',
+  name: 'tools/call echo',
+  kind: 1,
+  id: '2ab8acbd7732fa8b',
+  timestamp: [ 1783599710, 354000000 ],
+  duration: [ 0, 2306889 ],
   attributes: {
-    'mcp.tool.name': 'echo',
+    'mcp.method.name': 'tools/call',
+    'gen_ai.operation.name': 'execute_tool',
+    'gen_ai.tool.name': 'echo',
     'mcp.tool.argument_count': 1,
-    'mcp.request.id': '1',
-    'mcp.tool.status': 'ok'
+    'jsonrpc.request.id': '1'
   },
   status: { code: 1 },
   events: []
 }
 ```
 
-`status.code: 1` is `SpanStatusCode.OK`. The tool's actual response is
-`{"echoed":"hello opentel-mcp"}`, visible in the stdout JSON-RPC result.
+`status.code: 1` is `SpanStatusCode.OK`. `kind: 1` is `SpanKind.SERVER`.
+The tool's actual response is `{"echoed":"hello opentel-mcp"}`, visible in
+the stdout JSON-RPC result.
+
+The span name (`tools/call echo`), kind (`SERVER`), and attribute names
+follow the [MCP semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai)
+(Development-stage spec) — see the main README's "Semantic conventions"
+section and ADR 004. `mcp.tool.argument_count` is opentel-mcp's own
+custom addition, not part of the spec.

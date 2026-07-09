@@ -16,6 +16,7 @@ export class StderrSpanExporter {
         resource: { attributes: span.resource.attributes },
         traceId: span.spanContext().traceId,
         name: span.name,
+        kind: span.kind,
         id: span.spanContext().spanId,
         timestamp: span.startTime,
         duration: span.duration,

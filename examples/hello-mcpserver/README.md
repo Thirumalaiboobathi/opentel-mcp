@@ -34,22 +34,27 @@ above):
 ```
 {
   resource: { attributes: { 'service.name': 'hello-mcpserver' } },
-  traceId: 'cb8417c1bdb5084c4b15b87a75358107',
-  name: 'mcp.tool.call',
-  id: '7b39c34450336ee3',
-  timestamp: [ 1783581466, 140000000 ],
-  duration: [ 0, 4796772 ],
+  traceId: '295f095cb5eb86da043cf9314bea63f4',
+  name: 'tools/call echo',
+  kind: 1,
+  id: '76b71d6bf184c089',
+  timestamp: [ 1783599723, 215000000 ],
+  duration: [ 0, 4830875 ],
   attributes: {
-    'mcp.tool.name': 'echo',
+    'mcp.method.name': 'tools/call',
+    'gen_ai.operation.name': 'execute_tool',
+    'gen_ai.tool.name': 'echo',
     'mcp.tool.argument_count': 1,
-    'mcp.request.id': '1',
-    'mcp.tool.status': 'ok'
+    'jsonrpc.request.id': '1'
   },
   status: { code: 1 },
   events: []
 }
 ```
 
-Identical shape to `examples/hello-server`'s span — proof that
-`instrumentMcpServer()` behaves the same regardless of which MCP server
-API you build on.
+`kind: 1` is `SpanKind.SERVER`. Identical shape to `examples/hello-server`'s
+span — proof that `instrumentMcpServer()` behaves the same regardless of
+which MCP server API you build on. Attribute names follow the [MCP semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai)
+(Development-stage spec) — see the main README's "Semantic conventions"
+section and ADR 004. `mcp.tool.argument_count` is opentel-mcp's own
+custom addition, not part of the spec.
