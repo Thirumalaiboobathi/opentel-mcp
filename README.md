@@ -5,9 +5,20 @@
 > long they take, and which ones fail — via standard OTel traces.
 
 [![CI](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/opentel-mcp.svg)](https://www.npmjs.com/package/opentel-mcp)
 [![license](https://img.shields.io/npm/l/opentel-mcp.svg)](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/LICENSE)
 
-**Status: pre-release. Not yet published to npm.**
+## Status
+
+`0.x` — the [MCP semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai)
+this library implements are Development-stage and may change. Breaking
+attribute changes will land in minor versions until `1.0`.
+
+## Install
+
+```bash
+npm install opentel-mcp @opentelemetry/api
+```
 
 ## Why
 
