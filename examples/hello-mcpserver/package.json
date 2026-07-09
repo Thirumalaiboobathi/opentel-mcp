@@ -1,0 +1,16 @@
+{
+  "name": "opentel-mcp-hello-mcpserver-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal McpServer (high-level API) demonstrating opentel-mcp instrumentation",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "opentel-mcp": "file:../..",
+    "zod": "^4.4.3"
+  }
+}

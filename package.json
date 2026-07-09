@@ -1,0 +1,60 @@
+{
+  "name": "opentel-mcp",
+  "version": "0.1.0",
+  "description": "Zero-config OpenTelemetry instrumentation for Model Context Protocol (MCP) servers",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "examples/hello-server",
+    "examples/hello-mcpserver"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "opentelemetry",
+    "otel",
+    "observability",
+    "tracing",
+    "ai-agents",
+    "claude"
+  ],
+  "author": "Thirumalaiboobathi B",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Thirumalaiboobathi/opentel-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Thirumalaiboobathi/opentel-mcp/issues"
+  },
+  "homepage": "https://github.com/Thirumalaiboobathi/opentel-mcp#readme",
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": ">=1.0.0",
+    "@opentelemetry/api": "^1.9.0"
+  },
+  "dependencies": {
+    "@opentelemetry/sdk-trace-node": "^2.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
+    "@opentelemetry/resources": "^2.9.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-trace-base": "^2.9.0"
+  }
+}
