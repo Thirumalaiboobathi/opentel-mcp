@@ -20,6 +20,9 @@ attribute changes will land in minor versions until `1.0`.
 npm install opentel-mcp @opentelemetry/api
 ```
 
+`opentel-mcp` is an ES module. Your project needs `"type": "module"` in
+its package.json, or you must use `.mjs` file extensions.
+
 ## Why
 
 When Claude Code calls 15 MCP tools across 3 servers, you have zero
