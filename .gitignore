@@ -6,5 +6,6 @@ coverage/
 *.log
 .DS_Store
 *.tgz
+package.json.workspaces-backup
 .claude/
 .spec-reference/

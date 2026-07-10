@@ -21,7 +21,9 @@
   ],
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepack": "node scripts/strip-workspaces.js",
+    "postpack": "node scripts/restore-workspaces.js"
   },
   "keywords": [
     "mcp",
