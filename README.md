@@ -42,7 +42,7 @@ const server = new Server({ name: 'my-server', version: '1.0.0' }, {
 });
 
 instrumentMcpServer(server, {
-  serviceName: 'my-mcp-server',
+  serviceName: 'my-mcp-server', // required because setupNodeSdk is true below
   setupNodeSdk: true,  // dev-friendly stderr output; omit in prod
                         // if you already have OTel configured
 });
@@ -60,7 +60,7 @@ import { instrumentMcpServer } from 'opentel-mcp';
 const server = new McpServer({ name: 'my-server', version: '1.0.0' });
 
 instrumentMcpServer(server, {
-  serviceName: 'my-mcp-server',
+  serviceName: 'my-mcp-server', // required because setupNodeSdk is true below
   setupNodeSdk: true,
 });
 
@@ -112,12 +112,16 @@ expresses success/failure through span status, not a status attribute.
 **One-line (dev):** `setupNodeSdk: true` sets up a NodeTracerProvider
 that prints spans to stderr (safe alongside stdio-transport MCP servers —
 see ADR 003), optionally + an OTLP exporter if `exporterUrl` is provided.
-No separate OTel SDK setup needed — `serviceName` is still required.
+No separate OTel SDK setup needed — `serviceName` is required in this
+mode, since it names the resource of the provider opentel-mcp creates.
 
 **Bring-your-own-SDK (prod):** Omit `setupNodeSdk` (default false).
 opentel-mcp uses whatever tracer provider you've already registered
 via `trace.setGlobalTracerProvider()`. This means it plugs into any
-existing OTel setup without conflict.
+existing OTel setup without conflict. In this mode the host's
+TracerProvider owns the resource, so `serviceName` is not needed and has
+no effect — set `service.name` on the host's Resource instead. Passing
+`serviceName` anyway is harmless but logs a one-time `diag.warn`.
 
 ## Ordering constraint
 

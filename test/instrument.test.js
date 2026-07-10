@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { trace, context, SpanStatusCode, SpanKind } from '@opentelemetry/api';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { trace, context, diag, SpanStatusCode, SpanKind } from '@opentelemetry/api';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { instrumentMcpServer } from '../src/instrument.js';
+import { __resetServiceNameWarnedForTests } from '../src/config.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_TOOL_NAME,
@@ -297,15 +298,52 @@ describe('instrumentMcpServer', () => {
     });
   });
 
-  describe('missing serviceName', () => {
-    it('throws when options.serviceName is undefined', () => {
+  describe('serviceName requirement depends on setupNodeSdk', () => {
+    it('setupNodeSdk: true + no serviceName -> throws', () => {
       const server = createServer();
-      expect(() => instrumentMcpServer(server, {})).toThrow(/serviceName/i);
+      expect(() => instrumentMcpServer(server, { setupNodeSdk: true })).toThrow(/serviceName/i);
     });
 
-    it('throws when options.serviceName is an empty string', () => {
+    it('setupNodeSdk: true + empty string serviceName -> throws', () => {
       const server = createServer();
-      expect(() => instrumentMcpServer(server, { serviceName: '' })).toThrow(/serviceName/i);
+      expect(() => instrumentMcpServer(server, { serviceName: '', setupNodeSdk: true })).toThrow(/serviceName/i);
+    });
+
+    it('setupNodeSdk: false + no serviceName -> does not throw, spans still emit', async () => {
+      const server = createServer();
+      expect(() => instrumentMcpServer(server, {})).not.toThrow();
+      server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [] }));
+
+      await invokeToolCall(server, { name: 'echo', arguments: {} });
+
+      expect(memoryExporter.getFinishedSpans()).toHaveLength(1);
+    });
+
+    it('setupNodeSdk: false + serviceName passed -> diag.warn fires exactly once per process, not once per server', async () => {
+      __resetServiceNameWarnedForTests();
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+
+      const serverA = createServer('a');
+      const serverB = createServer('b');
+      instrumentMcpServer(serverA, { serviceName: 'svc-a' });
+      instrumentMcpServer(serverB, { serviceName: 'svc-b' });
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toMatch(/serviceName was provided but setupNodeSdk is false/i);
+
+      warnSpy.mockRestore();
+    });
+
+    it('setupNodeSdk: true + serviceName -> no warning', () => {
+      __resetServiceNameWarnedForTests();
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc', setupNodeSdk: true });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+
+      warnSpy.mockRestore();
     });
   });
 
