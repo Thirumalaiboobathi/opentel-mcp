@@ -63,3 +63,25 @@ export const ATTR_MCP_TOOL_ARGUMENT_COUNT = 'mcp.tool.argument_count';
 
 export const ATTR_MCP_SERVER_NAME = 'mcp.server.name';
 export const ATTR_MCP_SERVER_VERSION = 'mcp.server.version';
+
+/**
+ * NOT part of the MCP semantic conventions. Our own addition, on the
+ * mcp.tool.duration histogram (see src/metrics.js): which of the three
+ * call outcomes a given duration measurement belongs to. The spec's
+ * mcp.server.operation.duration metric (not yet implemented here — see
+ * README roadmap) expresses failure only via error.type; this attribute
+ * additionally distinguishes "thrown/protocol error" from "silent failure"
+ * (isError: true) so both are visible on the same histogram without
+ * requiring a join against error.type, which silent failures don't set
+ * on the duration metric.
+ */
+export const ATTR_MCP_TOOL_OUTCOME = 'mcp.tool.outcome';
+
+/** Well-known mcp.tool.outcome value: the call succeeded. */
+export const MCP_TOOL_OUTCOME_SUCCESS = 'success';
+
+/** Well-known mcp.tool.outcome value: the handler threw or its promise rejected. */
+export const MCP_TOOL_OUTCOME_ERROR = 'error';
+
+/** Well-known mcp.tool.outcome value: isError: true (see ERROR_TYPE_TOOL_ERROR above). */
+export const MCP_TOOL_OUTCOME_SILENT_FAILURE = 'silent_failure';

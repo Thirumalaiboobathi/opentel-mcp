@@ -16,6 +16,10 @@ import { diag } from '@opentelemetry/api';
  *   Only takes effect when `setupNodeSdk` is true.
  * @property {boolean} [enabled=true] - Set to false to disable instrumentation entirely; instrumentMcpServer()
  *   becomes a no-op.
+ * @property {boolean} [enableMetrics=true] - Set to false to disable the mcp.tool.* metrics (tracing is
+ *   unaffected). Metrics are already a zero-overhead no-op when no MeterProvider is registered — the default
+ *   @opentelemetry/api behavior — so this flag exists for opting out even when one *is* registered, not as a
+ *   substitute for that default.
  * @property {boolean} [setupNodeSdk=false] - When true, instrumentMcpServer() creates and registers its own
  *   NodeTracerProvider (always exporting to stderr — safe alongside stdio-transport MCP servers, see ADR 003;
  *   additionally to `exporterUrl` via OTLP/HTTP if set). When false (the default), spans are emitted via
@@ -66,6 +70,7 @@ export function resolveOptions(options) {
     serviceName: opts.serviceName,
     exporterUrl: opts.exporterUrl,
     enabled: opts.enabled ?? true,
+    enableMetrics: opts.enableMetrics ?? true,
     setupNodeSdk,
   };
 }

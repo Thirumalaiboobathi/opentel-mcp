@@ -2,7 +2,8 @@
 
 > OpenTelemetry instrumentation for Model Context Protocol (MCP) servers.
 > One-line visibility into which tools your AI agent is calling, how
-> long they take, and which ones fail — via standard OTel traces.
+> long they take, and which ones fail — via standard OTel traces and
+> metrics.
 
 [![CI](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/opentel-mcp.svg)](https://www.npmjs.com/package/opentel-mcp)
@@ -169,6 +170,95 @@ Span status description carries the error message on failure (thrown
 errors); no separate error-message attribute is emitted — the spec
 expresses success/failure through span status, not a status attribute.
 
+## Metrics
+
+Alongside spans, opentel-mcp emits four `mcp.tool.*` metrics via
+`@opentelemetry/api`'s Metrics API — same API-only pattern as tracing (see
+"Two modes" below): no SDK or exporter is bundled, and recording is a
+zero-overhead no-op until the host application registers a
+`MeterProvider`. Set `enableMetrics: false` to opt out even when one is
+registered; tracing is unaffected either way.
+
+| Instrument | Type | Unit | Attributes | Emitted when |
+|---|---|---|---|---|
+| `mcp.tool.calls` | Counter | — | `gen_ai.tool.name`, `mcp.method.name` | Every tool call |
+| `mcp.tool.errors` | Counter | — | `gen_ai.tool.name`, `error.type` | The handler threw or its promise rejected |
+| `mcp.tool.silent_failures` | Counter | — | `gen_ai.tool.name` | The JSON-RPC response succeeded but `CallToolResult.isError` was `true` |
+| `mcp.tool.duration` | Histogram | `ms` | `gen_ai.tool.name`, `mcp.tool.outcome` (`success` \| `error` \| `silent_failure`) | Every tool call, on completion |
+
+`mcp.tool.silent_failures` is incremented from the exact same `isError`
+check that marks the span ERROR (see `isToolResultError()` in
+`src/instrument.js`) — the detection logic isn't duplicated between traces
+and metrics. `gen_ai.tool.name`, `mcp.method.name`, and `error.type` are
+the same spec-aligned attribute names the spans already use (see "Span
+attributes emitted" above); `mcp.tool.outcome` is a custom (non-spec)
+attribute, documented in `src/attributes.js`, that lets a single duration
+histogram distinguish thrown/protocol errors from silent failures without
+joining against `error.type`, which silent failures don't set on this
+metric.
+
+### Wiring a MeterProvider and TracerProvider (example: SigNoz)
+
+opentel-mcp never creates a `MeterProvider` itself (except the stderr/dev
+`setupNodeSdk: true` tracing path, which doesn't touch metrics) — register
+one the same way you would for any OTel-instrumented Node app, before
+calling `instrumentMcpServer()`. The same is true of the `TracerProvider`
+in bring-your-own-SDK mode (`setupNodeSdk: false`, the default): without
+registering one, `trace.getTracer()` inside opentel-mcp resolves to the
+`@opentelemetry/api` no-op default and spans are silently dropped, even
+though `mcp.tool.*` metrics keep flowing:
+
+```js
+import { metrics, trace } from '@opentelemetry/api';
+import { MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
+import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
+import { NodeTracerProvider, BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { resourceFromAttributes } from '@opentelemetry/resources';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { instrumentMcpServer } from 'opentel-mcp';
+
+const resource = resourceFromAttributes({ 'service.name': 'my-mcp-server' });
+
+const meterProvider = new MeterProvider({
+  resource,
+  readers: [
+    new PeriodicExportingMetricReader({
+      exporter: new OTLPMetricExporter({ url: 'http://localhost:4318/v1/metrics' }),
+    }),
+  ],
+});
+metrics.setGlobalMeterProvider(meterProvider);
+
+const tracerProvider = new NodeTracerProvider({
+  resource,
+  spanProcessors: [new BatchSpanProcessor(new OTLPTraceExporter({ url: 'http://localhost:4318/v1/traces' }))],
+});
+tracerProvider.register();
+
+const server = new Server({ name: 'my-server', version: '1.0.0' }, {
+  capabilities: { tools: {} },
+});
+
+instrumentMcpServer(server, {
+  // setupNodeSdk: false (default) — this example brings its own SDK for
+  // both signals: the MeterProvider above for metrics, and the
+  // NodeTracerProvider above — registered globally via
+  // tracerProvider.register(), which is what trace.getTracer() picks up —
+  // for traces.
+});
+```
+
+`http://localhost:4318` is SigNoz's default local OTLP/HTTP endpoint (both
+`/v1/metrics` and `/v1/traces`); point it at your collector/SigNoz
+ingestion endpoint in production. `@opentelemetry/sdk-metrics` and
+`@opentelemetry/exporter-metrics-otlp-http` are peer/host-app
+dependencies — opentel-mcp doesn't bundle them (see the peerDependencies
+note in `package.json`). `@opentelemetry/sdk-trace-node` and
+`@opentelemetry/exporter-trace-otlp-http`, by contrast, are already
+runtime dependencies of opentel-mcp itself (used by its `setupNodeSdk: true`
+dev path), so no extra install is needed to use them here.
+
 ## Two modes
 
 **One-line (dev):** `setupNodeSdk: true` sets up a NodeTracerProvider
@@ -203,10 +293,11 @@ See ADR 002 in docs/adr/ for why.
 
 ## Roadmap
 
-- v0.2: OTel metrics (`mcp.server.operation.duration`,
-  `mcp.server.session.duration`) alongside traces, plus opt-in
-  `gen_ai.tool.call.arguments` support with a redaction callback
-- v0.3: W3C trace context propagation via `params._meta` per
+- Shipped in v0.3: `mcp.tool.*` metrics (see "Metrics" above). Opt-in
+  `gen_ai.tool.call.arguments` support with a redaction callback, and the
+  spec's own `mcp.server.operation.duration` / `mcp.server.session.duration`
+  metrics, remain unimplemented — tracked here, not silently dropped.
+- Next: W3C trace context propagation via `params._meta` per
   [SEP-414](https://modelcontextprotocol.io/community/seps/414-request-meta),
   plus client-side instrumentation, so a single trace can span the client
   call and the server's tool execution

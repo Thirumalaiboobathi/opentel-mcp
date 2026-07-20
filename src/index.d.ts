@@ -33,6 +33,19 @@ export interface InstrumentOptions {
   enabled?: boolean;
 
   /**
+   * Set to `false` to disable the `mcp.tool.*` metrics. Tracing is
+   * unaffected.
+   *
+   * Metrics are already a zero-overhead no-op when no `MeterProvider` is
+   * registered (the default `@opentelemetry/api` behavior) — this flag is
+   * for opting out of metrics even when a `MeterProvider` **is**
+   * registered, not a substitute for that default.
+   *
+   * @default true
+   */
+  enableMetrics?: boolean;
+
+  /**
    * When `true`, {@link instrumentMcpServer} creates and registers its own
    * `NodeTracerProvider` (always exporting to stderr; additionally to
    * `exporterUrl` via OTLP/HTTP if set).

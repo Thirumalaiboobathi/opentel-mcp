@@ -11,6 +11,7 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { resolveOptions } from './config.js';
 import { StderrSpanExporter } from './exporters/stderr.js';
+import { setupMeter } from './metrics.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_TOOL_NAME,
@@ -21,6 +22,9 @@ import {
   ERROR_TYPE_TOOL_ERROR,
   GEN_AI_OPERATION_NAME_EXECUTE_TOOL,
   MCP_METHOD_NAME_TOOLS_CALL,
+  MCP_TOOL_OUTCOME_SUCCESS,
+  MCP_TOOL_OUTCOME_ERROR,
+  MCP_TOOL_OUTCOME_SILENT_FAILURE,
 } from './attributes.js';
 
 const require = createRequire(import.meta.url);
@@ -130,6 +134,7 @@ export function instrumentMcpServer(input, options) {
   assertInstrumentFirst(server);
 
   const tracer = setupTracer(server, resolved);
+  const metricsRecorder = resolved.enableMetrics ? setupMeter(PACKAGE_VERSION) : null;
   if (outer && server.shutdown) {
     outer.shutdown = server.shutdown;
   }
@@ -137,7 +142,7 @@ export function instrumentMcpServer(input, options) {
   const originalSetRequestHandler = server.setRequestHandler.bind(server);
   server.setRequestHandler = (schema, handler) => {
     if (schema === CallToolRequestSchema) {
-      handler = wrapToolCallHandler(handler, tracer);
+      handler = wrapToolCallHandler(handler, tracer, metricsRecorder);
     }
     return originalSetRequestHandler(schema, handler);
   };
@@ -207,9 +212,27 @@ function setupTracer(server, resolved) {
 }
 
 /**
- * Wraps a tools/call handler in a span covering its execution. This sits as
- * the innermost layer relative to Server's own request/response validation
- * wrapping (see ADR 001), so the span times exactly the real handler logic.
+ * True when `result` is a JSON-RPC-successful CallToolResult carrying a
+ * tool-level failure (isError: true) — the "silent failure" this package
+ * exists to catch (see the README's "Tool-level failures" section). Single
+ * source of truth for that detection: wrapToolCallHandler below keys both
+ * the span's status/error.type and the mcp.tool.silent_failures counter /
+ * mcp.tool.duration outcome off this same check, rather than repeating
+ * `result?.isError === true` at each call site.
+ *
+ * @param {*} result
+ * @returns {boolean}
+ */
+function isToolResultError(result) {
+  return result?.isError === true;
+}
+
+/**
+ * Wraps a tools/call handler in a span covering its execution, plus the
+ * mcp.tool.* metrics (see src/metrics.js). This sits as the innermost layer
+ * relative to Server's own request/response validation wrapping (see ADR
+ * 001), so both the span and the duration measurement time exactly the
+ * real handler logic.
  *
  * Span shape follows the MCP semantic conventions' server span (ADR 004):
  * name `{mcp.method.name} {target}` (falling back to just the method name
@@ -217,14 +240,15 @@ function setupTracer(server, resolved) {
  * error.type is set — which happens either because the handler threw, or
  * because it resolved successfully but returned a CallToolResult with
  * isError: true (a JSON-RPC-level success carrying a tool-level failure;
- * the spec calls this error.type value "tool_error"). In the isError case
- * the result is returned unchanged and nothing is thrown — the JSON-RPC
- * call itself succeeded.
+ * the spec calls this error.type value "tool_error", see
+ * isToolResultError() above). In the isError case the result is returned
+ * unchanged and nothing is thrown — the JSON-RPC call itself succeeded.
  *
  * @param {Function} handler
  * @param {import('@opentelemetry/api').Tracer} tracer
+ * @param {ReturnType<import('./metrics.js').setupMeter> | null} metricsRecorder
  */
-function wrapToolCallHandler(handler, tracer) {
+function wrapToolCallHandler(handler, tracer, metricsRecorder) {
   return (request, extra) => {
     const toolName = request?.params?.name;
     const spanName = toolName ? `${TOOLS_CALL_METHOD} ${toolName}` : TOOLS_CALL_METHOD;
@@ -240,19 +264,28 @@ function wrapToolCallHandler(handler, tracer) {
         span.setAttribute(ATTR_JSONRPC_REQUEST_ID, String(extra.requestId));
       }
 
+      metricsRecorder?.recordCall(toolName);
+      const startTime = performance.now();
+
       try {
         const result = await handler(request, extra);
-        if (result?.isError === true) {
+        if (isToolResultError(result)) {
           span.setAttribute(ATTR_ERROR_TYPE, ERROR_TYPE_TOOL_ERROR);
           span.setStatus({ code: SpanStatusCode.ERROR });
+          metricsRecorder?.recordSilentFailure(toolName);
+          metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_SILENT_FAILURE);
         } else {
           span.setStatus({ code: SpanStatusCode.OK });
+          metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_SUCCESS);
         }
         return result;
       } catch (err) {
         span.recordException(err);
         span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
-        span.setAttribute(ATTR_ERROR_TYPE, err?.name ?? 'Error');
+        const errorType = err?.name ?? 'Error';
+        span.setAttribute(ATTR_ERROR_TYPE, errorType);
+        metricsRecorder?.recordError(toolName, errorType);
+        metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_ERROR);
         throw err;
       } finally {
         span.end();
