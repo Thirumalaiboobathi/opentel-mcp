@@ -12,6 +12,8 @@ import { resourceFromAttributes } from '@opentelemetry/resources';
 import { resolveOptions } from './config.js';
 import { StderrSpanExporter } from './exporters/stderr.js';
 import { setupMeter } from './metrics.js';
+import { computeFingerprint } from './fingerprint/compose.js';
+import { toSpanAttributes } from './fingerprint/attributes.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_TOOL_NAME,
@@ -142,7 +144,7 @@ export function instrumentMcpServer(input, options) {
   const originalSetRequestHandler = server.setRequestHandler.bind(server);
   server.setRequestHandler = (schema, handler) => {
     if (schema === CallToolRequestSchema) {
-      handler = wrapToolCallHandler(handler, tracer, metricsRecorder);
+      handler = wrapToolCallHandler(handler, tracer, metricsRecorder, resolved.fingerprinting);
     }
     return originalSetRequestHandler(schema, handler);
   };
@@ -244,11 +246,19 @@ function isToolResultError(result) {
  * isToolResultError() above). In the isError case the result is returned
  * unchanged and nothing is thrown — the JSON-RPC call itself succeeded.
  *
+ * When `fingerprintingEnabled` is true (see config.js's `fingerprinting`
+ * option), both failure branches below additionally run the result/error
+ * through computeFingerprint() (src/fingerprint/compose.js), attaching
+ * mcp.failure.* span attributes (src/fingerprint/attributes.js) and
+ * threading the resulting failure category into the mcp.tool.errors /
+ * mcp.tool.silent_failures / mcp.tool.duration metrics.
+ *
  * @param {Function} handler
  * @param {import('@opentelemetry/api').Tracer} tracer
  * @param {ReturnType<import('./metrics.js').setupMeter> | null} metricsRecorder
+ * @param {boolean} fingerprintingEnabled
  */
-function wrapToolCallHandler(handler, tracer, metricsRecorder) {
+function wrapToolCallHandler(handler, tracer, metricsRecorder, fingerprintingEnabled) {
   return (request, extra) => {
     const toolName = request?.params?.name;
     const spanName = toolName ? `${TOOLS_CALL_METHOD} ${toolName}` : TOOLS_CALL_METHOD;
@@ -266,14 +276,27 @@ function wrapToolCallHandler(handler, tracer, metricsRecorder) {
 
       metricsRecorder?.recordCall(toolName);
       const startTime = performance.now();
+      const cwd = process.cwd();
 
       try {
         const result = await handler(request, extra);
         if (isToolResultError(result)) {
           span.setAttribute(ATTR_ERROR_TYPE, ERROR_TYPE_TOOL_ERROR);
           span.setStatus({ code: SpanStatusCode.ERROR });
-          metricsRecorder?.recordSilentFailure(toolName);
-          metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_SILENT_FAILURE);
+
+          let failureCategory = '';
+          if (fingerprintingEnabled) {
+            const failure = computeFingerprint(result, { toolName, origin: 'tool_error', cwd });
+            span.setAttributes(toSpanAttributes(failure));
+            failureCategory = failure.category;
+          }
+          metricsRecorder?.recordSilentFailure(toolName, failureCategory);
+          metricsRecorder?.recordDuration(
+            toolName,
+            performance.now() - startTime,
+            MCP_TOOL_OUTCOME_SILENT_FAILURE,
+            failureCategory,
+          );
         } else {
           span.setStatus({ code: SpanStatusCode.OK });
           metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_SUCCESS);
@@ -284,8 +307,15 @@ function wrapToolCallHandler(handler, tracer, metricsRecorder) {
         span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
         const errorType = err?.name ?? 'Error';
         span.setAttribute(ATTR_ERROR_TYPE, errorType);
-        metricsRecorder?.recordError(toolName, errorType);
-        metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_ERROR);
+
+        let failureCategory = '';
+        if (fingerprintingEnabled) {
+          const failure = computeFingerprint(err, { toolName, origin: 'thrown', cwd });
+          span.setAttributes(toSpanAttributes(failure));
+          failureCategory = failure.category;
+        }
+        metricsRecorder?.recordError(toolName, errorType, failureCategory);
+        metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_ERROR, failureCategory);
         throw err;
       } finally {
         span.end();

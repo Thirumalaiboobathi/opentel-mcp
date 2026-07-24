@@ -26,6 +26,13 @@ import { diag } from '@opentelemetry/api';
  *   whatever OpenTelemetry TracerProvider the host application
  *   has already registered globally — or dropped silently if none has been registered. This default keeps
  *   instrumentMcpServer() from ever overriding a host application's own OpenTelemetry setup.
+ * @property {boolean} [fingerprinting=true] - Set to false to disable deep-failure fingerprinting. When enabled
+ *   (the default), every thrown error and tool-level failure (isError: true) is run through
+ *   src/fingerprint/compose.js's computeFingerprint(), adding mcp.failure.* span attributes and an
+ *   mcp.failure.category attribute on the mcp.tool.errors / mcp.tool.silent_failures / mcp.tool.duration
+ *   metrics (see src/fingerprint/attributes.js). computeFingerprint() never throws, so this only trades a
+ *   small amount of per-failure CPU (see the p99 < 200µs budget in test/fingerprint/benchmark.test.js) for
+ *   fingerprinting.
  */
 
 // Guards the "serviceName has no effect" diagnostic below so it fires once
@@ -72,5 +79,6 @@ export function resolveOptions(options) {
     enabled: opts.enabled ?? true,
     enableMetrics: opts.enableMetrics ?? true,
     setupNodeSdk,
+    fingerprinting: opts.fingerprinting ?? true,
   };
 }

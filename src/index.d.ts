@@ -108,3 +108,20 @@ export function instrumentMcpServer<T extends Server | McpServer | DuckTypedMcpS
   server: T,
   options?: InstrumentOptions,
 ): T & { shutdown?: () => Promise<void> };
+
+// --- Deep-failure fingerprinting (src/fingerprint/) ---
+//
+// Re-exported here so TypeScript consumers get these types/values from the
+// package root instead of reaching into src/fingerprint/* directly. See
+// src/fingerprint/types.d.ts for the full shape documentation.
+
+export type {
+  FailureCategory,
+  FailureOrigin,
+  FingerprintResult,
+  FingerprintInputs,
+} from './fingerprint/types.d.ts';
+
+export { computeFingerprint } from './fingerprint/compose.js';
+export { toSpanAttributes, ATTRIBUTE_KEYS, METRIC_SAFE_ATTRIBUTES } from './fingerprint/attributes.js';
+export { DEFAULT_CLASSIFIERS } from './fingerprint/classify/index.js';

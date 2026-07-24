@@ -19,6 +19,14 @@
  * with setupTracer(), setupMeter() must run after the host application has
  * registered its MeterProvider (the same ordering the README already
  * documents for tracing).
+ *
+ * There are two, unrelated attributes.js files in this package: this
+ * module's sibling ./attributes.js holds the MCP-semconv span/metric
+ * attribute constants (ATTR_ERROR_TYPE, ATTR_MCP_TOOL_OUTCOME, ...);
+ * ./fingerprint/attributes.js holds the separate failure-classification
+ * attribute keys (mcp.failure.category, ...) added by the fingerprinting
+ * feature. They are deliberately not merged — see that module's own
+ * docblock for why.
  */
 
 import { metrics } from '@opentelemetry/api';
@@ -29,18 +37,26 @@ import {
   ATTR_MCP_TOOL_OUTCOME,
   MCP_METHOD_NAME_TOOLS_CALL,
 } from './attributes.js';
+import { ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
 
 /**
  * Creates the mcp.tool.* instruments and returns small record*() wrappers
  * around them, keyed to the well-known attribute names above so call
  * sites in instrument.js never construct attribute bags by hand.
  *
+ * `failureCategory` (recordError, recordSilentFailure, recordDuration) is
+ * optional and, when a non-empty string, adds ATTRIBUTE_KEYS.CATEGORY
+ * (mcp.failure.category — see ./fingerprint/attributes.js) to the
+ * attribute bag. It's the one fingerprint attribute low-cardinality
+ * enough to be metric-safe (see METRIC_SAFE_ATTRIBUTES); callers omit it
+ * (or pass '') when fingerprinting is disabled or produced no category.
+ *
  * @param {string} packageVersion
  * @returns {{
  *   recordCall: (toolName: string | undefined) => void,
- *   recordError: (toolName: string | undefined, errorType: string) => void,
- *   recordSilentFailure: (toolName: string | undefined) => void,
- *   recordDuration: (toolName: string | undefined, durationMs: number, outcome: string) => void,
+ *   recordError: (toolName: string | undefined, errorType: string, failureCategory?: string) => void,
+ *   recordSilentFailure: (toolName: string | undefined, failureCategory?: string) => void,
+ *   recordDuration: (toolName: string | undefined, durationMs: number, outcome: string, failureCategory?: string) => void,
  * }}
  */
 export function setupMeter(packageVersion) {
@@ -68,19 +84,24 @@ export function setupMeter(packageVersion) {
         [ATTR_MCP_METHOD_NAME]: MCP_METHOD_NAME_TOOLS_CALL,
       });
     },
-    recordError(toolName, errorType) {
+    recordError(toolName, errorType, failureCategory) {
       errors.add(1, {
         [ATTR_GEN_AI_TOOL_NAME]: toolName,
         [ATTR_ERROR_TYPE]: errorType,
+        ...(failureCategory ? { [ATTRIBUTE_KEYS.CATEGORY]: failureCategory } : {}),
       });
     },
-    recordSilentFailure(toolName) {
-      silentFailures.add(1, { [ATTR_GEN_AI_TOOL_NAME]: toolName });
+    recordSilentFailure(toolName, failureCategory) {
+      silentFailures.add(1, {
+        [ATTR_GEN_AI_TOOL_NAME]: toolName,
+        ...(failureCategory ? { [ATTRIBUTE_KEYS.CATEGORY]: failureCategory } : {}),
+      });
     },
-    recordDuration(toolName, durationMs, outcome) {
+    recordDuration(toolName, durationMs, outcome, failureCategory) {
       duration.record(durationMs, {
         [ATTR_GEN_AI_TOOL_NAME]: toolName,
         [ATTR_MCP_TOOL_OUTCOME]: outcome,
+        ...(failureCategory ? { [ATTRIBUTE_KEYS.CATEGORY]: failureCategory } : {}),
       });
     },
   };
