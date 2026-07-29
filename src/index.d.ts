@@ -1,5 +1,6 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CostTrackingOptions } from './cost/types.d.ts';
 
 /**
  * Options for {@link instrumentMcpServer}.
@@ -59,6 +60,14 @@ export interface InstrumentOptions {
    * @default false
    */
   setupNodeSdk?: boolean;
+
+  /**
+   * Controls the `mcp.tool.tokens.*` / `mcp.tool.model` / `mcp.tool.cost.*` span attributes, the
+   * `mcp.tool.tokens.total` / `mcp.tool.cost.total` metrics, and the optional per-session/per-tool budget
+   * guardrail. Any fields you omit from a partial object fall back to their defaults individually —
+   * `{ enabled: false }` alone works. See {@link CostTrackingOptions} (`src/cost/types.d.ts`).
+   */
+  costTracking?: CostTrackingOptions;
 }
 
 /**
@@ -125,3 +134,21 @@ export type {
 export { computeFingerprint } from './fingerprint/compose.js';
 export { toSpanAttributes, ATTRIBUTE_KEYS, METRIC_SAFE_ATTRIBUTES } from './fingerprint/attributes.js';
 export { DEFAULT_CLASSIFIERS } from './fingerprint/classify/index.js';
+
+// --- Cost & token attribution (src/cost/) ---
+//
+// Re-exported here so TypeScript consumers get these types/values from the
+// package root instead of reaching into src/cost/* directly. See
+// src/cost/types.d.ts for the full shape documentation.
+
+export type {
+  ModelPricing,
+  PricingTable,
+  UsageExtractor,
+  TokenUsage,
+  CostTrackingOptions,
+} from './cost/types.d.ts';
+
+export { DEFAULT_PRICING } from './cost/pricing.js';
+export { defaultExtractor } from './cost/extractor.js';
+export { calculateCost } from './cost/calculator.js';

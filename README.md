@@ -1,7 +1,7 @@
 # opentel-mcp
 
 > Turn every MCP tool call into an OpenTelemetry trace — including the
-> failures your logs won't show you.
+> failures your logs won't show you, and what it cost in LLM tokens.
 
 [![CI](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/opentel-mcp.svg)](https://www.npmjs.com/package/opentel-mcp)
@@ -9,10 +9,14 @@
 [![license](https://img.shields.io/npm/l/opentel-mcp.svg)](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/LICENSE)
 
 opentel-mcp watches every tool call your MCP (Model Context Protocol)
-server handles: which tool ran, how long it took, and whether it worked.
-It reports that as OpenTelemetry (OTel) traces — the standard most
-dashboards already read. One function call; no changes to your tools'
-code.
+server handles: which tool ran, how long it took, whether it worked, and —
+when the tool result carries usage data — how many tokens it burned and
+what that cost. It reports all of that as OpenTelemetry (OTel) traces —
+the standard most dashboards already read. One function call; no changes
+to your tools' code.
+
+opentel-mcp is the only Node.js MCP instrumentation library that ties
+tool calls to LLM cost.
 
 ## The problem
 
@@ -288,6 +292,134 @@ examples/fingerprint-demo.js`). Not yet wired through
 `computeFingerprint` directly rather than configuring the automatic
 per-call-site wrapping; tracked in the roadmap below.
 
+## Cost & Token Attribution (v0.5.0)
+
+MCP tools increasingly wrap LLM calls themselves — a tool that
+summarizes a document, drafts a reply, or classifies a ticket usually
+does it by calling out to a model, and that call has a real dollar cost.
+Standard MCP/OTel instrumentation has no opinion on any of this: a trace
+shows a tool ran in 800ms and succeeded, with nothing about which model
+it used, how many tokens it burned, or what that cost. That's the AI
+FinOps gap in MCP observability today — cost and usage data exists
+inside the tool call, but nothing carries it out to your traces. opentel-mcp
+closes it: when a tool result carries recognizable usage data, the same
+span your other instrumentation already reads also gets token counts, the
+detected model, and an estimated USD cost.
+
+### Zero-config quick-start
+
+```js
+import { instrumentMcpServer } from 'opentel-mcp';
+
+instrumentMcpServer(server, {
+  serviceName: 'my-mcp-server',
+  setupNodeSdk: true, // dev mode: prints traces to your terminal
+});
+```
+
+That's it — `costTracking` defaults to enabled. Any tool result whose
+usage data matches one of `defaultExtractor`'s recognized conventions
+(Anthropic's `usage.input_tokens`/`usage.output_tokens`, OpenAI's
+`usage.prompt_tokens`/`usage.completion_tokens`, Bedrock's
+`usage.inputTokens`/`usage.outputTokens`, the MCP `_meta.usage` extension
+point, or JSON-in-text inside `content[0].text`) automatically gets
+`mcp.tool.tokens.*` / `mcp.tool.model` / `mcp.tool.cost.*` span
+attributes, priced against `DEFAULT_PRICING`.
+
+### Advanced: custom pricing, a custom extractor, and a budget guardrail
+
+```js
+import { instrumentMcpServer, DEFAULT_PRICING } from 'opentel-mcp';
+
+instrumentMcpServer(server, {
+  serviceName: 'my-mcp-server',
+  costTracking: {
+    // Extend or override DEFAULT_PRICING — e.g. price an internal model
+    // it doesn't know about, or correct stale numbers.
+    pricingTable: {
+      ...DEFAULT_PRICING,
+      'my-internal-model': { inputPer1M: 1.0, outputPer1M: 2.0, currency: 'USD' },
+    },
+    // Recognize your own tool result shape. Return null for anything you
+    // don't recognize — never throw (see src/cost/extractor.js).
+    extractor: (toolResult) => {
+      if (!toolResult?.tokenStats) return null;
+      const { in: inputTokens, out: outputTokens, modelId } = toolResult.tokenStats;
+      return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, model: modelId };
+    },
+    // Observability guardrail, NOT enforcement — opentel-mcp never blocks
+    // or throws on a budget overrun, it just flags the span.
+    budget: {
+      perSessionUsd: 5, // flag once one MCP session's calls total > $5
+      perToolUsd: 1, // ...or once any single tool's calls total > $1
+    },
+  },
+});
+```
+
+### Span attributes
+
+| Attribute | Standard OTel? | Description | Example |
+|---|---|---|---|
+| `mcp.tool.tokens.input` | Custom | Input tokens consumed | 1000 |
+| `mcp.tool.tokens.output` | Custom | Output tokens produced | 500 |
+| `mcp.tool.tokens.total` | Custom | input + output | 1500 |
+| `mcp.tool.model` | Custom | Detected model name | "claude-sonnet-5" |
+| `gen_ai.response.model` | Standard (GenAI semconv)[^5] | Same value as `mcp.tool.model`, co-emitted for dashboard compatibility | "claude-sonnet-5" |
+| `mcp.tool.cost.usd` | Custom | Estimated cost, from `calculateCost()` | 0.0105 |
+| `mcp.tool.cost.currency` | Custom | Always `"USD"` today | "USD" |
+| `mcp.tool.cost.budget_exceeded` | Custom | `true` once a configured `costTracking.budget` limit is crossed | true |
+| `mcp.tool.cost.budget_scope` | Custom | Which budget scope tripped: `"session"` \| `"tool"` (session wins if both did) | "session" |
+
+[^5]: `gen_ai.response.model` is a real OTel GenAI semantic convention attribute ("the name of the model that generated the response") — but this span is an MCP tool-call span (`gen_ai.operation.name: execute_tool`), not a dedicated LLM request/response span, so co-emitting it here is a **pragmatic dashboard-compatibility choice, not a spec-pure emission**. It's set purely so off-the-shelf GenAI dashboards (Grafana, SigNoz, Honeycomb) that filter/group by `gen_ai.response.model` pick these spans up without any opentel-mcp-specific configuration. Full reasoning in `src/attributes.js`'s `ATTR_GEN_AI_RESPONSE_MODEL` docblock.
+
+The four token/model attributes are set together or not at all; the two
+cost attributes only appear when a model was detected *and* it resolves
+in the configured `pricingTable`; the two budget attributes only appear
+when a cost was calculated *and* a configured limit was crossed. Source
+of truth: `src/attributes.js` and `src/instrument.js`'s
+`applyCostAttribution()`.
+
+### Metrics
+
+Two more `mcp.tool.*` metrics, via the same API-only pattern as the four
+in "Metrics" above — nothing recorded until a `MeterProvider` is
+registered, `enableMetrics: false` opts out of these too.
+
+| Metric | Type | Unit | Attributes | Emitted when |
+|---|---|---|---|---|
+| `mcp.tool.tokens.total` | Counter | tokens | `gen_ai.tool.name`, `mcp.tool.model`[^6] | Usage detected in the tool result |
+| `mcp.tool.cost.total` | Counter | USD | `gen_ai.tool.name`, `mcp.tool.model`[^6] | Cost calculated (model resolved in `pricingTable`) |
+
+[^6]: `mcp.tool.model` is only added when a model was detected — the same optional-attribute cardinality pattern `mcp.failure.category` already uses on the other four metrics.
+
+### Pricing accuracy
+
+> **Pricing table last verified 2026-07-29.** Users **MUST** override
+> `pricingTable` for production accuracy — provider pricing changes
+> frequently and opentel-mcp does not guarantee `DEFAULT_PRICING` stays
+> current.
+
+`DEFAULT_PRICING` (`src/cost/pricing.js`) covers 15+ models across five
+providers — Anthropic, OpenAI, Google, AWS Bedrock, and DeepSeek — as a
+convenience default, not a maintained price list.
+
+### Extending it
+
+- `defaultExtractor` (also exported) recognizes the five conventions
+  listed under "Zero-config quick-start" above; pass your own
+  `costTracking.extractor` (a `UsageExtractor`: `(toolResult) =>
+  TokenUsage | null`, never throwing) to recognize anything else.
+- `calculateCost(inputTokens, outputTokens, model, pricingTable)` is also
+  exported directly, for recomputing cost outside the instrumentation
+  hot path (e.g. over historical spans).
+- Disable everything in this section with `costTracking: { enabled:
+  false }`; tracing, metrics, and fingerprinting are all unaffected.
+- Budget tracking (`costTracking.budget`) is in-memory and per
+  `instrumentMcpServer()` call — it resets on process restart, and
+  session-scoped limits are skipped gracefully (not enforced against a
+  fallback key) for transports with no session id, like stdio.
+
 ## Configuration
 
 All options passed to `instrumentMcpServer(server, options)`. Source of
@@ -301,7 +433,9 @@ truth: `src/config.js`.
 | `enabled` | boolean | `true` | `false` disables all instrumentation |
 | `enableMetrics` | boolean | `true` | `false` disables `mcp.tool.*` metrics only |
 | `fingerprinting` | boolean | `true` | `false` disables `mcp.failure.*` attributes |
+| `costTracking` | object | see below | Controls cost/token attribution[^9] — see "Cost & Token Attribution" above |
 
+[^9]: `{ enabled?: boolean; pricingTable?: PricingTable; extractor?: UsageExtractor; budget?: { perSessionUsd?: number; perToolUsd?: number } }`, all fields optional and individually defaulted — `{ enabled: true, pricingTable: DEFAULT_PRICING, extractor: defaultExtractor }` with budget tracking off.
 [^2]: Required only when `setupNodeSdk` is `true`. Has no effect otherwise — the host app's registered `TracerProvider` owns the resource; passing it anyway logs a one-time `diag.warn`.
 [^3]: Creates and registers a `NodeTracerProvider` that always prints to stderr (safe alongside stdio-transport servers — ADR 003), additionally exporting via OTLP/HTTP if `exporterUrl` is set.
 [^4]: Only takes effect when `setupNodeSdk` is `true`.
@@ -348,13 +482,20 @@ until `1.0`, tracked in release notes rather than silently shipped.
 
 opentel-mcp follows those conventions (published by the OTel GenAI SIG,
 moved there from the main `semantic-conventions` repo, where the MCP
-conventions are now deprecated) for everything they define, and adds two
+conventions are now deprecated) for everything they define, and adds
 namespaces of its own where they don't yet: `mcp.tool.*` (call-count and
-duration metrics) and `mcp.failure.*` (failure fingerprinting). Both are
+duration metrics, and — as of v0.5.0 — token/cost attribution and budget
+attributes) and `mcp.failure.*` (failure fingerprinting). Both are
 documented as non-spec at every attribute (`src/attributes.js`,
 `src/fingerprint/attributes.js`), and are candidates to fold into the
 spec's own metrics/error vocabulary if it grows an equivalent. Full
 reasoning: ADR 004 in `docs/adr/`.
+
+One exception, also in `src/attributes.js`: `gen_ai.response.model` *is*
+a real spec attribute, co-emitted alongside the custom `mcp.tool.model`
+purely for compatibility with GenAI dashboards that already query it —
+see the "Cost & Token Attribution" section above for why that's a
+pragmatic choice rather than a spec-pure one.
 
 ## Compatibility
 
@@ -364,16 +505,16 @@ reasoning: ADR 004 in `docs/adr/`.
 - Supports both low-level `Server` and high-level `McpServer` APIs
 - @modelcontextprotocol/sdk ^1.0.0
 - @opentelemetry/api ^1.9.0
-- 127 tests (`npm test`) — see `test/`
+- 288 tests (`npm test`) — see `test/`
 
 ## Roadmap
 
 - v0.4: Deep Failure Fingerprinting ✓ — see "Failure Fingerprinting" above
   and ADR 006.
-- v0.5: Failure clustering + regression detection
-- Future: recovery hints, root-cause chaining across parent spans,
-  alignment with the OTel GenAI SIG's MCP semantic conventions when
-  published
+- v0.5: Cost & Token Attribution ✓ — see "Cost & Token Attribution" above.
+- Future: failure clustering + regression detection; recovery hints;
+  root-cause chaining across parent spans; alignment with the OTel GenAI
+  SIG's MCP semantic conventions when published
 - Also still tracked, not silently dropped: exposing `computeFingerprint`'s
   `classifiers`/`stackFrames` options through `instrumentMcpServer()`
   itself; opt-in `gen_ai.tool.call.arguments` support with a redaction

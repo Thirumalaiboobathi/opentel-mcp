@@ -4,6 +4,23 @@
  */
 
 import { diag } from '@opentelemetry/api';
+import { DEFAULT_PRICING } from './cost/pricing.js';
+import { defaultExtractor } from './cost/extractor.js';
+
+/**
+ * @typedef {object} CostTrackingOptions
+ * @property {boolean} [enabled=true] - Set to false to disable cost/token span attributes and the
+ *   mcp.tool.tokens.total / mcp.tool.cost.total metrics entirely.
+ * @property {import('./cost/pricing.js').PricingTable} [pricingTable] - Overrides DEFAULT_PRICING
+ *   (src/cost/pricing.js). Supply your own table to price models DEFAULT_PRICING doesn't know about, or to
+ *   correct stale pricing — see that module's docblock.
+ * @property {import('./cost/extractor.js').UsageExtractor} [extractor] - Overrides defaultExtractor
+ *   (src/cost/extractor.js). Supply your own to recognize a tool result shape defaultExtractor doesn't.
+ * @property {import('./cost/budget.js').BudgetConfig} [budget] - Per-session and per-tool cumulative-cost
+ *   guardrails (src/cost/budget.js). Observability only — crossing a limit adds
+ *   mcp.tool.cost.budget_exceeded / mcp.tool.cost.budget_scope span attributes; it never blocks or throws.
+ *   Omit to disable budget tracking (the default).
+ */
 
 /**
  * @typedef {object} InstrumentOptions
@@ -33,6 +50,12 @@ import { diag } from '@opentelemetry/api';
  *   metrics (see src/fingerprint/attributes.js). computeFingerprint() never throws, so this only trades a
  *   small amount of per-failure CPU (see the p99 < 200µs budget in test/fingerprint/benchmark.test.js) for
  *   fingerprinting.
+ * @property {CostTrackingOptions} [costTracking] - Controls the mcp.tool.tokens.* / mcp.tool.model /
+ *   mcp.tool.cost.* span attributes, the mcp.tool.tokens.total / mcp.tool.cost.total metrics, and the
+ *   optional per-session/per-tool budget guardrail (see instrument.js's applyCostAttribution(),
+ *   src/metrics.js, and src/cost/budget.js). Defaults to `{ enabled: true, pricingTable: DEFAULT_PRICING,
+ *   extractor: defaultExtractor }` with budget tracking off; any fields you omit from a partial object fall
+ *   back to those defaults individually, so `{ enabled: false }` alone works.
  */
 
 // Guards the "serviceName has no effect" diagnostic below so it fires once
@@ -73,6 +96,8 @@ export function resolveOptions(options) {
     );
   }
 
+  const rawCostTracking = opts.costTracking ?? {};
+
   return {
     serviceName: opts.serviceName,
     exporterUrl: opts.exporterUrl,
@@ -80,5 +105,11 @@ export function resolveOptions(options) {
     enableMetrics: opts.enableMetrics ?? true,
     setupNodeSdk,
     fingerprinting: opts.fingerprinting ?? true,
+    costTracking: {
+      enabled: rawCostTracking.enabled ?? true,
+      pricingTable: rawCostTracking.pricingTable ?? DEFAULT_PRICING,
+      extractor: rawCostTracking.extractor ?? defaultExtractor,
+      budget: rawCostTracking.budget,
+    },
   };
 }

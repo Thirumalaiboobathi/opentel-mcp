@@ -35,6 +35,7 @@ import {
   ATTR_GEN_AI_TOOL_NAME,
   ATTR_ERROR_TYPE,
   ATTR_MCP_TOOL_OUTCOME,
+  ATTR_MCP_TOOL_MODEL,
   MCP_METHOD_NAME_TOOLS_CALL,
 } from './attributes.js';
 import { ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
@@ -51,12 +52,22 @@ import { ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
  * enough to be metric-safe (see METRIC_SAFE_ATTRIBUTES); callers omit it
  * (or pass '') when fingerprinting is disabled or produced no category.
  *
+ * `model` (recordTokens, recordCost) follows the same optional-attribute
+ * pattern: added to the bag only when the cost extractor actually found a
+ * model name (see instrument.js's applyCostAttribution()), so a run with
+ * no model detection doesn't create a spurious `mcp.tool.model: undefined`
+ * time series. Model names are bounded in practice by how many distinct
+ * models a deployment actually calls, the same cardinality argument this
+ * package already relies on for `gen_ai.tool.name` on every other counter.
+ *
  * @param {string} packageVersion
  * @returns {{
  *   recordCall: (toolName: string | undefined) => void,
  *   recordError: (toolName: string | undefined, errorType: string, failureCategory?: string) => void,
  *   recordSilentFailure: (toolName: string | undefined, failureCategory?: string) => void,
  *   recordDuration: (toolName: string | undefined, durationMs: number, outcome: string, failureCategory?: string) => void,
+ *   recordTokens: (toolName: string | undefined, model: string | undefined, totalTokens: number) => void,
+ *   recordCost: (toolName: string | undefined, model: string | undefined, costUsd: number) => void,
  * }}
  */
 export function setupMeter(packageVersion) {
@@ -75,6 +86,14 @@ export function setupMeter(packageVersion) {
   const duration = meter.createHistogram('mcp.tool.duration', {
     description: 'Duration of MCP tool call execution.',
     unit: 'ms',
+  });
+  const tokensTotal = meter.createCounter('mcp.tool.tokens.total', {
+    description: 'Total input + output tokens attributed to MCP tool calls (see src/cost/extractor.js).',
+    unit: 'tokens',
+  });
+  const costTotal = meter.createCounter('mcp.tool.cost.total', {
+    description: 'Total estimated cost of MCP tool calls (see src/cost/calculator.js).',
+    unit: 'USD',
   });
 
   return {
@@ -102,6 +121,18 @@ export function setupMeter(packageVersion) {
         [ATTR_GEN_AI_TOOL_NAME]: toolName,
         [ATTR_MCP_TOOL_OUTCOME]: outcome,
         ...(failureCategory ? { [ATTRIBUTE_KEYS.CATEGORY]: failureCategory } : {}),
+      });
+    },
+    recordTokens(toolName, model, totalTokens) {
+      tokensTotal.add(totalTokens, {
+        [ATTR_GEN_AI_TOOL_NAME]: toolName,
+        ...(model ? { [ATTR_MCP_TOOL_MODEL]: model } : {}),
+      });
+    },
+    recordCost(toolName, model, costUsd) {
+      costTotal.add(costUsd, {
+        [ATTR_GEN_AI_TOOL_NAME]: toolName,
+        ...(model ? { [ATTR_MCP_TOOL_MODEL]: model } : {}),
       });
     },
   };
