@@ -9,3 +9,9 @@ coverage/
 package.json.workspaces-backup
 .claude/
 .spec-reference/
+
+# Default-location output from bench/thrash-data-benchmark.js — regenerated
+# on every run. Published runs go in bench/results/ with an explicit --out
+# path instead, and ARE meant to be committed.
+bench/thrash-data-benchmark-results.json
+bench/thrash-data-benchmark-results.txt

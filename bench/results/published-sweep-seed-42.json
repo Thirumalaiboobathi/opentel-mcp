@@ -1,0 +1,109 @@
+{
+  "generatedAt": "2026-08-02T04:09:36.040Z",
+  "baseConfig": {
+    "sessionCount": 5000,
+    "brokenToolRate": 0.15,
+    "minAttempts": 1,
+    "maxAttempts": 6,
+    "baseTokensIn": 800,
+    "baseTokensOut": 150,
+    "tokensInGrowthPerRetry": 250,
+    "model": "claude-sonnet-5",
+    "toolName": "lookup_customer_record",
+    "seed": 42,
+    "outPrefix": "bench/results/published-sweep-seed-42"
+  },
+  "sweepRates": [
+    0.02,
+    0.05,
+    0.1,
+    0.15,
+    0.25
+  ],
+  "threshold": 3,
+  "rows": [
+    {
+      "brokenToolRate": 0.02,
+      "sessionsInDetectedLoopPercent": 1.12,
+      "meanLoopLength": 3.8035714285714284,
+      "wastedCostPer1000Sessions": 0.25029,
+      "meanCostPerLoop": 0.022347321428571428
+    },
+    {
+      "brokenToolRate": 0.05,
+      "sessionsInDetectedLoopPercent": 3.32,
+      "meanLoopLength": 3.8313253012048194,
+      "wastedCostPer1000Sessions": 0.748979999999999,
+      "meanCostPerLoop": 0.022559638554216836
+    },
+    {
+      "brokenToolRate": 0.1,
+      "sessionsInDetectedLoopPercent": 6.46,
+      "meanLoopLength": 3.845201238390093,
+      "wastedCostPer1000Sessions": 1.46421000000001,
+      "meanCostPerLoop": 0.022665789473684365
+    },
+    {
+      "brokenToolRate": 0.15,
+      "sessionsInDetectedLoopPercent": 9.52,
+      "meanLoopLength": 3.857142857142857,
+      "wastedCostPer1000Sessions": 2.1664799999999995,
+      "meanCostPerLoop": 0.022757142857142854
+    },
+    {
+      "brokenToolRate": 0.25,
+      "sessionsInDetectedLoopPercent": 16.62,
+      "meanLoopLength": 3.8194945848375452,
+      "wastedCostPer1000Sessions": 3.7343699999999966,
+      "meanCostPerLoop": 0.022469133574007198
+    }
+  ],
+  "sanityCheck": [
+    {
+      "expectedRatePercent": 1.3333333333333333,
+      "empiricalRatePercent": 1.12,
+      "deviationPercentagePoints": 0.2133333333333331,
+      "toleranceUsedPercentagePoints": 0.6488280032318101
+    },
+    {
+      "expectedRatePercent": 3.3333333333333335,
+      "empiricalRatePercent": 3.32,
+      "deviationPercentagePoints": 0.013333333333333253,
+      "toleranceUsedPercentagePoints": 1.0154364141151877
+    },
+    {
+      "expectedRatePercent": 6.666666666666667,
+      "empiricalRatePercent": 6.460000000000001,
+      "deviationPercentagePoints": 0.2066666666666661,
+      "toleranceUsedPercentagePoints": 1.411067365901115
+    },
+    {
+      "expectedRatePercent": 10,
+      "empiricalRatePercent": 9.52,
+      "deviationPercentagePoints": 0.47999999999999987,
+      "toleranceUsedPercentagePoints": 1.697056274847714
+    },
+    {
+      "expectedRatePercent": 16.666666666666664,
+      "empiricalRatePercent": 16.62,
+      "deviationPercentagePoints": 0.0466666666666643,
+      "toleranceUsedPercentagePoints": 2.1081851067789197
+    }
+  ],
+  "methodology": {
+    "sessionIsolation": "Each simulated session was assigned its own distinct, real extra.sessionId by setting the server-side InMemoryTransport's own `sessionId` property before that session's calls, driving a real @modelcontextprotocol/sdk Client against a real instrumentMcpServer()-wrapped Server over InMemoryTransport.createLinkedPair(). This mirrors how a real stateful transport (e.g. StreamableHTTPServerTransport) populates extra.sessionId internally (protocol.js's _onrequest() reads capturedTransport.sessionId). Verified post-run: the number of distinct session keys the real ThrashDetector instance observed (across both record() and clearOnSuccess()) was asserted equal to the number of sessions simulated; the run aborts with a non-zero exit code otherwise.",
+    "retriesAreSimulated": "Retries are SIMULATED by a scripted policy in this file, not driven by a real LLM agent loop. Each session is independently marked \"broken\" with probability brokenToolRate (a configured input, not a number measured from production traffic); a broken session then makes a uniform-random integer number of attempts in [minAttempts, maxAttempts] = [1, 6], all of which fail with byte-identical error text (see IMPORTANT #4 in this file's header), then gives up.",
+    "tokenGrowthAssumption": "Input tokens: 800 on the first attempt, +250 on each subsequent retry (linear growth, modeling context accumulation from including prior failed attempts in the prompt). Output tokens: held constant at 150 tokens on every attempt (see IMPORTANT #7 — not modeled as growing or shrinking).",
+    "modelAndPrice": "model=claude-sonnet-5, from DEFAULT_PRICING (src/cost/pricing.js): $3/1M input tokens, $15/1M output tokens, USD. That pricing table's own disclaimer applies here too: verify current pricing independently before citing dollar figures.",
+    "seed": 42,
+    "reproduce": "node bench/thrash-data-benchmark.js --sweep --sweepRates=0.02,0.05,0.1,0.15,0.25 --sessions=5000 --minAttempts=1 --maxAttempts=6 --baseTokensIn=800 --baseTokensOut=150 --tokensInGrowth=250 --model=claude-sonnet-5 --toolName=lookup_customer_record --seed=42 --out=bench/results/published-sweep-seed-42",
+    "knownLimitationsThatCouldInflateResults": [
+      "Retries happen back-to-back with no delay, so every retry always lands inside the 60s detection window; real agents pacing retries further apart could see LOWER real-world detection rates.",
+      "Every simulated failure has a perfectly stable fingerprint (identical error text every time); real failures with more message variance than fingerprint normalization collapses would fragment across multiple fingerprints, LOWERING real-world detection rates.",
+      "brokenToolRate and the retry range are assumed configuration, not measured from production telemetry.",
+      "Only one tool/failure mode is simulated; results do not directly transfer to a multi-tool deployment.",
+      "The \"standard OTel would show zero errors\" counterfactual is true by construction (every simulated failure returns isError: true, never throws) — it demonstrates the mechanism, not an empirical discovery about real tool-call traffic.",
+      "Mean loop length reflects each session's last EMITTED event, which can undercount raw attempts when a session gives up between reEmitAfter-aligned re-emission points (see IMPORTANT #8)."
+    ]
+  }
+}

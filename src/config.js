@@ -6,6 +6,7 @@
 import { diag } from '@opentelemetry/api';
 import { DEFAULT_PRICING } from './cost/pricing.js';
 import { defaultExtractor } from './cost/extractor.js';
+import { resolveThrashConfig } from './thrash/config.js';
 
 /**
  * @typedef {object} CostTrackingOptions
@@ -56,6 +57,14 @@ import { defaultExtractor } from './cost/extractor.js';
  *   src/metrics.js, and src/cost/budget.js). Defaults to `{ enabled: true, pricingTable: DEFAULT_PRICING,
  *   extractor: defaultExtractor }` with budget tracking off; any fields you omit from a partial object fall
  *   back to those defaults individually, so `{ enabled: false }` alone works.
+ * @property {Partial<import('./thrash/config.js').ThrashConfig>} [thrashDetection] - Controls Agent Thrash
+ *   Detection (v0.6.0): detecting when a tool is retried repeatedly with the same failure fingerprint, and
+ *   attributing the wasted tokens/cost to that loop (see instrument.js's applyThrashDetection() /
+ *   applyThrashSuccessClear(), src/thrash/detector.js, and src/thrash/emitter.js). Resolved via
+ *   resolveThrashConfig() (src/thrash/config.js) — same partial-overrides-individual-defaults behavior as
+ *   costTracking above. Requires `fingerprinting` to also be enabled (the default): thrash detection keys
+ *   off the same mcp.failure.fingerprint fingerprinting computes, so with fingerprinting off there is
+ *   nothing to key off and detection silently never fires, regardless of this option.
  */
 
 // Guards the "serviceName has no effect" diagnostic below so it fires once
@@ -111,5 +120,6 @@ export function resolveOptions(options) {
       extractor: rawCostTracking.extractor ?? defaultExtractor,
       budget: rawCostTracking.budget,
     },
+    thrashDetection: resolveThrashConfig(opts.thrashDetection),
   };
 }

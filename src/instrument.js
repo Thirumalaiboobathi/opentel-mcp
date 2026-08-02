@@ -3,6 +3,7 @@
  */
 
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { trace, diag, SpanStatusCode, SpanKind } from '@opentelemetry/api';
 import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -16,6 +17,8 @@ import { computeFingerprint } from './fingerprint/compose.js';
 import { toSpanAttributes } from './fingerprint/attributes.js';
 import { calculateCost } from './cost/calculator.js';
 import { createBudgetTracker } from './cost/budget.js';
+import { ThrashDetector } from './thrash/detector.js';
+import { createThrashEmitter } from './thrash/emitter.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_TOOL_NAME,
@@ -153,6 +156,32 @@ export function instrumentMcpServer(input, options) {
   // must accumulate across the server's whole lifetime (see
   // src/cost/budget.js). A no-op tracker when costTracking.budget is unset.
   const budgetTracker = createBudgetTracker(resolved.costTracking.budget);
+  // Same one-per-server lifetime as budgetTracker above — thrash episodes
+  // accumulate across calls, not within one (see src/thrash/detector.js).
+  // Constructed unconditionally, same as budgetTracker: resolved.thrashDetection.enabled
+  // gates per-call work (applyThrashDetection/applyThrashSuccessClear
+  // below), not this one-time setup.
+  const thrashDetector = new ThrashDetector(resolved.thrashDetection);
+  const thrashEmitter = resolved.enableMetrics ? createThrashEmitter(PACKAGE_VERSION) : null;
+  // MCP sessions have a transport-provided id (extra.sessionId below) for
+  // session-oriented transports, but stdio has none — there's exactly one
+  // connection for the process's lifetime instead. Thrash detection still
+  // needs *some* stable per-connection key to group repeated failures
+  // under, so this generates one once per instrumented server/connection,
+  // used only as a fallback — see resolveThrashSessionId() below for
+  // exactly when that fallback is (and, critically, is NOT) permitted.
+  // Budget tracking (above) intentionally does NOT get this fallback — it
+  // already has its own, different, already-shipped behavior of silently
+  // skipping session-scoped tracking with no session id, which this must
+  // not change.
+  const thrashConnectionFallbackSessionId = randomUUID();
+  // Mutable per-server flag, not a `let` closed over directly: wrapToolCallHandler
+  // is a top-level function taking all its state as parameters (see its
+  // existing params), not a closure over instrumentMcpServer()'s locals —
+  // this holder preserves that pattern while still letting
+  // resolveThrashSessionId() persist state across calls. See that
+  // function's docblock for why this flag exists at all.
+  const thrashSessionState = { hasSeenRealSessionId: false, hasWarnedFallbackUsed: false };
   if (outer && server.shutdown) {
     outer.shutdown = server.shutdown;
   }
@@ -167,6 +196,12 @@ export function instrumentMcpServer(input, options) {
         resolved.fingerprinting,
         resolved.costTracking,
         budgetTracker,
+        resolved.thrashDetection,
+        thrashDetector,
+        thrashEmitter,
+        thrashConnectionFallbackSessionId,
+        thrashSessionState,
+        server,
       );
     }
     return originalSetRequestHandler(schema, handler);
@@ -279,6 +314,12 @@ function isToolResultError(result) {
  * metricsRecorder calls are outside their control, and this must never be
  * why a tool call span fails to complete.
  *
+ * Returns this call's token/cost figures (or null when disabled/no usage
+ * found) so the isToolResultError branch can feed them to Agent Thrash
+ * Detection (applyThrashDetection() below, v0.6.0) without re-running the
+ * extractor/calculateCost a second time — added in v0.6.0, purely
+ * additive: nothing in v0.5.0 consumed this function's return value.
+ *
  * @param {import('@opentelemetry/api').Span} span
  * @param {ReturnType<import('./metrics.js').setupMeter> | null} metricsRecorder
  * @param {string | undefined} toolName
@@ -286,13 +327,14 @@ function isToolResultError(result) {
  * @param {*} result
  * @param {import('./config.js').CostTrackingOptions} costTracking
  * @param {ReturnType<import('./cost/budget.js').createBudgetTracker>} budgetTracker
+ * @returns {{ tokensIn: number, tokensOut: number, costUsd: number } | null}
  */
 function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker) {
-  if (!costTracking.enabled) return;
+  if (!costTracking.enabled) return null;
 
   try {
     const usage = costTracking.extractor(result);
-    if (!usage) return;
+    if (!usage) return null;
 
     span.setAttribute(ATTR_MCP_TOOL_TOKENS_INPUT, usage.inputTokens);
     span.setAttribute(ATTR_MCP_TOOL_TOKENS_OUTPUT, usage.outputTokens);
@@ -303,8 +345,9 @@ function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result
     }
     metricsRecorder?.recordTokens(toolName, usage.model, usage.totalTokens);
 
+    let costUsd = null;
     if (usage.model) {
-      const costUsd = calculateCost(usage.inputTokens, usage.outputTokens, usage.model, costTracking.pricingTable);
+      costUsd = calculateCost(usage.inputTokens, usage.outputTokens, usage.model, costTracking.pricingTable);
       if (costUsd !== null) {
         span.setAttribute(ATTR_MCP_TOOL_COST_USD, costUsd);
         span.setAttribute(ATTR_MCP_TOOL_COST_CURRENCY, MCP_TOOL_COST_CURRENCY_USD);
@@ -317,8 +360,209 @@ function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result
         }
       }
     }
+
+    return { tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: costUsd ?? 0 };
   } catch (err) {
     diag.debug('opentel-mcp: cost attribution failed, skipping mcp.tool.tokens.*/mcp.tool.cost.* attributes', err);
+    return null;
+  }
+}
+
+/**
+ * True only when `server.transport` is connected and its shape reliably
+ * indicates a single-connection transport — i.e. it has no `sessionId`
+ * property at all. Both session-oriented transports the SDK ships,
+ * StreamableHTTPServerTransport and SSEServerTransport, expose a public
+ * `sessionId` getter (see @modelcontextprotocol/sdk's
+ * server/{streamableHttp,sse}.d.ts); StdioServerTransport does not (see
+ * server/stdio.d.ts). Checked structurally rather than `instanceof
+ * StdioServerTransport` for the same dual-package-hazard reason
+ * detectServerKind() above avoids importing McpServer directly (ADR 001).
+ *
+ * Returns false — "not reliably single-connection" — whenever
+ * `server.transport` is undefined too. That's the common case here: the
+ * SDK only populates it after `server.connect(transport)` runs, which
+ * happens *after* `instrumentMcpServer()` in normal startup order (see
+ * the README's "Ordering constraint"), and this repo's own test harness
+ * (`invokeToolCall()` in the test files) never calls `.connect()` at all —
+ * it always invokes the registered handler directly. A transport that
+ * can't be determined is never assumed to be single-connection; see
+ * `thrashDetection.assumeSingleSession` (config.js) for the explicit
+ * opt-in that covers this case.
+ *
+ * @param {*} server
+ * @returns {boolean}
+ */
+function isSingleConnectionTransport(server) {
+  const transport = server?.transport;
+  return Boolean(transport) && !('sessionId' in transport);
+}
+
+/**
+ * Identifies which of the three conditions let resolveThrashSessionId()
+ * below fall back to the generated per-connection session id, for the
+ * one-time diag.warn() it fires the first time that actually happens (see
+ * thrashSessionState.hasWarnedFallbackUsed there). Each implies a
+ * different amount of risk if the single-connection assumption turns out
+ * to be wrong:
+ *
+ *   - Transport structurally detected as single-connection (no `sessionId`
+ *     property — e.g. stdio): the safest case, backed by evidence.
+ *   - `assumeSingleSession: true` overriding a transport that IS connected
+ *      and DOES expose its own `sessionId` (i.e. isSingleConnectionTransport()
+ *      returned false because the transport looks session-oriented): the
+ *      riskiest case — the operator is contradicting available evidence.
+ *   - `assumeSingleSession: true` with the transport simply not yet
+ *     connected/undeterminable: no contradicting evidence, just unproven.
+ *
+ * @param {*} server
+ * @returns {'single-connection transport detected' | 'assumeSingleSession: true' | 'transport undeterminable, opted in via assumeSingleSession: true'}
+ */
+function describeFallbackReason(server) {
+  if (isSingleConnectionTransport(server)) {
+    return 'single-connection transport detected';
+  }
+  if (server?.transport) {
+    return 'assumeSingleSession: true';
+  }
+  return 'transport undeterminable, opted in via assumeSingleSession: true';
+}
+
+/**
+ * Resolves the session id Agent Thrash Detection should use for one call,
+ * or `null` when detection should be skipped entirely for this call.
+ * Concurrent HTTP/SSE clients can otherwise collide into one shared
+ * fallback "session," fabricating loops out of unrelated failures from
+ * different clients — this exists specifically to prevent that. In
+ * priority order:
+ *
+ *   1. A real `extra.sessionId` always wins, and permanently marks this
+ *      server as session-aware (`thrashSessionState.hasSeenRealSessionId`).
+ *   2. Once a server has been observed to be session-aware, a later call
+ *      with no sessionId is skipped outright (returns null) — it is never
+ *      merged into the shared fallback key, even if `assumeSingleSession`
+ *      is set. A server that has proven it hands out real session ids
+ *      does not get to fall back just because one particular call lacked
+ *      one.
+ *   3. Before any real sessionId has ever been observed: the generated
+ *      per-connection fallback (`thrashConnectionFallbackSessionId`) is
+ *      used when `thrashConfig.assumeSingleSession` is true, or when
+ *      `isSingleConnectionTransport(server)` reliably determines the
+ *      transport is single-connection. Otherwise, skip — an undetermined
+ *      transport is not assumed to be single-connection. The first time
+ *      (and only the first time — per server instance, not per call) this
+ *      branch actually fires, a diag.warn() fires too (see
+ *      describeFallbackReason() above), since silently guessing a session
+ *      boundary is worth a loud, one-time flag if it's wrong.
+ *
+ * @param {*} server
+ * @param {string | undefined} sessionId - extra.sessionId for this call.
+ * @param {{ hasSeenRealSessionId: boolean, hasWarnedFallbackUsed: boolean }} thrashSessionState - Mutated in place; see instrumentMcpServer().
+ * @param {string} thrashConnectionFallbackSessionId
+ * @param {import('./thrash/config.js').ThrashConfig} thrashConfig
+ * @returns {string | null}
+ */
+function resolveThrashSessionId(server, sessionId, thrashSessionState, thrashConnectionFallbackSessionId, thrashConfig) {
+  if (sessionId !== undefined) {
+    thrashSessionState.hasSeenRealSessionId = true;
+    return sessionId;
+  }
+
+  if (thrashSessionState.hasSeenRealSessionId) {
+    return null;
+  }
+
+  if (thrashConfig.assumeSingleSession || isSingleConnectionTransport(server)) {
+    if (!thrashSessionState.hasWarnedFallbackUsed) {
+      thrashSessionState.hasWarnedFallbackUsed = true;
+      diag.warn(
+        'opentel-mcp: Agent Thrash Detection is using a generated fallback session id ' +
+          `(reason: ${describeFallbackReason(server)}). If this transport is in fact serving multiple ` +
+          'concurrent clients, loop detection will merge unrelated clients into false-positive loops. ' +
+          'This warning fires once per instrumentMcpServer() call.',
+      );
+    }
+    return thrashConnectionFallbackSessionId;
+  }
+
+  return null;
+}
+
+/**
+ * Agent Thrash Detection (v0.6.0): runs on a tool-level failure (isError:
+ * true) whose fingerprint has already been computed by computeFingerprint()
+ * in the caller. No-op — with zero allocation, checked first — when
+ * `thrashConfig.enabled` is false, or when `fingerprint` is undefined
+ * (fingerprinting itself is disabled; there is nothing to key detection
+ * off, see config.js's `thrashDetection` docblock).
+ *
+ * Composes v0.4's fingerprint with v0.5's per-call token/cost figures
+ * (`usage`, reused from applyCostAttribution()'s return value above — not
+ * recomputed) into one ThrashDetector.record() call. When that crosses a
+ * detection threshold, the resulting ThrashDetectedEvent is handed to the
+ * emitter (src/thrash/emitter.js), which turns it into the mcp.tool.loop.*
+ * metrics and an mcp.loop.detected event on this same span.
+ *
+ * The whole body is one try/catch: ThrashDetector.record() and the
+ * emitter's emit() already document themselves as never-throw, but this
+ * call site's own glue (reading span.spanContext(), building the input
+ * object) isn't proven never-throw, and a failure here must never affect
+ * the tool call result — same defense-in-depth reasoning as
+ * applyCostAttribution above.
+ *
+ * @param {import('@opentelemetry/api').Span} span
+ * @param {import('./thrash/config.js').ThrashConfig} thrashConfig
+ * @param {ThrashDetector} thrashDetector
+ * @param {ReturnType<typeof createThrashEmitter> | null} thrashEmitter
+ * @param {string} sessionId - Transport session id, or the per-connection fallback — see instrumentMcpServer().
+ * @param {string | undefined} toolName
+ * @param {string | undefined} fingerprint - mcp.failure.fingerprint, or undefined when fingerprinting is disabled.
+ * @param {{ tokensIn: number, tokensOut: number, costUsd: number } | null} usage - applyCostAttribution()'s return value.
+ */
+function applyThrashDetection(span, thrashConfig, thrashDetector, thrashEmitter, sessionId, toolName, fingerprint, usage) {
+  if (!thrashConfig.enabled || fingerprint === undefined) return;
+
+  try {
+    const event = thrashDetector.record({
+      sessionId,
+      toolName,
+      fingerprint,
+      spanId: span.spanContext().spanId,
+      traceId: span.spanContext().traceId,
+      tokensIn: usage?.tokensIn ?? 0,
+      tokensOut: usage?.tokensOut ?? 0,
+      costUsd: usage?.costUsd ?? 0,
+    });
+
+    if (event) {
+      thrashEmitter?.emit(event);
+    }
+  } catch (err) {
+    diag.debug('opentel-mcp: thrash detection failed, skipping mcp.tool.loop.* telemetry for this call', err);
+  }
+}
+
+/**
+ * Agent Thrash Detection (v0.6.0): runs on every successful (non-error)
+ * tool result — the loop broke, if there was one. Clears thrashDetector's
+ * tracked entry for this (sessionId, toolName) pair; see
+ * ThrashDetector.clearOnSuccess()'s own docblock for exactly what that
+ * does and doesn't clear. No-op with zero allocation when
+ * `thrashConfig.enabled` is false. Never throws, same defense-in-depth
+ * reasoning as applyThrashDetection() above.
+ *
+ * @param {import('./thrash/config.js').ThrashConfig} thrashConfig
+ * @param {ThrashDetector} thrashDetector
+ * @param {string} sessionId
+ * @param {string | undefined} toolName
+ */
+function applyThrashSuccessClear(thrashConfig, thrashDetector, sessionId, toolName) {
+  if (!thrashConfig.enabled) return;
+
+  try {
+    thrashDetector.clearOnSuccess(sessionId, toolName);
+  } catch (err) {
+    diag.debug('opentel-mcp: thrash detection clearOnSuccess failed', err);
   }
 }
 
@@ -351,14 +595,39 @@ function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result
  * independently of fingerprinting — a tool call can carry token usage
  * whether or not it ultimately succeeded.
  *
+ * Agent Thrash Detection (v0.6.0 — see applyThrashDetection() and
+ * applyThrashSuccessClear() above, and config.js's `thrashDetection`
+ * option) runs record() in the isToolResultError branch (it needs a
+ * fingerprint, which only a tool-level failure produces) and
+ * clearOnSuccess() in the success branch.
+ *
  * @param {Function} handler
  * @param {import('@opentelemetry/api').Tracer} tracer
  * @param {ReturnType<import('./metrics.js').setupMeter> | null} metricsRecorder
  * @param {boolean} fingerprintingEnabled
  * @param {import('./config.js').CostTrackingOptions} costTracking
  * @param {ReturnType<import('./cost/budget.js').createBudgetTracker>} budgetTracker
+ * @param {import('./thrash/config.js').ThrashConfig} thrashConfig
+ * @param {ThrashDetector} thrashDetector
+ * @param {ReturnType<typeof createThrashEmitter> | null} thrashEmitter
+ * @param {string} thrashConnectionFallbackSessionId
+ * @param {{ hasSeenRealSessionId: boolean, hasWarnedFallbackUsed: boolean }} thrashSessionState
+ * @param {*} server - Passed through only for isSingleConnectionTransport()'s server.transport check.
  */
-function wrapToolCallHandler(handler, tracer, metricsRecorder, fingerprintingEnabled, costTracking, budgetTracker) {
+function wrapToolCallHandler(
+  handler,
+  tracer,
+  metricsRecorder,
+  fingerprintingEnabled,
+  costTracking,
+  budgetTracker,
+  thrashConfig,
+  thrashDetector,
+  thrashEmitter,
+  thrashConnectionFallbackSessionId,
+  thrashSessionState,
+  server,
+) {
   return (request, extra) => {
     const toolName = request?.params?.name;
     const spanName = toolName ? `${TOOLS_CALL_METHOD} ${toolName}` : TOOLS_CALL_METHOD;
@@ -371,6 +640,19 @@ function wrapToolCallHandler(handler, tracer, metricsRecorder, fingerprintingEna
       // per-session budget tracking (src/cost/budget.js); everything else
       // in this function already worked without it.
       const sessionId = extra?.sessionId;
+      // Thrash detection needs a session-shaped key even on transports
+      // with no real session (stdio) — but unlike budget tracking above,
+      // it must NOT silently merge concurrent, unidentified HTTP/SSE
+      // clients into one shared key. See resolveThrashSessionId()'s
+      // docblock for the exact rules; null means "skip detection for
+      // this call entirely," checked at each call site below.
+      const thrashSessionId = resolveThrashSessionId(
+        server,
+        sessionId,
+        thrashSessionState,
+        thrashConnectionFallbackSessionId,
+        thrashConfig,
+      );
 
       span.setAttribute(ATTR_MCP_METHOD_NAME, TOOLS_CALL_METHOD);
       span.setAttribute(ATTR_GEN_AI_OPERATION_NAME, GEN_AI_OPERATION_NAME_EXECUTE_TOOL);
@@ -391,12 +673,25 @@ function wrapToolCallHandler(handler, tracer, metricsRecorder, fingerprintingEna
           span.setStatus({ code: SpanStatusCode.ERROR });
 
           let failureCategory = '';
+          let failure = null;
           if (fingerprintingEnabled) {
-            const failure = computeFingerprint(result, { toolName, origin: 'tool_error', cwd });
+            failure = computeFingerprint(result, { toolName, origin: 'tool_error', cwd });
             span.setAttributes(toSpanAttributes(failure));
             failureCategory = failure.category;
           }
-          applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker);
+          const usage = applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker);
+          if (thrashSessionId !== null) {
+            applyThrashDetection(
+              span,
+              thrashConfig,
+              thrashDetector,
+              thrashEmitter,
+              thrashSessionId,
+              toolName,
+              failure?.fingerprint,
+              usage,
+            );
+          }
           metricsRecorder?.recordSilentFailure(toolName, failureCategory);
           metricsRecorder?.recordDuration(
             toolName,
@@ -407,6 +702,9 @@ function wrapToolCallHandler(handler, tracer, metricsRecorder, fingerprintingEna
         } else {
           span.setStatus({ code: SpanStatusCode.OK });
           applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker);
+          if (thrashSessionId !== null) {
+            applyThrashSuccessClear(thrashConfig, thrashDetector, thrashSessionId, toolName);
+          }
           metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_SUCCESS);
         }
         return result;
