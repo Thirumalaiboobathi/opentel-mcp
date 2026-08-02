@@ -121,7 +121,11 @@ function detectServerKind(input) {
  *   during your process's own shutdown sequence to avoid losing buffered
  *   spans. When `setupNodeSdk` is false (the default), no `shutdown()` is
  *   attached; lifecycle of the global provider belongs to whoever
- *   registered it.
+ *   registered it. Also gets a `getThrashSummary()` method (v0.6.0,
+ *   unconditional — not gated behind `setupNodeSdk`) returning
+ *   `ThrashDetector.getSummary()`'s in-process summary; both are omitted
+ *   when `options.enabled` is `false`, since nothing is instrumented at
+ *   all in that case.
  */
 export function instrumentMcpServer(input, options) {
   const detected = detectServerKind(input);
@@ -182,6 +186,16 @@ export function instrumentMcpServer(input, options) {
   // resolveThrashSessionId() persist state across calls. See that
   // function's docblock for why this flag exists at all.
   const thrashSessionState = { hasSeenRealSessionId: false, hasWarnedFallbackUsed: false };
+  // Additive to instrumentMcpServer()'s existing return contract (the same
+  // input object, for chaining — see this function's own docblock): a
+  // getThrashSummary() method attached the same way shutdown() is, just
+  // unconditionally rather than gated behind setupNodeSdk, since
+  // thrashDetector itself is always constructed (see above). Returns
+  // ThrashDetector.getSummary()'s point-in-time, in-process summary — no
+  // OTel involved, nothing sent anywhere; safe to call from application
+  // code (a health-check endpoint, a periodic console.log, a debugger).
+  server.getThrashSummary = (options) => thrashDetector.getSummary(options);
+  if (outer) outer.getThrashSummary = server.getThrashSummary;
   if (outer && server.shutdown) {
     outer.shutdown = server.shutdown;
   }

@@ -184,4 +184,51 @@ describe('BoundedTtlMap', () => {
       setTimeoutSpy.mockRestore();
     });
   });
+
+  describe('entries()', () => {
+    it('yields all live [key, value] pairs', () => {
+      const store = new BoundedTtlMap(10, 1000, () => 0);
+      store.set('a', 1);
+      store.set('b', 2);
+      store.set('c', 3);
+
+      expect([...store.entries()]).toEqual([
+        ['a', 1],
+        ['b', 2],
+        ['c', 3],
+      ]);
+    });
+
+    it('yields nothing for an empty store', () => {
+      const store = new BoundedTtlMap(10, 1000, () => 0);
+      expect([...store.entries()]).toEqual([]);
+    });
+
+    it('lazily skips expired entries without deleting them (pure read)', () => {
+      const { clock, state } = makeClock(0);
+      const store = new BoundedTtlMap(10, 1000, clock);
+      store.set('a', 1);
+      state.now = 500;
+      store.set('b', 2); // 'a' not yet expired (500 < 1000)
+      state.now = 1500; // 'a' now expired (1500 >= 1000); 'b' still alive (1500 < 500+1000=1500? no — see below)
+
+      // 'a' expiresAt = 0 + 1000 = 1000; now (1500) >= 1000 -> expired, skipped.
+      // 'b' expiresAt = 500 + 1000 = 1500; now (1500) >= 1500 -> also expired, skipped.
+      expect([...store.entries()]).toEqual([]);
+
+      // Not deleted as a side effect of entries() — size still counts them
+      // until get() or the amortized sweep actually removes them.
+      expect(store.size).toBe(2);
+    });
+
+    it('reflects set() overwrites and delete()', () => {
+      const store = new BoundedTtlMap(10, 1000, () => 0);
+      store.set('a', 1);
+      store.set('a', 2); // overwrite
+      store.set('b', 3);
+      store.delete('b');
+
+      expect([...store.entries()]).toEqual([['a', 2]]);
+    });
+  });
 });

@@ -94,6 +94,29 @@ export class BoundedTtlMap {
     return this.#map.delete(key);
   }
 
+  /**
+   * Iterates live (non-expired) `[key, value]` pairs, in the same
+   * insertion/access order `Map` itself uses (oldest/least-recently-used
+   * first). Added for src/thrash/detector.js's getSummary() (v0.6.0),
+   * which needs to inspect every currently-tracked entry — get()/set()/
+   * delete()/size alone can't support that. Lazily skips expired entries
+   * (consistent with get()'s lazy expiry) but does NOT delete them as it
+   * goes: this is a pure read with no side effects, for callers (like
+   * getSummary()) that must not mutate state just by inspecting it.
+   * Expired entries skipped here are still cleaned up in the usual way,
+   * by a later get() or the amortized sweep in set().
+   *
+   * @returns {IterableIterator<[K, V]>}
+   */
+  *entries() {
+    const now = this.#clock();
+    for (const [key, entry] of this.#map) {
+      if (now < entry.expiresAt) {
+        yield [key, entry.value];
+      }
+    }
+  }
+
   /** Removes every entry whose TTL has passed as of clock(). */
   #sweep() {
     const now = this.#clock();

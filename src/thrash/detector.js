@@ -16,6 +16,8 @@ import { BoundedTtlMap } from './store.js';
 /** @typedef {import('./config.js').ThrashConfig} ThrashConfig */
 /** @typedef {import('./types.d.ts').ThrashEntry} ThrashEntry */
 /** @typedef {import('./types.d.ts').ThrashDetectedEvent} ThrashDetectedEvent */
+/** @typedef {import('./types.d.ts').ThrashSummary} ThrashSummary */
+/** @typedef {import('./types.d.ts').ThrashOffender} ThrashOffender */
 
 /**
  * @typedef {object} ThrashRecordInput
@@ -29,6 +31,11 @@ import { BoundedTtlMap } from './store.js';
  * @property {number} costUsd
  */
 
+/**
+ * @typedef {object} GetSummaryOptions
+ * @property {number} [topOffendersLimit=5] - Max entries in the returned topOffenders list.
+ */
+
 // Mirrors src/fingerprint/compose.js's buildFallback() — that module
 // inlines the same literal rather than exporting it, so it's repeated
 // here rather than importing across an unrelated internal. This value
@@ -36,6 +43,8 @@ import { BoundedTtlMap } from './store.js';
 // treating it as trackable would collapse every unrelated unfingerprintable
 // failure across every tool/session into one bogus shared loop.
 const FALLBACK_FINGERPRINT = '0000000000000000';
+
+const DEFAULT_TOP_OFFENDERS_LIMIT = 5;
 
 /**
  * @param {unknown} value
@@ -46,6 +55,18 @@ function toFiniteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
+/** @returns {ThrashSummary} All-zero summary — the disabled/error/never-recorded-anything shape. */
+function zeroSummary() {
+  return {
+    activeLoops: 0,
+    totalLoopsDetected: 0,
+    totalWastedCostUsd: 0,
+    totalWastedTokensIn: 0,
+    totalWastedTokensOut: 0,
+    topOffenders: [],
+  };
+}
+
 export class ThrashDetector {
   #config;
   #clock;
@@ -53,6 +74,17 @@ export class ThrashDetector {
   #store;
   /** @type {BoundedTtlMap<string, string>} keyed `${sessionId}|${toolName}` -> the fingerprint currently accumulating for it. */
   #activeFingerprint;
+
+  // Cumulative, process-lifetime counters for getSummary() — deliberately
+  // NOT derived from #store (which is bounded and lazily-expiring, so a
+  // live scan would silently lose evicted/expired episodes). Incremented
+  // at emit time in record() below; see that method for how double-
+  // counting across re-emissions of the same loop is avoided. reset()
+  // zeroes these too, same as the store.
+  #totalLoopsDetected = 0;
+  #totalWastedTokensIn = 0;
+  #totalWastedTokensOut = 0;
+  #totalWastedCostUsd = 0;
 
   /**
    * @param {ThrashConfig} config
@@ -86,6 +118,11 @@ export class ThrashDetector {
       const key = `${sessionId}|${toolName}|${fingerprint}`;
       const now = this.#clock();
       const existing = this.#store.get(key);
+      // Captured before entry.emitted is (re)computed below: true only if
+      // this key had ALREADY crossed the threshold in a prior call. Used
+      // to count totalLoopsDetected once per distinct episode, not once
+      // per re-emission — see below.
+      const wasAlreadyEmitted = existing?.emitted ?? false;
 
       /** @type {ThrashEntry} */
       let entry;
@@ -93,6 +130,8 @@ export class ThrashDetector {
         // Absent, or the window slid since the first failure in the old
         // episode — either way this is a fresh episode, not a continuation.
         entry = {
+          toolName,
+          fingerprint,
           count: 1,
           firstSeenAt: now,
           lastSeenAt: now,
@@ -102,6 +141,9 @@ export class ThrashDetector {
           tokensOut: toFiniteNumber(tokensOut),
           costUsd: toFiniteNumber(costUsd),
           emitted: false,
+          contributedTokensIn: 0,
+          contributedTokensOut: 0,
+          contributedCostUsd: 0,
         };
       } else {
         entry = {
@@ -118,12 +160,31 @@ export class ThrashDetector {
       const shouldEmit = entry.count >= threshold && (entry.count - threshold) % reEmitAfter === 0;
       entry.emitted = entry.emitted || shouldEmit;
 
+      if (shouldEmit) {
+        // Delta since this episode's last emission (0 for a first
+        // emission, since contributed* starts at 0), not entry's full
+        // cumulative total — a loop that re-emits at count 3, 6, 9 must
+        // not have its first-3-calls cost added to the running total
+        // three times over. getSummary()'s totalWasted* fields are meant
+        // to answer "how much has actually been wasted across every
+        // detected loop," not "sum of every emitted event's own
+        // snapshot" (those two differ exactly by this double-counting).
+        this.#totalWastedTokensIn += entry.tokensIn - entry.contributedTokensIn;
+        this.#totalWastedTokensOut += entry.tokensOut - entry.contributedTokensOut;
+        this.#totalWastedCostUsd += entry.costUsd - entry.contributedCostUsd;
+        entry.contributedTokensIn = entry.tokensIn;
+        entry.contributedTokensOut = entry.tokensOut;
+        entry.contributedCostUsd = entry.costUsd;
+        if (!wasAlreadyEmitted) this.#totalLoopsDetected++;
+      }
+
       this.#store.set(key, entry);
       this.#activeFingerprint.set(`${sessionId}|${toolName}`, fingerprint);
 
       if (!shouldEmit) return null;
 
       return {
+        sessionId,
         toolName,
         fingerprint,
         loopLength: entry.count,
@@ -155,6 +216,10 @@ export class ThrashDetector {
    * a given tool is almost always retried under one fingerprint at a time,
    * so this covers the realistic thrash-loop-then-recovery case.
    *
+   * Does NOT touch getSummary()'s cumulative totals: whatever was already
+   * emitted for this episode was genuinely wasted regardless of the
+   * eventual success, so it stays counted.
+   *
    * Never throws.
    *
    * @param {string} sessionId
@@ -173,11 +238,77 @@ export class ThrashDetector {
     }
   }
 
-  /** Discards all tracked state. Never throws. */
+  /**
+   * A point-in-time, in-process summary — no OTel involved, nothing sent
+   * anywhere, safe to call from application code (e.g. a health-check
+   * endpoint or a periodic console.log) or a debugger. Pure read: never
+   * mutates #store/#activeFingerprint or the cumulative counters, and has
+   * no effect on record()/clearOnSuccess()'s hot path. Never throws —
+   * degrades to an all-zero summary (also what a detector constructed
+   * with `enabled: false` naturally produces, since record() never writes
+   * anything in that case) on any unexpected error.
+   *
+   * `activeLoops` and `topOffenders` reflect only what's CURRENTLY in the
+   * bounded store — bounded by `maxTrackedKeys`, so a busy server can
+   * silently be tracking more loops than the store has room to admit, and
+   * TTL/LRU eviction can drop an old loop entirely (see
+   * src/thrash/store.js). `totalLoopsDetected`/`totalWasted*` are
+   * cumulative counters that survive both, by design (see record()).
+   *
+   * @param {GetSummaryOptions} [options]
+   * @returns {ThrashSummary}
+   */
+  getSummary(options) {
+    try {
+      if (!this.#config.enabled) return zeroSummary();
+
+      const rawLimit = options?.topOffendersLimit;
+      const limit =
+        typeof rawLimit === 'number' && Number.isFinite(rawLimit) && rawLimit >= 0
+          ? Math.floor(rawLimit)
+          : DEFAULT_TOP_OFFENDERS_LIMIT;
+
+      let activeLoops = 0;
+      /** @type {ThrashOffender[]} */
+      const offenders = [];
+
+      for (const [, entry] of this.#store.entries()) {
+        if (!entry.emitted) continue; // hasn't crossed threshold — not (yet) an active loop
+        activeLoops++;
+        offenders.push({
+          toolName: entry.toolName,
+          fingerprint: entry.fingerprint,
+          loops: entry.count,
+          wastedCostUsd: entry.costUsd,
+          wastedTokensIn: entry.tokensIn,
+          wastedTokensOut: entry.tokensOut,
+        });
+      }
+
+      offenders.sort((a, b) => b.wastedCostUsd - a.wastedCostUsd);
+
+      return {
+        activeLoops,
+        totalLoopsDetected: this.#totalLoopsDetected,
+        totalWastedCostUsd: this.#totalWastedCostUsd,
+        totalWastedTokensIn: this.#totalWastedTokensIn,
+        totalWastedTokensOut: this.#totalWastedTokensOut,
+        topOffenders: offenders.slice(0, limit),
+      };
+    } catch {
+      return zeroSummary();
+    }
+  }
+
+  /** Discards all tracked state, including getSummary()'s cumulative counters. Never throws. */
   reset() {
     try {
       this.#store = new BoundedTtlMap(this.#config.maxTrackedKeys, this.#config.entryTtlMs, this.#clock);
       this.#activeFingerprint = new BoundedTtlMap(this.#config.maxTrackedKeys, this.#config.entryTtlMs, this.#clock);
+      this.#totalLoopsDetected = 0;
+      this.#totalWastedTokensIn = 0;
+      this.#totalWastedTokensOut = 0;
+      this.#totalWastedCostUsd = 0;
     } catch {
       // Never throw — see record()'s docblock for why.
     }

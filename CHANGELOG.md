@@ -1,5 +1,113 @@
 # Changelog
 
+## 0.6.0
+
+### Added — Agent Thrash Detection
+
+Detects when an agent retries the same tool with the same v0.4 failure
+fingerprint repeatedly, and attributes the wasted v0.5 tokens/cost to that
+loop — see the README's new "Agent Thrash Detection" section for the full
+picture, including the sessionId resolution rules below (the one thing
+most likely to be misconfigured).
+
+- Metrics, via the same `@opentelemetry/api`-only pattern as the existing
+  `mcp.tool.*` instruments: `mcp.tool.loop.detected` (counter),
+  `mcp.tool.loop.length` (histogram), `mcp.tool.loop.wasted_tokens`
+  (histogram, unit `tokens`), `mcp.tool.loop.wasted_cost_usd` (histogram,
+  unit `USD`), `mcp.tool.loop.duration` (histogram, unit `ms`). All five
+  carry only `gen_ai.tool.name` as a metric label — `mcp.failure.fingerprint`
+  and the new `mcp.loop.session_id` are deliberately excluded from every
+  metric (both are unbounded, per-caller values; see
+  `METRIC_SAFE_ATTRIBUTES`'s docblock in `src/fingerprint/attributes.js`).
+- One `mcp.loop.detected` span event on the currently active span (never a
+  new span), carrying full detail including `mcp.failure.fingerprint` and
+  `mcp.loop.session_id` — span events can carry unbounded attributes
+  safely, unlike metric labels.
+- `thrashDetection` option on `instrumentMcpServer()` (see `src/config.js`
+  and `src/thrash/config.js`): `{ enabled?, threshold?, windowMs?,
+  maxTrackedKeys?, entryTtlMs?, reEmitAfter?, assumeSingleSession? }`.
+  Every field independently overridable via an `OTEL_MCP_THRASH_*` env var
+  (first documented env-var-driven config pattern in this codebase).
+  Defaults: enabled, 3 consecutive same-fingerprint failures within 60s,
+  1000 max tracked keys (bounded LRU+TTL — see `src/thrash/store.js`), a
+  15-minute idle TTL, re-emit every 3 further failures past threshold,
+  `assumeSingleSession: false`.
+- **Requires `fingerprinting: true`** (the default): thrash detection keys
+  off the same `mcp.failure.fingerprint` fingerprinting computes, so with
+  fingerprinting disabled, detection silently never fires regardless of
+  `thrashDetection`'s own settings.
+- Safe-by-default session resolution. A generated per-connection fallback
+  session id is used only when a transport is structurally confirmed
+  single-connection (no `sessionId` property on `server.transport` — e.g.
+  stdio) or explicitly opted into via `thrashDetection.assumeSingleSession`
+  — **never** merging concurrent HTTP/SSE clients into one shared key,
+  which would otherwise fabricate false-positive loops out of unrelated
+  clients' failures. Once a server has been observed handing out a real
+  session id, a later call with none is skipped entirely rather than
+  falling back. A one-time `diag.warn` fires the first time the fallback
+  is actually used, naming which of the three conditions triggered it.
+- `bench/thrash-data-benchmark.js`: a runnable data benchmark (distinct
+  from the CPU/memory performance benchmark in
+  `test/thrash/benchmark.test.js`) measuring detection rate and wasted
+  cost against a real in-process MCP `Client`/`Server` pair, with a
+  `--sweep` mode across configured broken-tool rates and a closed-form
+  sanity check that aborts rather than shipping a row that deviates
+  beyond sampling noise. Two published, reproducible runs committed under
+  `bench/results/` — see the README for how to read them (they model
+  sensitivity to a reader-supplied failure rate, not a measurement of any
+  real deployment).
+- In-process summary: `instrumentMcpServer()`'s returned object gets a
+  `getThrashSummary()` method (`ThrashDetector.getSummary()` underneath)
+  — a zero-infrastructure way to check "is anything thrashing right now"
+  without a metrics backend or trace viewer. Returns `activeLoops` (loops
+  currently in the bounded store that have crossed `threshold` — bounded
+  by `maxTrackedKeys`, not a complete history) and `topOffenders` (up to 5
+  by default, configurable via `getThrashSummary({ topOffendersLimit })`,
+  sorted by `wastedCostUsd` descending), alongside `totalLoopsDetected` /
+  `totalWastedCostUsd` / `totalWastedTokensIn` / `totalWastedTokensOut` —
+  cumulative counters that, unlike the two above, survive LRU eviction
+  and TTL expiry (incremented at emit time, with delta-based accounting
+  so a loop that re-emits multiple times doesn't have its earlier calls'
+  cost double-counted). Never throws; an all-zero summary if
+  `thrashDetection` is disabled. Pure read — no effect on the hot path.
+  `src/thrash/store.js`'s `BoundedTtlMap` gained an `entries()` iterator
+  to support this (a minimal, necessary extension of its Phase 2 surface,
+  which was previously get/set/delete/size only).
+
+### Public API additions
+
+- Re-exported from the package root (`src/index.d.ts`, types only —
+  `ThrashDetector`/`createThrashEmitter` stay internal): `ThrashConfig`,
+  `ThrashDetectedEvent`, `ThrashSummary`, `ThrashOffender` (new
+  `src/thrash/types.d.ts`, mirrors the `src/cost/types.d.ts` /
+  `src/fingerprint/types.d.ts` pattern).
+- `instrumentMcpServer()`'s return type gained `getThrashSummary?: (options?: { topOffendersLimit?: number }) => ThrashSummary`,
+  alongside the existing `shutdown?`.
+- `fingerprinting` and `thrashDetection` (with all of `ThrashConfig`,
+  including `assumeSingleSession`) are now declared on `InstrumentOptions`
+  in `src/index.d.ts` — both worked at runtime since introduction but were
+  missing from the public type declarations until now. Also added:
+  `FingerprintContext`, `Classifier`, `ComputeFingerprintOptions` (the
+  types needed to type a custom `computeFingerprint()` classifier per the
+  README's "Extending it" section — same kind of gap, found in the same
+  audit).
+- `npm run typecheck` (`tsc --noEmit`, new `tsconfig.json`): type-checks
+  `src/index.d.ts` and the sibling `src/*/types.d.ts` files, plus a new
+  type-level test (`test/index.exports.test-d.ts`, using `expectTypeOf`)
+  asserting a consumer can construct `InstrumentOptions` with a partial
+  `thrashDetection` and a partial `fingerprinting` config. Does not
+  type-check the `.js` source itself (`checkJs: false`) — still no build
+  step, this only guards the hand-written public type declarations.
+
+### Changed (additive, non-breaking)
+
+- `applyCostAttribution()` (internal, `src/instrument.js`) now returns
+  `{ tokensIn, tokensOut, costUsd } | null` instead of `void`, so thrash
+  detection can reuse one call's already-computed cost figures instead of
+  re-running the extractor. Not part of the public API and not observable
+  from outside `instrument.js`; nothing in v0.5.0 read the previous
+  `undefined` return value.
+
 ## 0.5.0
 
 ### Added — Cost & Token Attribution

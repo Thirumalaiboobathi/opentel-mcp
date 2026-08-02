@@ -420,6 +420,209 @@ convenience default, not a maintained price list.
   session-scoped limits are skipped gracefully (not enforced against a
   fallback key) for transports with no session id, like stdio.
 
+## Agent Thrash Detection (v0.6.0)
+
+Watches for the same tool failing with the same v0.4 failure fingerprint
+several times in a row inside one session — the pattern an LLM agent
+produces when it keeps retrying a call that can't succeed. When that
+crosses a threshold, it attributes the tokens and cost (v0.5) burned by
+the whole retry loop to one event, instead of leaving it scattered across
+N indistinguishable failed-tool-call spans.
+
+### Zero-config quick-start
+
+```js
+import { instrumentMcpServer } from 'opentel-mcp';
+
+instrumentMcpServer(server, {
+  serviceName: 'my-mcp-server',
+  setupNodeSdk: true,
+});
+```
+
+That's it — `thrashDetection` defaults to enabled, same as `fingerprinting`
+and `costTracking`. Any tool that fails 3 times in a row with the same
+fingerprint inside 60 seconds gets flagged automatically. **Requires
+`fingerprinting: true`** (also the default): detection keys off the same
+`mcp.failure.fingerprint` fingerprinting computes, so with fingerprinting
+disabled, thrash detection silently never fires, regardless of
+`thrashDetection`'s own settings.
+
+### Metrics
+
+Same API-only pattern as every other metric in this README — nothing
+recorded until a `MeterProvider` is registered.
+
+| Metric | Type | Unit | Attributes | Emitted when |
+|---|---|---|---|---|
+| `mcp.tool.loop.detected` | Counter | — | `gen_ai.tool.name` | A loop crosses `threshold`, and again every `reEmitAfter` failures past it |
+| `mcp.tool.loop.length` | Histogram | — | `gen_ai.tool.name` | Same |
+| `mcp.tool.loop.wasted_tokens` | Histogram | tokens | `gen_ai.tool.name` | Same |
+| `mcp.tool.loop.wasted_cost_usd` | Histogram | USD | `gen_ai.tool.name` | Same |
+| `mcp.tool.loop.duration` | Histogram | ms | `gen_ai.tool.name` | Same |
+
+Every metric above carries **only** `gen_ai.tool.name`. `mcp.failure.fingerprint`
+and `mcp.loop.session_id` are deliberately excluded from every one of them
+— both are unbounded, per-caller values (a new bug is a new fingerprint,
+forever; a new session is a new session id, forever), so putting either on
+a metric label would turn every distinct bug or session into its own
+permanent time series. See `METRIC_SAFE_ATTRIBUTES`'s docblock in
+`src/fingerprint/attributes.js`. Full detail is still available — on the
+span event below, where high-cardinality attributes are safe.
+
+### Span event: `mcp.loop.detected`
+
+Added to the **currently active span** (never a new one) each time a loop
+metric above fires.
+
+| Attribute | Description |
+|---|---|
+| `mcp.loop.length` | Consecutive same-fingerprint failures in the loop, at the moment of this emission |
+| `mcp.loop.wasted_tokens_in` | Cumulative input tokens burned by the loop so far |
+| `mcp.loop.wasted_tokens_out` | Cumulative output tokens burned by the loop so far |
+| `mcp.loop.wasted_cost_usd` | Cumulative estimated USD cost burned by the loop so far |
+| `mcp.loop.duration_ms` | Elapsed ms between the loop's first and most recent failure |
+| `mcp.loop.first_span_id` | Span id of the loop's first failure |
+| `mcp.loop.first_trace_id` | Trace id of the loop's first failure |
+| `mcp.loop.session_id` | The session this loop belongs to |
+| `mcp.failure.fingerprint` | The shared fingerprint (see "Failure Fingerprinting" above) |
+
+### Configuration
+
+All fields of `thrashDetection`, each independently overridable by its own
+`OTEL_MCP_THRASH_*` env var (first env-var-driven config in this
+codebase) — precedence is explicit option field, then env var, then
+default; an invalid/unparseable env value falls back to the default
+silently, never throws. Source of truth: `src/thrash/config.js`.
+
+| Option | Env var | Type | Default | Description |
+|---|---|---|---|---|
+| `enabled` | `OTEL_MCP_THRASH_ENABLED` | boolean | `true` | `false` disables thrash detection entirely |
+| `threshold` | `OTEL_MCP_THRASH_THRESHOLD` | number | `3` | Consecutive same-fingerprint failures required to trigger detection |
+| `windowMs` | `OTEL_MCP_THRASH_WINDOW_MS` | number | `60000` | Failures must fall inside this rolling window to count toward the same loop |
+| `maxTrackedKeys` | `OTEL_MCP_THRASH_MAX_TRACKED_KEYS` | number | `1000` | LRU cap on the bounded store (`src/thrash/store.js`) |
+| `entryTtlMs` | `OTEL_MCP_THRASH_ENTRY_TTL_MS` | number | `900000` | How long an idle tracked key survives before expiry |
+| `reEmitAfter` | `OTEL_MCP_THRASH_RE_EMIT_AFTER` | number | `3` | Re-emit every N further failures past `threshold` (e.g. 3, 6, 9, ...) instead of once |
+| `assumeSingleSession` | `OTEL_MCP_THRASH_ASSUME_SINGLE_SESSION` | boolean | `false` | Force-permits the fallback session id even when the transport can't be determined — see below |
+
+### Session id resolution — read this before setting `assumeSingleSession`
+
+**This is the one setting most likely to get misconfigured, so this
+section is deliberately explicit.** Thrash detection needs a session
+boundary to group repeated failures under — merge two different clients'
+failures into one bucket and you get a false-positive loop that never
+happened to either client individually.
+
+MCP sessions have a transport-provided id (`extra.sessionId`) on
+session-oriented transports, but stdio has none — there's exactly one
+connection for the process's whole lifetime instead. The resolution rules,
+in order:
+
+1. **A real `extra.sessionId` always wins**, and permanently marks the
+   server as session-aware.
+2. **Once a server has been observed handing out a real session id, a
+   later call with none is skipped entirely** — never merged into a
+   shared fallback key, even if `assumeSingleSession` is set. A server
+   that has proven it hands out real session ids doesn't get to fall back
+   just because one particular call lacked one.
+3. **Before any real session id has ever been observed**, a generated
+   per-connection fallback id is used only when:
+   - the transport is **structurally confirmed single-connection** — no
+     `sessionId` property on `server.transport` at all (e.g. stdio's
+     `StdioServerTransport`, which has no session concept whatsoever), or
+   - **you set `assumeSingleSession: true`** — an explicit opt-in for
+     transports the auto-detection can't see (e.g. a custom `Transport`
+     implementation), where you already know every connection is 1:1.
+
+   Otherwise — an undetermined, potentially multi-client transport, with
+   `assumeSingleSession` left at its default `false` — detection is
+   **skipped silently** for that call rather than guessing.
+
+**The risk of getting this wrong:** if you set `assumeSingleSession: true`
+on a transport that's actually serving multiple concurrent clients (a
+typical HTTP/SSE deployment behind a load balancer, for instance), their
+failures get merged into one shared session key. Three unrelated clients
+each failing once looks identical to one client failing three times in a
+row — a false-positive `mcp.loop.detected` event that never happened to
+any real session. Only set `assumeSingleSession: true` when you have
+independent knowledge that the transport is genuinely 1:1 (a custom
+in-process transport, a dedicated single-tenant connection, etc.) — never
+as a blanket "make the warning go away" setting. A one-time `diag.warn`
+fires the first time the fallback is actually used on a given server,
+naming exactly which of the three conditions above triggered it, so you
+have a chance to catch a wrong assumption before it produces bad data.
+
+### In-process summary
+
+For a zero-infrastructure quick check — no metrics backend, no trace
+viewer, just "is anything thrashing right now" — the object
+`instrumentMcpServer()` returns gets a `getThrashSummary()` method:
+
+```js
+const server = instrumentMcpServer(new Server(...), { serviceName: 'my-mcp-server' });
+
+// ...later, e.g. in a health-check handler or just to eyeball it:
+console.log(server.getThrashSummary());
+// {
+//   activeLoops: 1,
+//   totalLoopsDetected: 4,
+//   totalWastedCostUsd: 0.09,
+//   totalWastedTokensIn: 3600,
+//   totalWastedTokensOut: 900,
+//   topOffenders: [
+//     { toolName: 'lookup_customer', fingerprint: 'a3f4c8e2b1d09f77', loops: 3, wastedCostUsd: 0.03, wastedTokensIn: 900, wastedTokensOut: 225 },
+//   ],
+// }
+```
+
+No OTel involved — nothing sent anywhere, safe to call from application
+code. Never throws; returns an all-zero summary if `thrashDetection` is
+disabled, or if instrumentation is disabled entirely (in which case
+`getThrashSummary` isn't attached at all — check for its presence, same
+as `shutdown`).
+
+**`activeLoops` and `topOffenders` are bounded by `maxTrackedKeys`, and
+are not a complete history.** They reflect only what's currently sitting
+in the bounded LRU+TTL store this instant — a loop that got evicted (past
+`maxTrackedKeys`) or expired (past `entryTtlMs`) since it was last
+detected won't appear in either, even though it really happened.
+`totalLoopsDetected` and `totalWasted*`, by contrast, are cumulative
+counters that survive both eviction and expiry — they answer "how much
+has this process wasted since it started" (or since the last call to an
+internal `reset()`), not "what's currently active." Don't read
+`topOffenders` as an audit log; read the cumulative totals for that.
+
+### Benchmarks
+
+Two kinds, both under `bench/` and `test/thrash/`:
+
+- **Performance** (`test/thrash/benchmark.test.js`, runs as part of
+  `npm test`): CPU/memory overhead of the detection code itself.
+- **Data** (`bench/thrash-data-benchmark.js`, a standalone script — its
+  own header docblock documents every `--flag`, including `--sweep`):
+  how often a *configured* mix of healthy/broken tool calls results in a
+  detected loop, and what it would cost. Two runs are committed under
+  `bench/results/` as a reproducibility reference —
+  [`published-seed-42.json`](bench/results/published-seed-42.json)
+  / [`.txt`](bench/results/published-seed-42.txt) (a single run) and
+  [`published-sweep-seed-42.json`](bench/results/published-sweep-seed-42.json)
+  / [`.md`](bench/results/published-sweep-seed-42.md) (a sweep across
+  `brokenToolRate` values 0.02–0.25).
+
+  **Read the sweep table as a model you parameterize with your own
+  observed failure rate, not as a measurement of real-world deployments.**
+  `brokenToolRate` is an input the table's reader supplies — every row is
+  a configured assumption, not something measured from production
+  traffic. There is no single headline percentage here to quote as "how
+  often agents thrash" — the whole point of the sweep is that the answer
+  depends entirely on your own failure rate, which this benchmark cannot
+  know. Both committed files carry a full methodology block (how sessions
+  were isolated, that retries are scripted rather than driven by a real
+  LLM agent loop, the exact retry/token-growth assumptions, the model and
+  price used, and every known limitation that could inflate the numbers)
+  and an exact `node bench/thrash-data-benchmark.js ...` command to
+  reproduce them byte-for-byte.
+
 ## Configuration
 
 All options passed to `instrumentMcpServer(server, options)`. Source of
@@ -434,6 +637,9 @@ truth: `src/config.js`.
 | `enableMetrics` | boolean | `true` | `false` disables `mcp.tool.*` metrics only |
 | `fingerprinting` | boolean | `true` | `false` disables `mcp.failure.*` attributes |
 | `costTracking` | object | see below | Controls cost/token attribution[^9] — see "Cost & Token Attribution" above |
+| `thrashDetection` | object | see below | Controls Agent Thrash Detection[^10] — see "Agent Thrash Detection" above. Requires `fingerprinting: true` |
+
+[^10]: `{ enabled?, threshold?, windowMs?, maxTrackedKeys?, entryTtlMs?, reEmitAfter?, assumeSingleSession? }`, all fields optional, individually defaulted, and individually overridable via an `OTEL_MCP_THRASH_*` env var — see "Agent Thrash Detection" → "Configuration" above for the full table.
 
 [^9]: `{ enabled?: boolean; pricingTable?: PricingTable; extractor?: UsageExtractor; budget?: { perSessionUsd?: number; perToolUsd?: number } }`, all fields optional and individually defaulted — `{ enabled: true, pricingTable: DEFAULT_PRICING, extractor: defaultExtractor }` with budget tracking off.
 [^2]: Required only when `setupNodeSdk` is `true`. Has no effect otherwise — the host app's registered `TracerProvider` owns the resource; passing it anyway logs a one-time `diag.warn`.
@@ -485,11 +691,12 @@ moved there from the main `semantic-conventions` repo, where the MCP
 conventions are now deprecated) for everything they define, and adds
 namespaces of its own where they don't yet: `mcp.tool.*` (call-count and
 duration metrics, and — as of v0.5.0 — token/cost attribution and budget
-attributes) and `mcp.failure.*` (failure fingerprinting). Both are
-documented as non-spec at every attribute (`src/attributes.js`,
-`src/fingerprint/attributes.js`), and are candidates to fold into the
-spec's own metrics/error vocabulary if it grows an equivalent. Full
-reasoning: ADR 004 in `docs/adr/`.
+attributes), `mcp.failure.*` (failure fingerprinting), and — as of
+v0.6.0 — `mcp.tool.loop.*` / `mcp.loop.*` (Agent Thrash Detection). All
+are documented as non-spec at every attribute (`src/attributes.js`,
+`src/fingerprint/attributes.js`, `src/thrash/attributes.js`), and are
+candidates to fold into the spec's own metrics/error vocabulary if it
+grows an equivalent. Full reasoning: ADR 004 in `docs/adr/`.
 
 One exception, also in `src/attributes.js`: `gen_ai.response.model` *is*
 a real spec attribute, co-emitted alongside the custom `mcp.tool.model`
@@ -505,13 +712,16 @@ pragmatic choice rather than a spec-pure one.
 - Supports both low-level `Server` and high-level `McpServer` APIs
 - @modelcontextprotocol/sdk ^1.0.0
 - @opentelemetry/api ^1.9.0
-- 288 tests (`npm test`) — see `test/`
+- 369 tests (`npm test`) — see `test/`
+- `npm run typecheck` (`tsc --noEmit`) type-checks the public `.d.ts`
+  surface (`src/index.d.ts` and friends) — see CONTRIBUTING.md
 
 ## Roadmap
 
 - v0.4: Deep Failure Fingerprinting ✓ — see "Failure Fingerprinting" above
   and ADR 006.
 - v0.5: Cost & Token Attribution ✓ — see "Cost & Token Attribution" above.
+- v0.6: Agent Thrash Detection ✓ — see "Agent Thrash Detection" above.
 - Future: failure clustering + regression detection; recovery hints;
   root-cause chaining across parent spans; alignment with the OTel GenAI
   SIG's MCP semantic conventions when published

@@ -1,6 +1,7 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CostTrackingOptions } from './cost/types.d.ts';
+import type { ThrashConfig, ThrashSummary } from './thrash/types.d.ts';
 
 /**
  * Options for {@link instrumentMcpServer}.
@@ -68,6 +69,35 @@ export interface InstrumentOptions {
    * `{ enabled: false }` alone works. See {@link CostTrackingOptions} (`src/cost/types.d.ts`).
    */
   costTracking?: CostTrackingOptions;
+
+  /**
+   * Set to `false` to disable deep-failure fingerprinting. When enabled (the default), every thrown error
+   * and tool-level failure (`isError: true`) is run through `computeFingerprint()`
+   * (`src/fingerprint/compose.js`), adding `mcp.failure.*` span attributes and an `mcp.failure.category`
+   * attribute on the `mcp.tool.errors` / `mcp.tool.silent_failures` / `mcp.tool.duration` metrics.
+   * `computeFingerprint()` never throws, so this only trades a small amount of per-failure CPU for
+   * fingerprinting.
+   *
+   * `thrashDetection` (below) depends on this: it keys off the same `mcp.failure.fingerprint`
+   * fingerprinting computes, so with `fingerprinting: false` thrash detection silently never fires,
+   * regardless of `thrashDetection`'s own settings.
+   *
+   * @default true
+   */
+  fingerprinting?: boolean;
+
+  /**
+   * Controls Agent Thrash Detection (v0.6.0): detecting when a tool is retried repeatedly with the same
+   * failure fingerprint, and attributing the wasted tokens/cost to that loop (the 5 `mcp.tool.loop.*`
+   * metrics plus one `mcp.loop.detected` span event — see the README's "Agent Thrash Detection" section).
+   * Any fields you omit from a partial object fall back to their defaults individually, same as
+   * `costTracking` above. Requires `fingerprinting` to also be enabled (the default) — see that option's
+   * doc. See {@link ThrashConfig} (`src/thrash/types.d.ts`) for the full field list and defaults,
+   * including `assumeSingleSession`, which you should read carefully before enabling on any transport
+   * that might serve more than one client: getting it wrong merges unrelated clients' failures into
+   * false-positive loops.
+   */
+  thrashDetection?: Partial<ThrashConfig>;
 }
 
 /**
@@ -111,12 +141,22 @@ export type DuckTypedMcpServer = {
  *   created for it — call it during your process's own shutdown sequence to
  *   avoid losing buffered spans. `shutdown` is typed as optional because it
  *   is only attached at runtime when `setupNodeSdk` is `true`; check for its
- *   presence before calling.
+ *   presence before calling. The returned object also gets a
+ *   `getThrashSummary()` method (v0.6.0) returning a point-in-time,
+ *   in-process {@link ThrashSummary} — no OTel involved, nothing sent
+ *   anywhere; see the README's "Agent Thrash Detection" section. Unlike
+ *   `shutdown`, it's attached unconditionally (not gated behind
+ *   `setupNodeSdk`) — still typed as optional because it, like `shutdown`,
+ *   is never attached when `options.enabled` is `false` (nothing is
+ *   instrumented at all in that case).
  */
 export function instrumentMcpServer<T extends Server | McpServer | DuckTypedMcpServer>(
   server: T,
   options?: InstrumentOptions,
-): T & { shutdown?: () => Promise<void> };
+): T & {
+  shutdown?: () => Promise<void>;
+  getThrashSummary?: (options?: { topOffendersLimit?: number }) => ThrashSummary;
+};
 
 // --- Deep-failure fingerprinting (src/fingerprint/) ---
 //
@@ -129,6 +169,9 @@ export type {
   FailureOrigin,
   FingerprintResult,
   FingerprintInputs,
+  FingerprintContext,
+  Classifier,
+  ComputeFingerprintOptions,
 } from './fingerprint/types.d.ts';
 
 export { computeFingerprint } from './fingerprint/compose.js';
@@ -152,3 +195,14 @@ export type {
 export { DEFAULT_PRICING } from './cost/pricing.js';
 export { defaultExtractor } from './cost/extractor.js';
 export { calculateCost } from './cost/calculator.js';
+
+// --- Agent Thrash Detection (src/thrash/) ---
+//
+// Re-exported here so TypeScript consumers get these types from the
+// package root instead of reaching into src/thrash/* directly. See
+// src/thrash/types.d.ts for the full shape documentation. Unlike
+// src/cost/ and src/fingerprint/ above, no runtime values are re-exported
+// here yet — ThrashDetector and createThrashEmitter are internal to
+// instrument.js's wiring, not part of the public API.
+
+export type { ThrashConfig, ThrashDetectedEvent, ThrashSummary, ThrashOffender } from './thrash/types.d.ts';

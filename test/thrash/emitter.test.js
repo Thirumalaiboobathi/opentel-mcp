@@ -15,6 +15,7 @@ import {
   ATTR_MCP_LOOP_DURATION_MS,
   ATTR_MCP_LOOP_FIRST_SPAN_ID,
   ATTR_MCP_LOOP_FIRST_TRACE_ID,
+  ATTR_MCP_LOOP_SESSION_ID,
 } from '../../src/thrash/attributes.js';
 
 /** Minimal in-memory MetricReader — mirrors test/metrics.test.js's TestMetricReader. */
@@ -38,6 +39,7 @@ function findMetric(resourceMetrics, name) {
 /** Builds a valid ThrashDetectedEvent, overridable per call. */
 function mkEvent(overrides = {}) {
   return {
+    sessionId: 'session-abc',
     toolName: 'search',
     fingerprint: 'fp-abc123',
     loopLength: 3,
@@ -108,7 +110,7 @@ describe('createThrashEmitter', () => {
     expect(duration.dataPoints[0].value.sum).toBe(200);
   });
 
-  it('carries only gen_ai.tool.name on metric labels — never mcp.failure.fingerprint', async () => {
+  it('carries only gen_ai.tool.name on metric labels — never mcp.failure.fingerprint or mcp.loop.session_id', async () => {
     const emitter = createThrashEmitter('0.0.0-test');
     const tracer = trace.getTracer('test');
 
@@ -130,6 +132,7 @@ describe('createThrashEmitter', () => {
       expect(Object.keys(attrs)).toEqual([ATTR_GEN_AI_TOOL_NAME]);
       expect(attrs[ATTR_GEN_AI_TOOL_NAME]).toBe('search');
       expect(attrs[ATTRIBUTE_KEYS.FINGERPRINT]).toBeUndefined();
+      expect(attrs[ATTR_MCP_LOOP_SESSION_ID]).toBeUndefined();
     }
   });
 
@@ -138,7 +141,9 @@ describe('createThrashEmitter', () => {
     const tracer = trace.getTracer('test');
 
     tracer.startActiveSpan('span', (span) => {
-      emitter.emit(mkEvent({ fingerprint: 'fp-xyz', loopLength: 6, wastedTokensIn: 100, wastedTokensOut: 50 }));
+      emitter.emit(
+        mkEvent({ sessionId: 'session-xyz', fingerprint: 'fp-xyz', loopLength: 6, wastedTokensIn: 100, wastedTokensOut: 50 }),
+      );
       span.end();
     });
 
@@ -154,6 +159,7 @@ describe('createThrashEmitter', () => {
     expect(attrs[ATTR_MCP_LOOP_DURATION_MS]).toBe(200);
     expect(attrs[ATTR_MCP_LOOP_FIRST_SPAN_ID]).toBe('span-first');
     expect(attrs[ATTR_MCP_LOOP_FIRST_TRACE_ID]).toBe('trace-first');
+    expect(attrs[ATTR_MCP_LOOP_SESSION_ID]).toBe('session-xyz');
     expect(attrs[ATTRIBUTE_KEYS.FINGERPRINT]).toBe('fp-xyz');
   });
 

@@ -320,15 +320,15 @@ async function setUpRealClientServerPair(config) {
  * sessionIds seen by both is what actually corresponds to "every session
  * this benchmark simulated," not record() alone.
  *
- * Also captures, per record() call that returns a ThrashDetectedEvent,
- * which sessionId that event belongs to — captured at the call site
- * because ThrashDetectedEvent itself carries no sessionId field (see
- * src/thrash/types.d.ts — by design: it's what OTel attributes/metrics
- * consume, and sessionId deliberately never becomes a metric label, see
- * METRIC_SAFE_ATTRIBUTES). Reads the same data the emitter turns into
- * metrics/span events, captured at the source — this script does not
- * stand up a MeterProvider/SpanExporter, since nothing here reads OTel
- * output.
+ * Also groups, per record() call that returns a ThrashDetectedEvent, which
+ * sessionId that event belongs to — read directly off event.sessionId now
+ * that ThrashDetectedEvent carries one, rather than needing to capture
+ * input.sessionId at the call site separately (the two are always the same
+ * value; reading it off the event is simpler and matches how any other
+ * consumer of the return value would do it). Reads the same data the
+ * emitter turns into metrics/span events, captured at the source — this
+ * script does not stand up a MeterProvider/SpanExporter, since nothing
+ * here reads OTel output.
  *
  * @returns {{ observedSessionIds: Set<string>, detectedEventsBySessionId: Map<string, object[]>, restore: () => void }}
  */
@@ -342,9 +342,9 @@ function observeThrashDetector() {
     observedSessionIds.add(input?.sessionId);
     const event = originalRecord.call(this, input);
     if (event) {
-      const eventsForSession = detectedEventsBySessionId.get(input.sessionId) ?? [];
+      const eventsForSession = detectedEventsBySessionId.get(event.sessionId) ?? [];
       eventsForSession.push(event);
-      detectedEventsBySessionId.set(input.sessionId, eventsForSession);
+      detectedEventsBySessionId.set(event.sessionId, eventsForSession);
     }
     return event;
   };

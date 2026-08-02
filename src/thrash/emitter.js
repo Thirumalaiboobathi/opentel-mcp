@@ -12,12 +12,13 @@
  * a second getMeter() call here still reports under the same meter to any
  * backend), plus one span event on the currently active span.
  *
- * Metric attributes are gen_ai.tool.name ONLY. mcp.failure.fingerprint is
- * deliberately excluded from every metric here — see
- * src/fingerprint/attributes.js's METRIC_SAFE_ATTRIBUTES docblock:
- * fingerprint is unbounded (a new bug is a new fingerprint, forever), so
- * putting it on a metric label would turn every distinct bug into its own
- * permanent time series. fingerprint is still fully available on the
+ * Metric attributes are gen_ai.tool.name ONLY. mcp.failure.fingerprint and
+ * mcp.loop.session_id are deliberately excluded from every metric here —
+ * see src/fingerprint/attributes.js's METRIC_SAFE_ATTRIBUTES docblock:
+ * both are unbounded, per-caller values (a new bug is a new fingerprint,
+ * forever; a new session is a new session id, forever), so putting either
+ * on a metric label would turn every distinct bug/session into its own
+ * permanent time series. Both are still fully available on the
  * mcp.loop.detected span event below, where high-cardinality attributes
  * are safe (each span is its own record, not a label on a shared series).
  */
@@ -34,6 +35,7 @@ import {
   ATTR_MCP_LOOP_DURATION_MS,
   ATTR_MCP_LOOP_FIRST_SPAN_ID,
   ATTR_MCP_LOOP_FIRST_TRACE_ID,
+  ATTR_MCP_LOOP_SESSION_ID,
 } from './attributes.js';
 
 /** @typedef {import('./types.d.ts').ThrashDetectedEvent} ThrashDetectedEvent */
@@ -74,7 +76,9 @@ export function createThrashEmitter(packageVersion) {
      * Emits all 5 metrics, and — only when there's a current, recording
      * span (via trace.getActiveSpan(); this never creates a new span) —
      * one mcp.loop.detected span event carrying the full detail,
-     * including mcp.failure.fingerprint. Never throws: a broken
+     * including mcp.failure.fingerprint and mcp.loop.session_id (neither
+     * of which ever goes on a metric label — see this module's docblock).
+     * Never throws: a broken
      * meter/instrument, a malformed event, or no active span all degrade
      * to a silent no-op rather than surfacing to the caller, matching
      * this library's fail-open philosophy. Metrics and the span event are
@@ -107,6 +111,7 @@ export function createThrashEmitter(packageVersion) {
           [ATTR_MCP_LOOP_DURATION_MS]: event.durationMs,
           [ATTR_MCP_LOOP_FIRST_SPAN_ID]: event.firstSpanId,
           [ATTR_MCP_LOOP_FIRST_TRACE_ID]: event.firstTraceId,
+          [ATTR_MCP_LOOP_SESSION_ID]: event.sessionId,
           [ATTRIBUTE_KEYS.FINGERPRINT]: event.fingerprint,
         });
       } catch {

@@ -7,7 +7,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { instrumentMcpServer } from '../../src/instrument.js';
 import { ATTR_GEN_AI_TOOL_NAME } from '../../src/attributes.js';
-import { SPAN_EVENT_NAME_LOOP_DETECTED, ATTR_MCP_LOOP_LENGTH } from '../../src/thrash/attributes.js';
+import { SPAN_EVENT_NAME_LOOP_DETECTED, ATTR_MCP_LOOP_LENGTH, ATTR_MCP_LOOP_SESSION_ID } from '../../src/thrash/attributes.js';
 
 /** Fresh, unconnected low-level Server — every test builds its own (see test/instrument.fingerprint.test.js). */
 function createServer(name = 'test-server') {
@@ -130,6 +130,10 @@ describe('Agent Thrash Detection integration (public instrumentMcpServer() entry
     const loopEvents = spans[2].events.filter((e) => e.name === SPAN_EVENT_NAME_LOOP_DETECTED);
     expect(loopEvents).toHaveLength(1);
     expect(loopEvents[0].attributes[ATTR_MCP_LOOP_LENGTH]).toBe(3);
+    // Real, end-to-end wiring: whatever session id resolveThrashSessionId() picked (the generated
+    // fallback here, via assumeSingleSession) made it all the way onto the span event.
+    expect(typeof loopEvents[0].attributes[ATTR_MCP_LOOP_SESSION_ID]).toBe('string');
+    expect(loopEvents[0].attributes[ATTR_MCP_LOOP_SESSION_ID]).not.toBe('');
     // The first two calls' spans carry no loop event — only the 3rd crossed the threshold.
     expect(spans[0].events.filter((e) => e.name === SPAN_EVENT_NAME_LOOP_DETECTED)).toHaveLength(0);
     expect(spans[1].events.filter((e) => e.name === SPAN_EVENT_NAME_LOOP_DETECTED)).toHaveLength(0);
@@ -332,5 +336,42 @@ describe('sessionId fallback resolution', () => {
     expect(warnSpy).not.toHaveBeenCalled();
 
     warnSpy.mockRestore();
+  });
+});
+
+describe('getThrashSummary()', () => {
+  it('is attached to the object instrumentMcpServer() returns, and reflects real calls through the public entry point', async () => {
+    const server = createServer();
+    // Real, explicit sessionId per call below — no need for
+    // assumeSingleSession here (unlike some other tests in this file that
+    // deliberately exercise the undeterminable-transport fallback path).
+    const returned = instrumentMcpServer(server, { serviceName: 'svc' });
+    registerToggleableTool(server, { failing: true });
+
+    expect(typeof returned.getThrashSummary).toBe('function');
+    expect(returned.getThrashSummary()).toEqual({
+      activeLoops: 0,
+      totalLoopsDetected: 0,
+      totalWastedCostUsd: 0,
+      totalWastedTokensIn: 0,
+      totalWastedTokensOut: 0,
+      topOffenders: [],
+    });
+
+    await invokeToolCall(server, { name: 'validate', arguments: {} }, { requestId: 1, sessionId: 'client-a' });
+    await invokeToolCall(server, { name: 'validate', arguments: {} }, { requestId: 2, sessionId: 'client-a' });
+    await invokeToolCall(server, { name: 'validate', arguments: {} }, { requestId: 3, sessionId: 'client-a' });
+
+    const summary = returned.getThrashSummary();
+    expect(summary.activeLoops).toBe(1);
+    expect(summary.totalLoopsDetected).toBe(1);
+    expect(summary.topOffenders).toHaveLength(1);
+    expect(summary.topOffenders[0].toolName).toBe('validate');
+  });
+
+  it('is not attached when instrumentation is entirely disabled', () => {
+    const server = createServer();
+    const returned = instrumentMcpServer(server, { serviceName: 'svc', enabled: false });
+    expect(returned.getThrashSummary).toBeUndefined();
   });
 });
