@@ -40,6 +40,29 @@ compatibility, or API shape — gets an Architecture Decision Record under
 `002-instrument-first-detection.md` for the expected format (Context,
 Decision, Constraints accepted, Alternatives rejected, Consequences).
 
+## Release checklist
+
+Run these in order — each step assumes the previous one passed:
+
+1. `npm test`
+2. `npm run typecheck` — type-checks `src/**/*.d.ts` against the repo tree
+   directly (see "Public API types" above).
+3. `npm run verify:tarball` — packs the tarball, installs it into a clean
+   project *outside* this repo, and imports every value and type export
+   parsed from `src/index.d.ts` under `tsc --strict`, plus a runtime import
+   to confirm the package actually loads. This exists because step 2 can't
+   catch a public export that's re-exported from a `.js` file with no
+   matching `.d.ts` — nothing forces that check through the tarball's
+   `files` allowlist and package.json `exports` the way a real consumer's
+   install does. That exact gap shipped in v0.6.0 (TS7016 on `import {
+   computeFingerprint } from 'opentel-mcp'` for any strict consumer),
+   fixed in v0.6.1. Also wired into `prepublishOnly`, so `npm publish`
+   fails closed on this — but run it manually here so a broken release
+   doesn't burn a publish attempt.
+4. `npm version <patch|minor|major>`
+5. `git push --tags`
+6. `npm publish`
+
 ## PR checklist
 
 - [ ] `npm test` passes

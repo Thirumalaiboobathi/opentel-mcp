@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.1
+
+### Fixed
+
+- `src/index.d.ts` re-exported values (`computeFingerprint`,
+  `toSpanAttributes`, `ATTRIBUTE_KEYS`, `METRIC_SAFE_ATTRIBUTES`,
+  `DEFAULT_CLASSIFIERS`, `DEFAULT_PRICING`, `defaultExtractor`,
+  `calculateCost`) from six `.js` modules that had no corresponding `.d.ts`
+  file, so any consumer with `strict`/`noImplicitAny` got a TS7016 error
+  just from importing the package. Added `src/fingerprint/compose.d.ts`,
+  `src/fingerprint/attributes.d.ts`, `src/fingerprint/classify/index.d.ts`,
+  `src/cost/pricing.d.ts`, `src/cost/extractor.d.ts`, and
+  `src/cost/calculator.d.ts`. Pre-existing since v0.4.0 (fingerprinting) and
+  v0.5.0 (cost tracking) — first caught verifying the v0.6.0 published
+  tarball.
+
 ## 0.6.0
 
 ### Added — Agent Thrash Detection

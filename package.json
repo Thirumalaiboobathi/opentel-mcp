@@ -1,6 +1,6 @@
 {
   "name": "opentel-mcp",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "One-line OpenTelemetry instrumentation for Model Context Protocol (MCP) servers",
   "type": "module",
   "main": "src/index.js",
@@ -29,9 +29,11 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
+    "verify:tarball": "node scripts/verify-tarball.js",
     "bench": "vitest bench --run",
     "prepack": "node scripts/strip-workspaces.js",
-    "postpack": "node scripts/restore-workspaces.js"
+    "postpack": "node scripts/restore-workspaces.js",
+    "prepublishOnly": "npm run verify:tarball"
   },
   "keywords": [
     "mcp",
