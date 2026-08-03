@@ -254,6 +254,8 @@ in `docs/adr/`.
 | mcp.failure.category | One of 8 categories (below) | "timeout" |
 | mcp.failure.origin | `tool_error` \| `thrown` \| `transport` | "thrown" |
 | mcp.failure.error_class | Error class / constructor name | "TypeError" |
+| mcp.failure.channel | `execution` \| `protocol.not_found` \| `protocol.input` \| `protocol.output` \| `protocol.other` \| `unknown` — see "Agent Thrash Detection" below | "protocol.input" |
+| mcp.failure.validation_paths | Which schema field(s) a Zod validation failure named, one dot-joined path per failing issue — omitted entirely when nothing parseable was found (ADR 009) | `["email", "user.profile.age"]` |
 
 Source of truth: `src/fingerprint/attributes.js`. Every category:
 
@@ -278,7 +280,26 @@ reach a fingerprint-derived value through
 `origin` (24 combinations max). There is no code path today that could
 accidentally attach `fingerprint`, `signature`, or `error_class` to a
 counter or histogram label. See `src/fingerprint/attributes.js` and ADR
-006's "Consequences" section.
+006's "Consequences" section. `mcp.failure.validation_paths` above is
+held to the exact same rule and for the exact same reason — field/path
+names are bounded per tool but unbounded across every tool anyone
+registers, so it is permanently excluded from `METRIC_SAFE_ATTRIBUTES`,
+span-only, no exceptions (ADR 009).
+
+**Field-level discrimination is a property of the fingerprint, not a
+separate detector.** Two validation failures on the *same* schema field
+normalize to the same message and hash to the *same* fingerprint, even
+across different invalid values tried; a failure on a *different* field
+normalizes differently and hashes to a *different* fingerprint. This
+already falls out of hashing the full Zod issues JSON (which embeds each
+failing field's path) — it is not a dedicated field-convergence detector,
+and `mcp.failure.validation_paths` doesn't change this behavior, it just
+makes it queryable instead of implicit in an opaque hash. See ADR 009
+(`docs/adr/009-field-level-convergence.md`) for the full investigation,
+including the one gap this doesn't cover: fixing one of several failing
+fields changes the issues array's shape, which changes the fingerprint
+even though another field is still failing underneath — tracked in
+`docs/known-gaps.md`, not solved here.
 
 **Extending it:** `computeFingerprint(err, ctx, opts)`
 (`src/fingerprint/compose.js`) accepts `opts.classifiers` to prepend your
@@ -420,7 +441,7 @@ convenience default, not a maintained price list.
   session-scoped limits are skipped gracefully (not enforced against a
   fallback key) for transports with no session id, like stdio.
 
-## Agent Thrash Detection (v0.6.0)
+## Agent Thrash Detection (v0.6.0+)
 
 Watches for the same tool failing with the same v0.4 failure fingerprint
 several times in a row inside one session — the pattern an LLM agent
@@ -447,6 +468,104 @@ fingerprint inside 60 seconds gets flagged automatically. **Requires
 `mcp.failure.fingerprint` fingerprinting computes, so with fingerprinting
 disabled, thrash detection silently never fires, regardless of
 `thrashDetection`'s own settings.
+
+### Channel-aware thresholds (v0.7.0)
+
+Not every repeated failure means the same thing. `mcp.failure.channel`
+(see "Span attributes" above) classifies *where* a tools/call failure
+actually came from, and thrash detection uses that classification to pick
+a different threshold per channel instead of treating every repeat
+identically:
+
+| `mcp.failure.channel` | What it means | Threshold |
+|---|---|---|
+| `execution` | The call reached the tool and the tool itself reports a business-logic failure (`isError: true`). Retrying an unchanged upstream failure identically **is** thrash. | `threshold` (default 3) — unchanged from v0.6.0 |
+| `protocol.input` | A JSON-RPC `InvalidParams` (-32602) whose message indicates the *agent* supplied bad arguments. An agent retrying with adjusted arguments may be genuinely converging on a correct call, not thrashing. | `inputThreshold` (default 5) — higher |
+| `protocol.not_found` | `MethodNotFound` (-32601), or `InvalidParams` indicating an unknown/disabled tool. Retrying a tool name that doesn't exist is never convergence — there's no "getting closer" to a tool that isn't there. | `notFoundThreshold` (default 1) — an immediate flag |
+| `protocol.output` | An `InvalidParams` (-32602) whose message indicates the **tool's own output** failed its declared output schema. This is the server author's bug — no argument the agent supplies can ever fix it. | **Excluded from thrash detection entirely.** Never counted, no matter how many times it repeats. |
+| `protocol.other` | Any other JSON-RPC error code, or an unrecognized `-32602` message shape. | `threshold` (same as `execution`) |
+| `unknown` | The failure doesn't confidently resemble either the execution or protocol shape. | `threshold` (same as `execution`) |
+
+**This closes a real false positive present in every published version
+through v0.6.1**: an output-validation bug — entirely the tool author's
+fault — that an agent naively retried was being counted as agent thrash
+before this release, because nothing distinguished it from an ordinary
+repeated business-logic failure. It no longer is. Full investigation and
+design rationale: ADR 007 (`docs/adr/007-protocol-error-channel.md`).
+
+Configure the two new thresholds the same way as every other
+`thrashDetection` field — see "Configuration" below.
+
+### Reachability: high-level `McpServer` vs. low-level `Server`
+
+**Read this before assuming `mcp.failure.channel` gives you full protocol
+visibility on every server.** How much of the table above you actually
+see depends on which server API you instrument, and the honest picture is
+more limited than "protocol errors are now detected everywhere":
+
+The high-level `McpServer` (`.tool()`/`.registerTool()` — the ergonomic,
+documented API most real MCP servers use) already catches nearly every
+protocol-shaped failure itself and converts it to `isError: true` *before*
+this library ever sees a thrown error — tool not found, tool disabled,
+input validation, output validation, or any other bug in a handler, all
+land as `isError: true`, with the sole exception of one narrow
+elicitation-flow error type. That means most of what `mcp.failure.channel`
+reveals for `McpServer` users was **already visible via `isError`** before
+this release — this feature isn't adding protocol-error detection where
+none existed; it's adding *sub-classification* on top of detection that,
+for the most part, already existed.
+
+| `mcp.failure.channel` value | High-level `McpServer` | Low-level `Server` (hand-rolled dispatcher) |
+|---|---|---|
+| `execution` | Reachable — and the *only* value most failures produced before this release (see below) | Reachable when the handler returns `{isError:true}` itself |
+| `protocol.not_found` | Not reachable via a raw thrown error (`McpServer` swallows it) — reachable only via the recovery mechanism below | Reachable directly |
+| `protocol.input` | Same — recovery-only | Reachable directly |
+| `protocol.output` | Same — recovery-only | Reachable directly |
+| `protocol.other` | Reachable via a raw thrown error only for one narrow elicitation-flow error code; not a general catch-all for `McpServer` | Reachable for any other code, or an unrecognized `-32602` message |
+| `unknown` | Effectively not reachable via a raw thrown error — `McpServer`'s catch swallows *any* error, not just protocol-shaped ones | Reachable for a thrown value with no error code at all |
+
+For the low-level `Server`, all six values are directly reachable, since
+nothing intercepts a thrown error before this library's own span/thrash
+wrapping runs — this attribute's richest, most direct value is for
+low-level `Server` users.
+
+For `McpServer` users, closing the false positive above (the point of
+this release) required a **recovery step**: `McpServer` preserves the
+original error's message verbatim when it converts a thrown error to
+`isError: true`, including the exact `MCP error {code}: ` wrapper its
+error class's constructor always adds. `classifyFailureChannel()` reads
+that wrapper back out of the disguised `isError: true` result and
+recovers the real channel from it, falling back to `execution` only when
+the message doesn't match that shape (i.e. it's a genuine, tool-authored
+business message, not a disguised protocol failure). This is what makes
+`protocol.output`'s exclusion actually work for `McpServer` users too —
+without it, the false positive this release fixes would only have been
+fixed for hand-rolled low-level `Server` apps.
+
+**This recovery step is inherently fragile**, coupled to matching the
+exact prose the installed SDK version happens to use — both the `MCP
+error {code}: ` wrapper and the `-32602` sub-case message markers
+(`"Input validation error:"`, `"Output validation error:"`, and the
+looser `"not found"`/`"disabled"` substring matches). If the SDK changes
+either format, the classifier degrades safely to `execution` (never a
+thrown error, never a wrong specific answer) rather than breaking — but a
+future SDK version could silently reopen part of the gap this release
+closes. See ADR 007's addendum for the full verification, including how
+this was confirmed against a real `McpServer` and a real Zod output
+schema before being fixed.
+
+**Known limitation — a forwarded/proxied error can collide with this
+recovery.** A tool that forwards another MCP call's error text verbatim
+(an orchestrator or proxy tool surfacing a downstream failure) could
+plausibly produce a message starting with the same `MCP error {code}: `
+wrapper, purely by coincidence of forwarding real McpError text. For most
+codes this is cosmetic (`protocol.other` shares `execution`'s threshold).
+The sharp case: a forwarded output-validation-shaped message would be
+**excluded from thrash detection entirely**, even though it may be a
+genuine, repeatable failure from the forwarding tool's own perspective —
+a false negative, not a false positive. Assessed as an acceptable,
+narrow risk for this release (see ADR 007's addendum for the full
+reasoning); revisit if this pattern turns out to be common in practice.
 
 ### Metrics
 
@@ -504,6 +623,22 @@ silently, never throws. Source of truth: `src/thrash/config.js`.
 | `entryTtlMs` | `OTEL_MCP_THRASH_ENTRY_TTL_MS` | number | `900000` | How long an idle tracked key survives before expiry |
 | `reEmitAfter` | `OTEL_MCP_THRASH_RE_EMIT_AFTER` | number | `3` | Re-emit every N further failures past `threshold` (e.g. 3, 6, 9, ...) instead of once |
 | `assumeSingleSession` | `OTEL_MCP_THRASH_ASSUME_SINGLE_SESSION` | boolean | `false` | Force-permits the fallback session id even when the transport can't be determined — see below |
+| `inputThreshold` | `OTEL_MCP_THRASH_INPUT_THRESHOLD` | number | `5` | Per-origin threshold (ADR 007) for `mcp.failure.channel: protocol.input` — higher than `threshold`, since an agent retrying with adjusted arguments may be converging |
+| `notFoundThreshold` | `OTEL_MCP_THRASH_NOT_FOUND_THRESHOLD` | number | `1` | Per-origin threshold (ADR 007) for `mcp.failure.channel: protocol.not_found` — lower than `threshold`; retrying a nonexistent tool is never convergence |
+
+**A note on defaults and client-side retry caps.** Every threshold above
+assumes an effectively uncapped agent — one that keeps retrying an
+identically-failing call at least as many times as the threshold. Some
+agent frameworks impose their own client-side cap on same-arguments
+retries (e.g. giving up and reporting failure after 2 identical
+attempts). If an agent's own cap is lower than the relevant threshold
+(the default `threshold` is 3), that agent's thrashing never crosses the
+threshold and `mcp.tool.loop.detected` never fires for it — arguably
+correct in isolation (2 identical failures is a weaker signal than 3),
+but worth knowing before assuming detection is silently catching
+everything. If you know your agent framework caps retries at N, consider
+setting the relevant threshold to N. Tracked as an open question, not
+solved here: `docs/known-gaps.md`.
 
 ### Session id resolution — read this before setting `assumeSingleSession`
 
@@ -591,6 +726,32 @@ counters that survive both eviction and expiry — they answer "how much
 has this process wasted since it started" (or since the last call to an
 internal `reset()`), not "what's currently active." Don't read
 `topOffenders` as an audit log; read the cumulative totals for that.
+
+### Known limitations
+
+**A malformed `tools/call` request produces zero telemetry — no span, no
+fingerprint, nothing.** If a request fails `CallToolRequestSchema`
+validation itself (e.g. a missing or wrongly-typed `name`/`arguments`
+field), the SDK's own request-parsing step throws *before*
+`instrumentMcpServer()`'s wrapped handler is ever invoked — there's no
+span to attach a status to and no error object reaches
+`computeFingerprint()`. This is invisible by construction: closing it
+means wrapping a layer above where this library currently patches
+(`setRequestHandler`'s `handler` argument), which is exactly the larger,
+less stable dependency surface ADR 001 chose not to depend on. **Deferred,
+not solved** — tracked in `docs/known-gaps.md`, and would need its own
+design pass (effectively revisiting ADR 001) rather than a patch-level
+fix.
+
+See `docs/known-gaps.md` for this gap in full, plus four more not fully
+covered by this release: field-level convergence tracking for
+`protocol.input` (distinguishing "ambiguous tool schema" from "agent is
+converging" — mostly already works as a side effect of fingerprinting,
+see "Failure Fingerprinting" above and ADR 009, but partial convergence
+within that is its own separate, still-open entry), an
+observation-liveness contract for `getThrashSummary()` (so "nothing
+failed" and "nothing is being observed at all" stop looking identical),
+and how client-side agent retry caps interact with the thresholds above.
 
 ### Benchmarks
 
@@ -712,7 +873,7 @@ pragmatic choice rather than a spec-pure one.
 - Supports both low-level `Server` and high-level `McpServer` APIs
 - @modelcontextprotocol/sdk ^1.0.0
 - @opentelemetry/api ^1.9.0
-- 369 tests (`npm test`) — see `test/`
+- 498 tests (`npm test`) — see `test/`
 - `npm run typecheck` (`tsc --noEmit`) type-checks the public `.d.ts`
   surface (`src/index.d.ts` and friends) — see CONTRIBUTING.md
 
@@ -722,6 +883,17 @@ pragmatic choice rather than a spec-pure one.
   and ADR 006.
 - v0.5: Cost & Token Attribution ✓ — see "Cost & Token Attribution" above.
 - v0.6: Agent Thrash Detection ✓ — see "Agent Thrash Detection" above.
+- v0.7: Channel-aware thrash detection ✓ — fixes a real false positive
+  (output-validation failures counted as thrash) present since v0.6.0; adds
+  `mcp.failure.channel` and per-channel thresholds. See "Agent Thrash
+  Detection" above and ADR 007. Also confirms (ADR 009) that field-level
+  discrimination for `protocol.input` failures already worked as a side
+  effect of fingerprinting — now regression-tested and surfaced via
+  `mcp.failure.validation_paths` (see "Failure Fingerprinting" above). Five
+  gaps this release didn't fully close — field-level convergence tracking,
+  partial convergence within it, an observation-liveness contract, the
+  pre-handler parse-failure gap, and client-side retry caps — are tracked
+  in `docs/known-gaps.md`, not silently dropped.
 - Future: failure clustering + regression detection; recovery hints;
   root-cause chaining across parent spans; alignment with the OTel GenAI
   SIG's MCP semantic conventions when published

@@ -14,7 +14,9 @@ import { resolveOptions } from './config.js';
 import { StderrSpanExporter } from './exporters/stderr.js';
 import { setupMeter } from './metrics.js';
 import { computeFingerprint } from './fingerprint/compose.js';
-import { toSpanAttributes } from './fingerprint/attributes.js';
+import { toSpanAttributes, ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
+import { classifyFailureChannel } from './fingerprint/classify/channel.js';
+import { extractValidationPaths } from './fingerprint/classify/validation-paths.js';
 import { calculateCost } from './cost/calculator.js';
 import { createBudgetTracker } from './cost/budget.js';
 import { ThrashDetector } from './thrash/detector.js';
@@ -532,8 +534,13 @@ function resolveThrashSessionId(server, sessionId, thrashSessionState, thrashCon
  * @param {string | undefined} toolName
  * @param {string | undefined} fingerprint - mcp.failure.fingerprint, or undefined when fingerprinting is disabled.
  * @param {{ tokensIn: number, tokensOut: number, costUsd: number } | null} usage - applyCostAttribution()'s return value.
+ * @param {string | undefined} channel - classifyFailureChannel()'s result (ADR 007, Phase 3), threaded
+ *   straight through to ThrashDetector.record() for its per-origin threshold (src/thrash/detector.js's
+ *   resolveThreshold()). Callers must not invoke this function at all for a 'protocol.output' failure — see
+ *   this function's call sites in wrapToolCallHandler() — but ThrashDetector.record() also refuses to track
+ *   it as defense in depth.
  */
-function applyThrashDetection(span, thrashConfig, thrashDetector, thrashEmitter, sessionId, toolName, fingerprint, usage) {
+function applyThrashDetection(span, thrashConfig, thrashDetector, thrashEmitter, sessionId, toolName, fingerprint, usage, channel) {
   if (!thrashConfig.enabled || fingerprint === undefined) return;
 
   try {
@@ -541,6 +548,7 @@ function applyThrashDetection(span, thrashConfig, thrashDetector, thrashEmitter,
       sessionId,
       toolName,
       fingerprint,
+      channel,
       spanId: span.spanContext().spanId,
       traceId: span.spanContext().traceId,
       tokensIn: usage?.tokensIn ?? 0,
@@ -602,7 +610,17 @@ function applyThrashSuccessClear(thrashConfig, thrashDetector, sessionId, toolNa
  * through computeFingerprint() (src/fingerprint/compose.js), attaching
  * mcp.failure.* span attributes (src/fingerprint/attributes.js) and
  * threading the resulting failure category into the mcp.tool.errors /
- * mcp.tool.silent_failures / mcp.tool.duration metrics.
+ * mcp.tool.silent_failures / mcp.tool.duration metrics. The same block also
+ * sets mcp.failure.channel (ADR 007, docs/adr/007-protocol-error-channel.md)
+ * via classifyFailureChannel() (src/fingerprint/classify/channel.js) —
+ * 'execution' for the isError branch (always, since isError: true already
+ * means the call succeeded at the JSON-RPC level), or one of
+ * 'protocol.not_found' / 'protocol.input' / 'protocol.output' /
+ * 'protocol.other' / 'unknown' for the thrown/rejected branch, which is
+ * where a genuine JSON-RPC protocol error surfaces. This is deliberately a
+ * plain additive span attribute, not part of computeFingerprint()'s hash
+ * input — see ADR 007's "Where the new dimension lives" for why fingerprint
+ * values must not change as a result.
  *
  * Cost/token attribution (see applyCostAttribution above and config.js's
  * `costTracking` option) runs in both the isError and success branches,
@@ -611,9 +629,20 @@ function applyThrashSuccessClear(thrashConfig, thrashDetector, sessionId, toolNa
  *
  * Agent Thrash Detection (v0.6.0 — see applyThrashDetection() and
  * applyThrashSuccessClear() above, and config.js's `thrashDetection`
- * option) runs record() in the isToolResultError branch (it needs a
- * fingerprint, which only a tool-level failure produces) and
- * clearOnSuccess() in the success branch.
+ * option) runs record() in both failure branches — the isToolResultError
+ * branch (channel usually 'execution', but can recover any of the
+ * 'protocol.*' values too when McpServer has disguised a protocol failure
+ * as isError: true — see classifyFailureChannel()'s docblock) and the
+ * thrown/rejected branch (channel one of 'protocol.not_found' /
+ * 'protocol.input' / 'protocol.other' / 'unknown') — with 'protocol.output'
+ * deliberately excluded from thrash tracking in BOTH branches (see each
+ * branch's own comment) — and clearOnSuccess() in the success branch. Each
+ * channel gets its own
+ * threshold (src/thrash/detector.js's resolveThreshold()): unchanged
+ * `threshold` for 'execution', a higher `inputThreshold` for
+ * 'protocol.input' (an agent retrying with different arguments may be
+ * converging), a lower `notFoundThreshold` for 'protocol.not_found'
+ * (retrying a nonexistent tool is never convergence).
  *
  * @param {Function} handler
  * @param {import('@opentelemetry/api').Tracer} tracer
@@ -688,13 +717,43 @@ function wrapToolCallHandler(
 
           let failureCategory = '';
           let failure = null;
+          let channel;
           if (fingerprintingEnabled) {
             failure = computeFingerprint(result, { toolName, origin: 'tool_error', cwd });
             span.setAttributes(toSpanAttributes(failure));
             failureCategory = failure.category;
+            // ADR 007's channel dimension, additive and independent of the
+            // fingerprint hash (see fingerprint/attributes.js's
+            // ATTRIBUTE_KEYS.CHANNEL docblock). NOT always 'execution'
+            // here: McpServer (@modelcontextprotocol/sdk/server/mcp.js)
+            // catches nearly every protocol-shaped failure itself (tool
+            // not found, disabled, input/output validation) and converts
+            // it to isError: true before this ever runs — but it preserves
+            // the original McpError's message verbatim, so
+            // classifyFailureChannel() recovers the real channel from that
+            // text instead of collapsing every one of those cases into
+            // 'execution' (see channel.js's docblock; confirmed against a
+            // real McpServer during Phase 3 verification).
+            channel = classifyFailureChannel(result);
+            span.setAttribute(ATTRIBUTE_KEYS.CHANNEL, channel);
+            // ADR 009's diagnostic attribute: which schema field(s) a
+            // validation failure named, best-effort extracted from the
+            // same message text. Omitted entirely (never set to `[]`)
+            // when nothing confidently parseable was found — see
+            // validation-paths.js's docblock.
+            const validationPaths = extractValidationPaths(result);
+            if (validationPaths.length > 0) {
+              span.setAttribute(ATTRIBUTE_KEYS.VALIDATION_PATHS, validationPaths);
+            }
           }
           const usage = applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker);
-          if (thrashSessionId !== null) {
+          // ADR 007: a 'protocol.output' failure recovered above (a
+          // McpServer-disguised output-schema bug) must not be counted as
+          // thrash here either, same as the thrown branch below —
+          // ThrashDetector.record() also refuses it as defense in depth,
+          // but skipping the call entirely keeps both branches' policy
+          // visibly identical.
+          if (thrashSessionId !== null && channel !== 'protocol.output') {
             applyThrashDetection(
               span,
               thrashConfig,
@@ -704,6 +763,7 @@ function wrapToolCallHandler(
               toolName,
               failure?.fingerprint,
               usage,
+              channel,
             );
           }
           metricsRecorder?.recordSilentFailure(toolName, failureCategory);
@@ -729,10 +789,48 @@ function wrapToolCallHandler(
         span.setAttribute(ATTR_ERROR_TYPE, errorType);
 
         let failureCategory = '';
+        let failure = null;
+        let channel;
         if (fingerprintingEnabled) {
-          const failure = computeFingerprint(err, { toolName, origin: 'thrown', cwd });
+          failure = computeFingerprint(err, { toolName, origin: 'thrown', cwd });
           span.setAttributes(toSpanAttributes(failure));
           failureCategory = failure.category;
+          // ADR 007's channel dimension — this is the protocol-error path:
+          // a JSON-RPC error response (the thrown/rejected err reaching
+          // this catch), sub-classified by classifyFailureChannel() into
+          // 'protocol.not_found' / 'protocol.input' / 'protocol.output' /
+          // 'protocol.other', or 'unknown' when err doesn't resemble a
+          // JSON-RPC error shape at all (e.g. an unrelated handler bug).
+          channel = classifyFailureChannel(err);
+          span.setAttribute(ATTRIBUTE_KEYS.CHANNEL, channel);
+          // ADR 009's diagnostic attribute — see the isError branch above
+          // for the full comment; same best-effort extraction, same
+          // omit-rather-than-guess behavior.
+          const validationPaths = extractValidationPaths(err);
+          if (validationPaths.length > 0) {
+            span.setAttribute(ATTRIBUTE_KEYS.VALIDATION_PATHS, validationPaths);
+          }
+        }
+        // ADR 007, Phase 3: this is the only place a genuine protocol-error
+        // failure can reach thrash detection (the isError branch above is
+        // always 'execution'). 'protocol.output' is deliberately excluded
+        // here — a server-side output-schema bug is never agent thrash, no
+        // matter how many times it repeats (see resolveThreshold()'s
+        // docblock in src/thrash/detector.js). No token/cost usage exists
+        // for a thrown error (there's no CallToolResult to extract it
+        // from), so usage is always null here.
+        if (thrashSessionId !== null && channel !== 'protocol.output') {
+          applyThrashDetection(
+            span,
+            thrashConfig,
+            thrashDetector,
+            thrashEmitter,
+            thrashSessionId,
+            toolName,
+            failure?.fingerprint,
+            null,
+            channel,
+          );
         }
         metricsRecorder?.recordError(toolName, errorType, failureCategory);
         metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_ERROR, failureCategory);

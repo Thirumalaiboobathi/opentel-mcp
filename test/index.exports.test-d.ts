@@ -1,6 +1,6 @@
 import { expectTypeOf } from 'vitest';
 import { instrumentMcpServer } from '../src/index.js';
-import type { InstrumentOptions, ThrashConfig, ThrashSummary, ThrashOffender } from '../src/index.js';
+import type { InstrumentOptions, ThrashConfig, ThrashSummary, ThrashOffender, FailureChannel } from '../src/index.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 
 // A consumer can construct options with a PARTIAL thrash config — every
@@ -21,6 +21,35 @@ const partialFingerprinting: InstrumentOptions = {
   fingerprinting: false,
 };
 expectTypeOf(partialFingerprinting).toMatchTypeOf<InstrumentOptions>();
+
+// ADR 007 Phase 3's per-channel thresholds (inputThreshold,
+// notFoundThreshold) are individually optional on Partial<ThrashConfig>,
+// same as every other thrashDetection field — a consumer must be able to
+// set just one without supplying the rest.
+const partialInputThreshold: InstrumentOptions = {
+  thrashDetection: {
+    inputThreshold: 8,
+  },
+};
+expectTypeOf(partialInputThreshold).toMatchTypeOf<InstrumentOptions>();
+
+const partialNotFoundThreshold: InstrumentOptions = {
+  thrashDetection: {
+    notFoundThreshold: 2,
+  },
+};
+expectTypeOf(partialNotFoundThreshold).toMatchTypeOf<InstrumentOptions>();
+
+// Both per-channel thresholds together, alongside the pre-existing
+// threshold field — all three are independent, not mutually exclusive.
+const partialAllThresholds: InstrumentOptions = {
+  thrashDetection: {
+    threshold: 3,
+    inputThreshold: 8,
+    notFoundThreshold: 2,
+  },
+};
+expectTypeOf(partialAllThresholds).toMatchTypeOf<InstrumentOptions>();
 
 // Both together, alongside other top-level options — the case Phase 6 was
 // actually about: none of this compiled before fingerprinting/thrashDetection
@@ -49,6 +78,8 @@ const fullThrashConfig: ThrashConfig = {
   entryTtlMs: 900_000,
   reEmitAfter: 3,
   assumeSingleSession: false,
+  inputThreshold: 5,
+  notFoundThreshold: 1,
 };
 expectTypeOf(fullThrashConfig).toMatchTypeOf<Partial<ThrashConfig>>();
 
@@ -62,6 +93,16 @@ const invalidThrash: InstrumentOptions = {
   thrashDetection: { notARealField: true },
 };
 void invalidThrash;
+
+// Same negative check, specifically for a typo'd per-channel threshold
+// field name — guards against inputThreshold/notFoundThreshold silently
+// stopping being enforced the same way notARealField above guards the
+// rest of ThrashConfig.
+const invalidPerChannelThrash: InstrumentOptions = {
+  // @ts-expect-error -- "inputThresholdTypo" is not a key of ThrashConfig
+  thrashDetection: { inputThresholdTypo: 5 },
+};
+void invalidPerChannelThrash;
 
 // instrumentMcpServer()'s returned object gets an optional
 // getThrashSummary() (v0.6.0, additive — see index.d.ts's docblock on
@@ -95,3 +136,33 @@ const offender: ThrashOffender = {
 };
 expectTypeOf(offender).toEqualTypeOf<ThrashOffender>();
 expectTypeOf<ThrashSummary['topOffenders']>().toEqualTypeOf<readonly ThrashOffender[]>();
+
+// FailureChannel (ADR 007, v0.7.0 Phase 4): the exact six-member union
+// classifyFailureChannel() can produce, importable from the package root
+// without reaching into src/fingerprint/classify/channel.js directly.
+expectTypeOf<FailureChannel>().toEqualTypeOf<
+  'execution' | 'protocol.not_found' | 'protocol.input' | 'protocol.output' | 'protocol.other' | 'unknown'
+>();
+
+// Each individual literal must be assignable -- if any one of these six
+// weren't a real member of FailureChannel, the corresponding line below
+// would fail to compile.
+const execution: FailureChannel = 'execution';
+const notFound: FailureChannel = 'protocol.not_found';
+const input: FailureChannel = 'protocol.input';
+const output: FailureChannel = 'protocol.output';
+const other: FailureChannel = 'protocol.other';
+const unknownChannel: FailureChannel = 'unknown';
+void execution;
+void notFound;
+void input;
+void output;
+void other;
+void unknownChannel;
+
+// Negative check: an arbitrary string is not a valid FailureChannel — this
+// is a closed union, not `string`. Guards against FailureChannel silently
+// widening.
+// @ts-expect-error -- "protocol.something_else" is not a member of FailureChannel
+const invalidChannel: FailureChannel = 'protocol.something_else';
+void invalidChannel;

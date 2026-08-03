@@ -9,6 +9,8 @@ const ENV_KEYS = [
   'OTEL_MCP_THRASH_ENTRY_TTL_MS',
   'OTEL_MCP_THRASH_RE_EMIT_AFTER',
   'OTEL_MCP_THRASH_ASSUME_SINGLE_SESSION',
+  'OTEL_MCP_THRASH_INPUT_THRESHOLD',
+  'OTEL_MCP_THRASH_NOT_FOUND_THRESHOLD',
 ];
 
 let savedEnv;
@@ -33,6 +35,8 @@ const DEFAULTS = {
   entryTtlMs: 900_000,
   reEmitAfter: 3,
   assumeSingleSession: false,
+  inputThreshold: 5,
+  notFoundThreshold: 1,
 };
 
 describe('resolveThrashConfig', () => {
@@ -73,6 +77,14 @@ describe('resolveThrashConfig', () => {
 
     it('overrides assumeSingleSession', () => {
       expect(resolveThrashConfig({ assumeSingleSession: true }).assumeSingleSession).toBe(true);
+    });
+
+    it('overrides inputThreshold', () => {
+      expect(resolveThrashConfig({ inputThreshold: 8 }).inputThreshold).toBe(8);
+    });
+
+    it('overrides notFoundThreshold', () => {
+      expect(resolveThrashConfig({ notFoundThreshold: 2 }).notFoundThreshold).toBe(2);
     });
 
     it('leaves every other field at its default when only one is overridden', () => {
@@ -126,6 +138,16 @@ describe('resolveThrashConfig', () => {
     it('falls back to the default for an unrecognized OTEL_MCP_THRASH_ASSUME_SINGLE_SESSION value', () => {
       process.env.OTEL_MCP_THRASH_ASSUME_SINGLE_SESSION = 'sure';
       expect(resolveThrashConfig().assumeSingleSession).toBe(false);
+    });
+
+    it('overrides inputThreshold via OTEL_MCP_THRASH_INPUT_THRESHOLD', () => {
+      process.env.OTEL_MCP_THRASH_INPUT_THRESHOLD = '8';
+      expect(resolveThrashConfig().inputThreshold).toBe(8);
+    });
+
+    it('overrides notFoundThreshold via OTEL_MCP_THRASH_NOT_FOUND_THRESHOLD', () => {
+      process.env.OTEL_MCP_THRASH_NOT_FOUND_THRESHOLD = '2';
+      expect(resolveThrashConfig().notFoundThreshold).toBe(2);
     });
 
     it('a partial field wins over a conflicting env var for that same field', () => {
@@ -191,6 +213,8 @@ describe('resolveThrashConfig', () => {
       expect(resolveThrashConfig({ windowMs: 0 }).windowMs).toBe(DEFAULTS.windowMs);
       expect(resolveThrashConfig({ entryTtlMs: -100 }).entryTtlMs).toBe(DEFAULTS.entryTtlMs);
       expect(resolveThrashConfig({ reEmitAfter: 0 }).reEmitAfter).toBe(DEFAULTS.reEmitAfter);
+      expect(resolveThrashConfig({ inputThreshold: 0 }).inputThreshold).toBe(DEFAULTS.inputThreshold);
+      expect(resolveThrashConfig({ notFoundThreshold: -1 }).notFoundThreshold).toBe(DEFAULTS.notFoundThreshold);
     });
   });
 

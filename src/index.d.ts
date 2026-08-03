@@ -167,6 +167,7 @@ export function instrumentMcpServer<T extends Server | McpServer | DuckTypedMcpS
 export type {
   FailureCategory,
   FailureOrigin,
+  FailureChannel,
   FingerprintResult,
   FingerprintInputs,
   FingerprintContext,

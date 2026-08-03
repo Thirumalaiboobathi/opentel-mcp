@@ -24,6 +24,10 @@ import { BoundedTtlMap } from './store.js';
  * @property {string} sessionId
  * @property {string} toolName
  * @property {string} fingerprint - mcp.failure.fingerprint (src/fingerprint/attributes.js).
+ * @property {string} [channel] - classifyFailureChannel()'s result (src/fingerprint/classify/channel.js),
+ *   ADR 007 Phase 3: which per-origin threshold applies (see resolveThreshold() below). Optional for
+ *   backward compatibility with callers that don't classify channel — treated the same as 'execution'/no
+ *   opinion, i.e. `threshold` applies. Never pass 'protocol.output' — see this method's own guard below.
  * @property {string} spanId
  * @property {string} traceId
  * @property {number} tokensIn
@@ -45,6 +49,45 @@ import { BoundedTtlMap } from './store.js';
 const FALLBACK_FINGERPRINT = '0000000000000000';
 
 const DEFAULT_TOP_OFFENDERS_LIMIT = 5;
+
+// ADR 007, Phase 3: 'protocol.output' means the TOOL's own output failed
+// its own declared output schema — a server-side bug, not something any
+// argument the agent supplies could fix. It must never be counted as
+// agent thrash, full stop (see the ADR's "Output validation is not
+// thrash"). Checked as its own named constant, not inline, so the guard
+// in record() below reads as a deliberate policy decision rather than an
+// arbitrary string comparison.
+const EXCLUDED_CHANNEL = 'protocol.output';
+
+/**
+ * Resolves which threshold applies to one failure, based on its
+ * classifyFailureChannel() channel (ADR 007, Phase 3):
+ *
+ *   - 'protocol.input': the separately configurable, higher
+ *     `inputThreshold` — an agent retrying with adjusted arguments after
+ *     an input-validation failure may be genuinely converging, not
+ *     thrashing.
+ *   - 'protocol.not_found': the separately configurable, lower
+ *     `notFoundThreshold` (defaults to 1, an immediate flag) — retrying a
+ *     tool name that doesn't exist is never convergence.
+ *   - Everything else — 'execution', 'protocol.other', 'unknown', a
+ *     missing/unrecognized value — falls back to the existing, unchanged
+ *     `threshold`. This deliberately includes 'execution': Phase 3 leaves
+ *     its behavior untouched.
+ *
+ * 'protocol.output' is deliberately absent from this map: record() below
+ * refuses to track it at all, so this function is never even reached for
+ * it in practice.
+ *
+ * @param {string | undefined} channel
+ * @param {ThrashConfig} config
+ * @returns {number}
+ */
+function resolveThreshold(channel, config) {
+  if (channel === 'protocol.input') return config.inputThreshold;
+  if (channel === 'protocol.not_found') return config.notFoundThreshold;
+  return config.threshold;
+}
 
 /**
  * @param {unknown} value
@@ -72,7 +115,11 @@ export class ThrashDetector {
   #clock;
   /** @type {BoundedTtlMap<string, ThrashEntry>} */
   #store;
-  /** @type {BoundedTtlMap<string, string>} keyed `${sessionId}|${toolName}` -> the fingerprint currently accumulating for it. */
+  /**
+   * @type {BoundedTtlMap<string, { channel: string | undefined, fingerprint: string }>} keyed
+   * `${sessionId}|${toolName}` -> the {channel, fingerprint} currently accumulating for it (ADR 007, Phase
+   * 3 — channel is needed here too so clearOnSuccess() can reconstruct #store's composite key).
+   */
   #activeFingerprint;
 
   // Cumulative, process-lifetime counters for getSummary() — deliberately
@@ -111,11 +158,22 @@ export class ThrashDetector {
     try {
       if (!this.#config.enabled) return null;
 
-      const { sessionId, toolName, fingerprint, spanId, traceId, tokensIn, tokensOut, costUsd } = input ?? {};
+      const { sessionId, toolName, fingerprint, channel, spanId, traceId, tokensIn, tokensOut, costUsd } =
+        input ?? {};
 
       if (fingerprint === FALLBACK_FINGERPRINT) return null;
+      // ADR 007: never track output-validation failures as thrash — see
+      // EXCLUDED_CHANNEL's docblock above. Checked here (not just at the
+      // instrument.js call site) so this holds regardless of caller.
+      if (channel === EXCLUDED_CHANNEL) return null;
 
-      const key = `${sessionId}|${toolName}|${fingerprint}`;
+      // ADR 007, Phase 3: channel is part of the tracking key, not just
+      // the (session, tool, fingerprint) triple — so failures on
+      // different channels for the same tool never merge into one loop's
+      // count, even in the case where two channels happen to produce the
+      // same fingerprint (fingerprint identity alone isn't a structural
+      // guarantee against that — see ThrashKey's docblock in types.d.ts).
+      const key = `${sessionId}|${toolName}|${channel}|${fingerprint}`;
       const now = this.#clock();
       const existing = this.#store.get(key);
       // Captured before entry.emitted is (re)computed below: true only if
@@ -132,6 +190,7 @@ export class ThrashDetector {
         entry = {
           toolName,
           fingerprint,
+          channel,
           count: 1,
           firstSeenAt: now,
           lastSeenAt: now,
@@ -156,7 +215,11 @@ export class ThrashDetector {
         };
       }
 
-      const { threshold, reEmitAfter } = this.#config;
+      // ADR 007, Phase 3: the threshold itself is per-channel — see
+      // resolveThreshold()'s docblock above. reEmitAfter stays global/shared
+      // across channels; only Phase 3's threshold split was requested.
+      const threshold = resolveThreshold(channel, this.#config);
+      const { reEmitAfter } = this.#config;
       const shouldEmit = entry.count >= threshold && (entry.count - threshold) % reEmitAfter === 0;
       entry.emitted = entry.emitted || shouldEmit;
 
@@ -179,7 +242,11 @@ export class ThrashDetector {
       }
 
       this.#store.set(key, entry);
-      this.#activeFingerprint.set(`${sessionId}|${toolName}`, fingerprint);
+      // Stores {channel, fingerprint} together (not just fingerprint) so
+      // clearOnSuccess() below can reconstruct the exact composite key
+      // above — it only knows (sessionId, toolName), not which channel the
+      // active episode was tracked under.
+      this.#activeFingerprint.set(`${sessionId}|${toolName}`, { channel, fingerprint });
 
       if (!shouldEmit) return null;
 
@@ -228,10 +295,14 @@ export class ThrashDetector {
   clearOnSuccess(sessionId, toolName) {
     try {
       const indexKey = `${sessionId}|${toolName}`;
-      const fingerprint = this.#activeFingerprint.get(indexKey);
-      if (fingerprint === undefined) return;
+      const active = this.#activeFingerprint.get(indexKey);
+      if (active === undefined) return;
 
-      this.#store.delete(`${sessionId}|${toolName}|${fingerprint}`);
+      // ADR 007, Phase 3: #store's key now includes channel — see
+      // record()'s docblock — so it must be reconstructed with the same
+      // channel this episode was actually tracked under, not just the
+      // fingerprint.
+      this.#store.delete(`${sessionId}|${toolName}|${active.channel}|${active.fingerprint}`);
       this.#activeFingerprint.delete(indexKey);
     } catch {
       // Never throw — see record()'s docblock for why.

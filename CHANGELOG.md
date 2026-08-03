@@ -1,5 +1,142 @@
 # Changelog
 
+## 0.7.0
+
+Origin-aware failure classification for Agent Thrash Detection. Prompted by
+external review (Reddit) pointing out that failure detection only read the
+`isError` channel, missing JSON-RPC protocol-level failures. Verifying that
+report surfaced a separate, more consequential finding: a real false
+positive already live in every published version — output-validation
+failures (a server-side bug) being counted as agent thrash. Full
+investigation and design: ADR 007 (`docs/adr/007-protocol-error-channel.md`).
+
+Also investigates a second external report (u/Pleasant-Ad192): whether a
+different schema field failing validation each attempt (an agent
+converging) can be told apart from the same field failing repeatedly (an
+ambiguous tool schema). Finding: it mostly already can be, as a side
+effect of how failures are fingerprinted — see ADR 009
+(`docs/adr/009-field-level-convergence.md`) — now pinned down by
+regression tests and a diagnostic span attribute, with one real gap
+(partial convergence) still open pending a design decision.
+
+Known gaps and open questions this release didn't close: `docs/known-gaps.md`.
+
+### Fixed
+
+- **Output-validation failures were miscategorized and incorrectly counted
+  toward Agent Thrash Detection.** When a tool's own handler returned output
+  that didn't match its declared output schema, the resulting failure
+  (surfaced as `isError: true`, whether thrown directly or converted by the
+  high-level `McpServer`) landed in fingerprint category `validation` or
+  `internal` depending on the exact wording, and — since Agent Thrash
+  Detection shipped in v0.6.0 — was tracked exactly like a normal
+  business-logic failure. An agent retrying such a tool would eventually
+  cross the default threshold and get flagged as "thrashing," even though
+  the failure is entirely the tool author's bug: no argument the agent
+  supplies can ever fix a server that never returns valid structured
+  content. **Affected range: the miscategorization itself has been present
+  since v0.4.0 (deep-failure fingerprinting); the false-positive thrash
+  count has been present since v0.6.0 (Agent Thrash Detection), through the
+  last published release, v0.6.1.** Fixed by classifying which *channel* a
+  failure arrived on (see Added, below) and excluding the `protocol.output`
+  channel from thrash detection entirely — not merely relabeling it.
+
+### Added
+
+- **`mcp.failure.channel` span attribute** — one of `execution` |
+  `protocol.not_found` | `protocol.input` | `protocol.output` |
+  `protocol.other` | `unknown`, classifying which channel a tools/call
+  failure arrived on (`classifyFailureChannel()`,
+  `src/fingerprint/classify/channel.js`). Additive: never part of
+  `computeFingerprint()`'s hash input (see Unchanged, below) — deliberately
+  a separate attribute from the pre-existing `mcp.failure.origin`, which
+  means something different (`tool_error` \| `thrown` \| `transport`) and
+  has been hashed since v0.4.0.
+- **Per-channel Agent Thrash Detection thresholds**: `inputThreshold`
+  (default `5`, higher than the base `threshold`) for the `protocol.input`
+  channel — an agent retrying with different arguments after an
+  input-validation failure may be genuinely converging, not thrashing —
+  and `notFoundThreshold` (default `1`, an immediate flag) for
+  `protocol.not_found` — retrying a tool name that doesn't exist is never
+  convergence. Each independently overridable via its own env var
+  (`OTEL_MCP_THRASH_INPUT_THRESHOLD` / `OTEL_MCP_THRASH_NOT_FOUND_THRESHOLD`),
+  following the exact existing `OTEL_MCP_THRASH_*` pattern.
+- `FailureChannel` type, exported from the package root alongside the
+  existing `FailureCategory` / `FailureOrigin` types.
+- For high-level `McpServer` users specifically: since `McpServer` converts
+  most protocol-shaped failures (tool not found, disabled, input/output
+  validation) to `isError: true` before this library ever sees a thrown
+  error, `classifyFailureChannel()` also recovers the real channel from
+  that disguised form by reading the `MCP error {code}: ` wrapper
+  `McpError`'s constructor always applies, which `McpServer` preserves
+  verbatim. Without this, `protocol.output`'s exclusion (the fix above)
+  would only have applied to hand-rolled low-level `Server` apps, not to
+  `McpServer` — see the README's "Agent Thrash Detection" section and ADR
+  007's addendum for the full reachability picture and its limits.
+- **`mcp.failure.validation_paths` span attribute** — which schema
+  field(s) a Zod validation failure named, one dot-joined path per
+  failing issue (e.g. `["email", "user.profile.age"]`), best-effort
+  extracted from the same message text `classifyFailureChannel()` already
+  reads (`extractValidationPaths()`,
+  `src/fingerprint/classify/validation-paths.js`). Omitted entirely —
+  never set to an empty array — when nothing confidently parseable was
+  found. Span-only, permanently excluded from
+  `METRIC_SAFE_ATTRIBUTES`: field/path names are bounded per tool but
+  unbounded across every tool anyone registers, the same reasoning that
+  already keeps `mcp.failure.fingerprint`/`signature`/`error_class` off
+  metric labels. Full investigation and design: ADR 009
+  (`docs/adr/009-field-level-convergence.md`).
+
+### Unchanged
+
+- **Fingerprints (`mcp.failure.fingerprint` and every other
+  `FingerprintInputs` field) are byte-identical to v0.6.1 for the same
+  inputs.** The new `channel` dimension is deliberately kept out of
+  `computeFingerprint()`'s hash input (ADR 007) specifically so this
+  release cannot change any consumer's existing `mcp.failure.fingerprint`
+  values — a change there would silently break any alert or dashboard
+  built on fingerprint identity. Verified, not just asserted: by extracting
+  the actual, published `v0.6.1` git tag's `src/fingerprint/` tree via `git
+  archive` into an isolated directory and running its `computeFingerprint()`
+  directly, independent of this working tree, against six fixture inputs —
+  see `test/fingerprint/compose.fixtures.test.js`. If you have alerts or
+  dashboards keyed on `mcp.failure.fingerprint`, they keep working exactly
+  as they did on v0.6.1, with no changes required on your end.
+- **Field-level discrimination in Agent Thrash Detection is not a new
+  capability — it already worked, as a side effect of fingerprinting the
+  full Zod issues JSON, and was simply incidental until now.** A
+  validation failure repeating on the *same* schema field across attempts
+  already hashed to the *same* fingerprint (accumulating correctly toward
+  `inputThreshold`), and a *different* field failing each attempt already
+  hashed to a *different* fingerprint each time (never accumulating,
+  matching a converging agent). Investigated and confirmed in ADR 009; now
+  pinned down by regression tests
+  (`test/fingerprint/field-level-convergence.test.js`) so a future Zod or
+  SDK change that silently breaks it gets caught, rather than discovered
+  as a production regression. One real gap remains open and is *not*
+  fixed by this: partial convergence (fixing one of several failing
+  fields changes the issues array's shape and breaks fingerprint
+  continuity) — tracked in `docs/known-gaps.md`, pending a design ADR 009
+  did not settle on.
+
+### Documentation
+
+- `docs/known-gaps.md` (new): five tracked gaps this release didn't close,
+  each written as a ready-to-paste GitHub issue — field-level convergence
+  tracking, partial convergence in field-level validation, the
+  observation-liveness contract, the pre-handler parse-failure gap, and
+  how client-side retry caps interact with
+  detection thresholds.
+- README's "Agent Thrash Detection" section now covers channel-aware
+  thresholds, the `McpServer`-vs-low-level-`Server` reachability
+  difference (with ADR 007's full table), the pre-handler parse-failure
+  gap (deferred, not solved — closing it means revisiting ADR 001), and
+  the forwarded-error collision risk as a named known limitation.
+- README's "Failure Fingerprinting" section now documents
+  `mcp.failure.validation_paths` and states plainly that field-level
+  discrimination is a property of the fingerprint, not a separate
+  detector — see ADR 009.
+
 ## 0.6.1
 
 ### Fixed

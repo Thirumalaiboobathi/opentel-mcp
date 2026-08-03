@@ -3,7 +3,7 @@ import type { FingerprintResult } from './types.d.ts';
 
 /** The `mcp.failure.*` OpenTelemetry span attribute keys. */
 export const ATTRIBUTE_KEYS: Readonly<
-  Record<'FINGERPRINT' | 'SIGNATURE' | 'CATEGORY' | 'ORIGIN' | 'ERROR_CLASS', string>
+  Record<'FINGERPRINT' | 'SIGNATURE' | 'CATEGORY' | 'ORIGIN' | 'ERROR_CLASS' | 'CHANNEL' | 'VALIDATION_PATHS', string>
 >;
 
 /**

@@ -26,6 +26,46 @@ export type FailureOrigin =
   | 'thrown' // JS exception during handler
   | 'transport'; // JSON-RPC / transport layer failure
 
+/**
+ * Which channel an MCP tools/call failure arrived on — see
+ * `classifyFailureChannel()` (`src/fingerprint/classify/channel.js`) and
+ * ADR 007 (`docs/adr/007-protocol-error-channel.md`) for the full design.
+ *
+ * Deliberately a SEPARATE type from {@link FailureOrigin} above, not a
+ * replacement or refinement of it: `FailureOrigin` has been part of the
+ * hashed `FingerprintInputs` since v0.4.0, while `FailureChannel` is
+ * additive — surfaced only as the standalone `mcp.failure.channel` span
+ * attribute (`ATTRIBUTE_KEYS.CHANNEL`, `src/fingerprint/attributes.d.ts`)
+ * and never part of the fingerprint hash. See ADR 007's "Where the new
+ * dimension lives" section for why the two are kept apart.
+ *
+ * - `'execution'` — a JSON-RPC-successful `CallToolResult` carrying
+ *   `isError: true`: a genuine business-logic tool failure. Also recovered
+ *   here (rather than misreported) when a high-level `McpServer` disguises
+ *   a protocol failure as `isError: true` but the disguise doesn't match a
+ *   known SDK wrapper shape — see `classifyFailureChannel()`'s docblock.
+ * - `'protocol.not_found'` — a JSON-RPC `MethodNotFound` (-32601), or an
+ *   `InvalidParams` (-32602) whose message indicates an unknown or
+ *   disabled tool.
+ * - `'protocol.input'` — an `InvalidParams` (-32602) whose message
+ *   indicates the agent supplied invalid arguments.
+ * - `'protocol.output'` — an `InvalidParams` (-32602) whose message
+ *   indicates the TOOL's own output failed its declared output schema —
+ *   a server-side bug, never the agent's fault. Excluded from Agent
+ *   Thrash Detection entirely (`ThrashConfig`, `src/thrash/detector.js`).
+ * - `'protocol.other'` — any other JSON-RPC error code, or an
+ *   `InvalidParams` (-32602) whose message doesn't match a known shape.
+ * - `'unknown'` — the failure doesn't confidently resemble either the
+ *   execution or protocol shape.
+ */
+export type FailureChannel =
+  | 'execution'
+  | 'protocol.not_found'
+  | 'protocol.input'
+  | 'protocol.output'
+  | 'protocol.other'
+  | 'unknown';
+
 /** One normalized stack frame, produced by {@link parseAndNormalizeStack}. */
 export interface NormalizedStackFrame {
   /** Function name, `""` if anonymous. */

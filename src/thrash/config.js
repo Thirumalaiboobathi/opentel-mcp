@@ -26,6 +26,16 @@
  *   reliably determined to be single-connection (e.g. stdio). Set to true to force-permit the fallback even
  *   when the transport can't be determined — an explicit opt-in for deployments the auto-detection can't
  *   see (e.g. a custom Transport implementation), where you already know every connection is 1:1.
+ * @property {number} inputThreshold - Per-origin threshold (ADR 007, Phase 3) for failures on the
+ *   'protocol.input' channel (classifyFailureChannel(), src/fingerprint/classify/channel.js): a JSON-RPC
+ *   InvalidParams error whose message indicates the AGENT supplied bad arguments. Deliberately higher than
+ *   `threshold` — an agent retrying with adjusted arguments after an input-validation failure may be
+ *   genuinely converging on a correct call, not thrashing. Independent of `threshold`, which continues to
+ *   govern the 'execution' channel (isError: true results) unchanged.
+ * @property {number} notFoundThreshold - Per-origin threshold (ADR 007, Phase 3) for failures on the
+ *   'protocol.not_found' channel: a JSON-RPC error for a tool that doesn't exist or is disabled.
+ *   Deliberately lower than `threshold` (defaults to 1, an immediate flag) — retrying a nonexistent tool
+ *   name is never convergence; there is no "getting closer" to a tool that isn't there.
  */
 
 const ENV_PREFIX = 'OTEL_MCP_THRASH_';
@@ -39,6 +49,8 @@ const DEFAULTS = {
   entryTtlMs: 900_000,
   reEmitAfter: 3,
   assumeSingleSession: false,
+  inputThreshold: 5,
+  notFoundThreshold: 1,
 };
 
 /**
@@ -118,6 +130,11 @@ export function resolveThrashConfig(partial) {
     assumeSingleSession: resolveBoolean(
       pick(partial, 'assumeSingleSession', 'ASSUME_SINGLE_SESSION'),
       DEFAULTS.assumeSingleSession,
+    ),
+    inputThreshold: resolvePositiveInt(pick(partial, 'inputThreshold', 'INPUT_THRESHOLD'), DEFAULTS.inputThreshold),
+    notFoundThreshold: resolvePositiveInt(
+      pick(partial, 'notFoundThreshold', 'NOT_FOUND_THRESHOLD'),
+      DEFAULTS.notFoundThreshold,
     ),
   };
 }

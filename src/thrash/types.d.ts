@@ -11,9 +11,13 @@
  */
 
 /**
- * Composite key identifying one (session, tool, failure-fingerprint) loop
- * candidate inside the bounded store (src/thrash/store.ts). Format:
- * `${sessionId}|${toolName}|${fingerprint}`.
+ * Composite key identifying one (session, tool, channel, failure-fingerprint)
+ * loop candidate inside the bounded store (src/thrash/store.ts). Format:
+ * `${sessionId}|${toolName}|${channel}|${fingerprint}`. The `channel` segment
+ * (ADR 007, Phase 3 — see classifyFailureChannel(), src/fingerprint/classify/channel.js)
+ * was added so that failures on different channels never merge into one loop
+ * even in the (SDK-message-dependent, not structurally guaranteed) case where
+ * two different channels happen to produce the same fingerprint.
  */
 export type ThrashKey = string;
 
@@ -54,6 +58,26 @@ export interface ThrashConfig {
    * @default false
    */
   assumeSingleSession: boolean;
+  /**
+   * Per-origin threshold (ADR 007, Phase 3 — docs/adr/007-protocol-error-channel.md) for failures
+   * classified as the 'protocol.input' channel (classifyFailureChannel(), src/fingerprint/classify/channel.js):
+   * a JSON-RPC InvalidParams error whose message indicates the AGENT supplied bad arguments. Deliberately
+   * higher than `threshold` — an agent retrying with adjusted arguments after an input-validation failure
+   * may be genuinely converging on a correct call, not thrashing. Independent of `threshold`, which
+   * continues to govern the 'execution' channel (isError: true results) unchanged.
+   *
+   * @default 5
+   */
+  inputThreshold: number;
+  /**
+   * Per-origin threshold (ADR 007, Phase 3) for failures classified as the 'protocol.not_found' channel: a
+   * JSON-RPC error for a tool that doesn't exist or is disabled. Deliberately lower than `threshold`
+   * (defaults to 1, an immediate flag) — retrying a nonexistent tool name is never convergence; there is no
+   * "getting closer" to a tool that isn't there.
+   *
+   * @default 1
+   */
+  notFoundThreshold: number;
 }
 
 /**
@@ -67,6 +91,14 @@ export interface ThrashEntry {
   toolName: string;
   /** Same reasoning as toolName above. */
   fingerprint: string;
+  /**
+   * Same reasoning as toolName above (ADR 007, Phase 3). The channel this episode is tracked under —
+   * 'execution' | 'protocol.not_found' | 'protocol.input' | 'protocol.other' | 'unknown' (never
+   * 'protocol.output', which record() refuses to track at all — see ThrashDetector.record()'s docblock).
+   * `undefined` for entries recorded without a channel (pre-Phase-3 callers / direct ThrashDetector.record()
+   * calls that omit it), treated the same as 'execution' for threshold purposes.
+   */
+  channel: string | undefined;
   /** How many consecutive same-fingerprint failures have been recorded in the current window/episode. */
   count: number;
   /** Epoch ms of the first failure in the current episode. */
