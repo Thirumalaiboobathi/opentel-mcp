@@ -1,5 +1,88 @@
 # Changelog
 
+## 0.8.0
+
+Tool schema drift detection: a server that silently changes a tool's
+`inputSchema` between deployments — a parameter renamed, a type tightened, a
+`required` field added — currently breaks agents with no signal pointing at
+the actual cause. Full investigation and design: ADR 010
+(`docs/adr/010-schema-drift.md`).
+
+### Added
+
+- **Tool schema drift detection.** Every `tools/list` response is captured,
+  canonicalized, and hashed per tool (`inputSchema` only — `description` is
+  a deliberately separate, not-yet-built dimension; see ADR 010). When a
+  previously-observed tool's schema hash changes, this emits:
+  - An `mcp.tool.schema_drift.detected` counter, labeled `gen_ai.tool.name`
+    and `mcp.tool.schema_drift.type` (both bounded — see
+    `METRIC_SAFE_ATTRIBUTES`, `src/schema-drift/attributes.js`).
+  - An `mcp.tool.schema_drift.detected` span event on the new `tools/list`
+    span (see Changed, below), carrying the drift `type`, the previous/
+    current schema hash, and — only when non-empty, never set to `[]` —
+    which field names were added/removed/changed. Field names are
+    span-only, never a metric label (unbounded across tools/deployments,
+    same reasoning as `mcp.failure.validation_paths`, ADR 009).
+  - `type` is one of `field_added` \| `field_removed` \| `type_changed` \|
+    `required_changed` \| `multiple` (more than one at once, never guessed
+    down to a single answer) \| `unknown` (a change this differ can't
+    confidently characterize — e.g. a top-level `oneOf`/`anyOf`/`allOf`
+    composition, or a change hidden behind a `$ref`/`$defs` indirection
+    that doesn't touch the referencing property's own value — still
+    reported as drift, just not attributable to a specific field).
+  - The **first** observation of any given tool is never reported as
+    drift (nothing to compare against yet — cold start). A tool that
+    stops appearing in `tools/list` responses for a while and later
+    reappears is compared against its last-seen schema, not treated as a
+    fresh cold start — see the README's "Tool schema drift detection"
+    section for why this is the correct, and possibly counter-intuitive,
+    behavior.
+  - State is scoped **per instrumented server instance, not per session**
+    (ADR 010, Q4) — every client session sees the same tool registry, so
+    session-keyed state would produce false cold-starts per new session
+    and could silently swallow drift that happened between sessions.
+  - New `schemaDrift` option on `instrumentMcpServer()`, following the
+    exact `thrashDetection`/`costTracking` partial-overrides-individual-
+    defaults pattern: `enabled` (default `true`) and `maxTrackedTools`
+    (default `1000`, an LRU cap — defense-in-depth, not a response to an
+    expected failure mode; a server's own tool count is normally small).
+    Each independently overridable via `OTEL_MCP_SCHEMA_DRIFT_ENABLED` /
+    `OTEL_MCP_SCHEMA_DRIFT_MAX_TRACKED_TOOLS`, following the existing
+    `OTEL_MCP_THRASH_*` env-var convention.
+    **Unlike** `thrashDetection`/`costTracking`, `schemaDrift.enabled: false`
+    is a true no-op: `tools/list` is not wrapped at all (no span, no
+    capture, no detector/emitter construction) — the `tools/list` span
+    this feature introduces exists purely for schema drift, unlike the
+    `tools/call` span, which already serves other purposes regardless of
+    sub-feature flags.
+  - `SchemaDriftConfig`, `SchemaDriftKind`, `SchemaDriftEvent` types,
+    exported from the package root.
+
+### Changed — behavior change on upgrade, read before updating
+
+- **The instrument-first ordering requirement now also covers `tools/list`,
+  for low-level `Server` users specifically, because `schemaDrift.enabled`
+  defaults to `true`.** `instrumentMcpServer()` has always required being
+  called before any `tools/call` handler is registered; as of this release,
+  with schema drift enabled (the default), it also requires being called
+  before any `tools/list` handler is registered. If your low-level `Server`
+  code registers `server.setRequestHandler(ListToolsRequestSchema, ...)`
+  before calling `instrumentMcpServer()` — never previously an error, since
+  this library was blind to `tools/list` entirely before this release —
+  upgrading will make that throw `INSTRUMENT_FIRST_ERROR` where it didn't
+  before, with no other code changes on your part.
+  - **`McpServer` users are unaffected.** `McpServer` registers `tools/list`
+    and `tools/call` together, atomically, the first time `.tool()` or
+    `.registerTool()` is called — so anyone already following the
+    documented instrument-before-registration rule for `tools/call`
+    automatically satisfies it for `tools/list` too.
+  - **Migration**: either reorder your `tools/list` registration to after
+    `instrumentMcpServer()`, or pass `schemaDrift: { enabled: false }` to
+    opt out and keep your existing registration order — both fully
+    restore v0.7.0 behavior. There is no change if you don't use a
+    low-level `Server` with an independently-registered `tools/list`
+    handler.
+
 ## 0.7.0
 
 Origin-aware failure classification for Agent Thrash Detection. Prompted by

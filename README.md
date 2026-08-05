@@ -784,6 +784,243 @@ Two kinds, both under `bench/` and `test/thrash/`:
   and an exact `node bench/thrash-data-benchmark.js ...` command to
   reproduce them byte-for-byte.
 
+## Tool schema drift detection (v0.8.0+)
+
+Watches every `tools/list` response and flags when a tool's `inputSchema`
+changes between two observations — a parameter renamed, a type tightened,
+a `required` field added. A server that silently redefines a tool between
+deployments currently breaks agents with no signal pointing at the actual
+cause: the resulting `protocol.input` validation failures (see "Agent
+Thrash Detection" above) look identical to an agent simply sending bad
+arguments. This feature exists to connect those failures back to "the
+schema itself changed under you." Full investigation and design: ADR 010
+(`docs/adr/010-schema-drift.md`).
+
+### Zero-config quick-start
+
+```js
+import { instrumentMcpServer } from 'opentel-mcp';
+
+instrumentMcpServer(server, {
+  serviceName: 'my-mcp-server',
+  setupNodeSdk: true,
+});
+```
+
+That's it — `schemaDrift` defaults to enabled, same as `fingerprinting`,
+`costTracking`, and `thrashDetection`. **Read "Behavior change on upgrade"
+below before relying on that default**, though — unlike those other
+features, this one can change whether `instrumentMcpServer()` throws.
+
+### What gets captured, and what counts as drift
+
+Only `inputSchema` is captured and hashed — never `description` or any
+other tool-definition field. `description` is deliberately a separate,
+not-yet-built dimension (see ADR 010's "What 'drift' means"): a tool's
+description is what the calling model actually reads to decide how to
+invoke it, and a silently-changed description with an unchanged schema is
+exactly the vector "MCP tool poisoning" / "rug-pull" attacks rely on — but
+folding it into the same signal as a structural schema change would drown
+the rare, high-signal case (a renamed parameter) in the comparatively
+frequent, low-stakes noise of routine description wording edits. Tracking
+description drift is out of scope for this release.
+
+Drift is classified into one of six kinds, by structurally diffing the
+new schema's `properties`/`required` against the last-observed schema for
+that tool — not just comparing hashes:
+
+| `mcp.tool.schema_drift.type` | What changed |
+|---|---|
+| `field_added` | A property present in the new schema, absent from the old one |
+| `field_removed` | The inverse |
+| `type_changed` | A property present in both, but its value differs (type, `enum`, nested shape, ...) |
+| `required_changed` | The `required` set (compared as a set, not an ordered list) gained or lost an entry, independent of any property appearing/disappearing |
+| `multiple` | More than one of the above changed in the same observation — reported as `multiple` rather than arbitrarily picking one |
+| `unknown` | The hash changed, but the diff can't confidently characterize what — see below |
+
+**`unknown` is not a rare edge case — it has two concrete, real triggers,
+both confirmed by test:**
+
+- A change to a **top-level composition keyword** (`oneOf`/`anyOf`/`allOf`,
+  or the whole `inputSchema` being a `$ref`) — there's no `properties` key
+  at that level for the differ to walk, so it can't attribute the change
+  to a field. This is still reported as drift (the hash changed, so
+  something did), just without a specific field name.
+- A change to a **`$defs` entry reached only via `$ref`** from inside a
+  normal, `properties`-based schema, where the referencing property's own
+  `$ref` string is unchanged. The hash correctly changes (it hashes the
+  whole canonicalized schema, `$defs` included), but the differ only ever
+  compares each property's own value — it never inspects `$defs` — so it
+  can't name the field. If your schemas use shared `$defs` definitions
+  (common for Zod schemas with reused sub-shapes), expect this.
+
+A composition keyword or `$ref` **nested inside** a property's own schema
+value (e.g. `properties.kind = { anyOf: [...] }`) is not affected by
+either limitation above — a change there is correctly attributed to that
+field as `type_changed`, since the whole property value is compared by
+deep equality regardless of what's inside it.
+
+### Cold start, and the remove-then-reappear case
+
+**The first time a tool is observed, it is never reported as drift** —
+there's nothing to compare against yet. This is the same "no prior state,
+no guessed answer" discipline `ThrashDetector` and `computeFingerprint()`
+already follow elsewhere in this package.
+
+**A tool that stops appearing in `tools/list` responses for a while and
+later reappears is diffed against its last-observed schema — it is
+NOT treated as a fresh cold start.** This is easy to get backwards:
+intuitively, "the tool went away" might feel like it should reset
+tracking, the way a session ending resets thrash detection. It doesn't,
+and shouldn't — the stored snapshot for that tool simply isn't touched
+while it's absent (nothing calls `capture()` for a tool that isn't in the
+response), so when it comes back, comparison picks up exactly where it
+left off:
+
+- Reappears with an **unchanged** schema → no drift, correctly, even
+  though there was a gap.
+- Reappears with a **changed** schema → ordinary drift, classified
+  against whatever was last seen — which may be several `tools/list`
+  calls in the past, not necessarily the *immediately* preceding one.
+
+The one way this resets is the LRU cap (`maxTrackedTools`, below) evicting
+the entry in the meantime — an evicted tool is genuinely indistinguishable
+from one never seen before, so it correctly (if unavoidably) cold-starts
+again.
+
+### Scope: per server instance, never per session
+
+Schema drift state is scoped to **the instrumented server instance**, not
+to any individual client session — deliberately the opposite of Agent
+Thrash Detection's session-keyed design. Every client session connected to
+one server sees the exact same tool registry; keying by session here would
+produce a false "first observation" for every new session (nothing wrong,
+just never seen by *that* session's key) and could silently swallow real
+drift that happened between two sessions (the new session's own cold
+start would just be the post-drift schema, with nothing to compare
+against). See ADR 010, Q4, for the full reasoning.
+
+**The honest limitation this implies**: this only works when the host
+keeps one long-lived instrumented `Server`/`McpServer` instance alive
+across the sessions it serves — the stdio case (one process, one
+connection, for the process's whole lifetime) and the common HTTP pattern
+this package's own thrash-detection session resolution already assumes
+(one instrumented instance, many sessions). A host that instead
+constructs a *fresh* `Server`/`McpServer` per HTTP session (stateless
+mode) gets no cross-session drift detection at all, silently, by
+construction — this package has no way to detect or fix that topology
+choice.
+
+### Span volume: expect one span per `tools/list` call, not per drift
+
+**Every `tools/list` call gets its own span, whether or not anything
+drifted** — the same "always create the span, only sometimes it's
+interesting" shape `tools/call` already has, but with a materially
+different traffic pattern. A `tools/call` span is naturally bounded by how
+often an agent actually invokes tools; a `tools/list` span is bounded only
+by how often the *client* re-fetches the tool list, which is entirely
+client-controlled and not something this library or the MCP spec limits.
+Some MCP clients cache the tool list for a whole session; others re-fetch
+it every turn. If a client calls `tools/list` 50 times in a session,
+that's 50 `tools/list` spans, 49 of them (assuming nothing changed)
+carrying no drift event at all — **this is correct, not a bug**, but it's
+volume you may not have been expecting if you're used to span counts
+tracking actual tool usage. If this matters for your trace volume/cost,
+`schemaDrift: { enabled: false }` skips wrapping `tools/list` entirely —
+no span, no capture, nothing (see "Configuration" below).
+
+### Metrics
+
+Same API-only pattern as every other metric in this README — nothing
+recorded until a `MeterProvider` is registered.
+
+| Metric | Type | Unit | Attributes | Emitted when |
+|---|---|---|---|---|
+| `mcp.tool.schema_drift.detected` | Counter | — | `gen_ai.tool.name`, `mcp.tool.schema_drift.type` | A previously-observed tool's `inputSchema` hash differs from its last-observed hash |
+
+Both attributes are bounded (tool name by the server's own registry,
+`type` a closed 6-value enum), following the same
+`METRIC_SAFE_ATTRIBUTES` cardinality discipline as every other metric in
+this package. No hash or field name ever reaches a metric label — see the
+span event below for those.
+
+### Span event: `mcp.tool.schema_drift.detected`
+
+Added to the **currently active span** (never a new one — the same
+`trace.getActiveSpan()` pattern the `mcp.loop.detected` event above uses)
+each time the metric above fires. In the normal, wired-up path, the
+active span at that point is the `tools/list` span this feature creates
+(see "Span volume" above) — but this emitter has no dependency on that;
+if schema capture ever runs with no active span, the event is skipped
+silently and only the metric still fires.
+
+| Attribute | Description |
+|---|---|
+| `mcp.tool.schema_drift.type` | Same six-value kind as the metric above |
+| `mcp.tool.schema_drift.previous_hash` | The stored hash this observation differs from |
+| `mcp.tool.schema_drift.current_hash` | This observation's hash |
+| `mcp.tool.schema_drift.added_fields` | Property names added — present only when `type` is `field_added` or `multiple` (never set to an empty array) |
+| `mcp.tool.schema_drift.removed_fields` | Property names removed — present only when `type` is `field_removed` or `multiple` |
+| `mcp.tool.schema_drift.changed_fields` | Property names whose value changed — present only when `type` is `type_changed` or `multiple` |
+
+### Configuration
+
+All fields of `schemaDrift`, each independently overridable by its own
+`OTEL_MCP_SCHEMA_DRIFT_*` env var, following the exact `OTEL_MCP_THRASH_*`
+pattern — precedence is explicit option field, then env var, then
+default; an invalid/unparseable env value falls back to the default
+silently, never throws. Source of truth: `src/schema-drift/config.js`.
+
+| Option | Env var | Type | Default | Description |
+|---|---|---|---|---|
+| `enabled` | `OTEL_MCP_SCHEMA_DRIFT_ENABLED` | boolean | `true` | `false` is a true no-op: `tools/list` is not wrapped at all (no span, no capture, no detector/emitter construction) — unlike `thrashDetection`/`costTracking`, whose disabled state still wraps `tools/call` for other reasons |
+| `maxTrackedTools` | `OTEL_MCP_SCHEMA_DRIFT_MAX_TRACKED_TOOLS` | number | `1000` | LRU cap on distinct tracked tools (`src/schema-drift/store.js`) — defense-in-depth, not a response to an expected failure mode; a server's own tool count is normally small and bounded already |
+
+### Behavior change on upgrade — read this before updating
+
+**`instrumentMcpServer()`'s existing instrument-first requirement now
+also covers `tools/list`, for low-level `Server` users specifically,
+because `schemaDrift.enabled` defaults to `true`.** This library has
+always required being called before any `tools/call` handler is
+registered; as of this release, with schema drift enabled (the default),
+it also requires being called before any `tools/list` handler is
+registered.
+
+If your low-level `Server` code calls
+`server.setRequestHandler(ListToolsRequestSchema, ...)` before calling
+`instrumentMcpServer()` — never previously an error, since this library
+was blind to `tools/list` entirely before this release — upgrading will
+make that throw `INSTRUMENT_FIRST_ERROR` where it didn't before, with no
+other code changes on your part.
+
+**`McpServer` users are unaffected.** `McpServer` registers `tools/list`
+and `tools/call` together, atomically, the first time `.tool()` or
+`.registerTool()` is called — so anyone already following the documented
+instrument-before-registration rule for `tools/call` automatically
+satisfies it for `tools/list` too.
+
+**Migration**: either reorder your `tools/list` registration to after
+`instrumentMcpServer()`, or pass `schemaDrift: { enabled: false }` to
+keep your existing registration order — both fully restore v0.7.0
+behavior. See the CHANGELOG's v0.8.0 entry for the same note.
+
+### Known limitations
+
+- **`unknown` classification for `$ref`/`$defs`-indirected changes and
+  top-level composition keywords** — see "What gets captured" above. Not
+  a bug, but worth knowing if your schemas lean on shared `$defs`
+  definitions or top-level `oneOf`/`anyOf`/`allOf`: you'll see drift
+  detected (the hash changes correctly) without a field name attached.
+- **Per-server-instance scope assumes a long-lived instrumented instance**
+  — see "Scope" above. Stateless-per-session HTTP deployments get no
+  cross-session drift detection, silently, by construction.
+- **`tools/list` call frequency, and therefore span/capture-and-hash
+  cost, is entirely client-controlled** — unlike `tools/call`, which is
+  naturally rate-limited by actual agent tool usage. See "Span volume"
+  above.
+- **Description drift is not detected** — see "What gets captured" above.
+  Tracked as a follow-up, not built in this release.
+
 ## Configuration
 
 All options passed to `instrumentMcpServer(server, options)`. Source of
@@ -799,8 +1036,10 @@ truth: `src/config.js`.
 | `fingerprinting` | boolean | `true` | `false` disables `mcp.failure.*` attributes |
 | `costTracking` | object | see below | Controls cost/token attribution[^9] — see "Cost & Token Attribution" above |
 | `thrashDetection` | object | see below | Controls Agent Thrash Detection[^10] — see "Agent Thrash Detection" above. Requires `fingerprinting: true` |
+| `schemaDrift` | object | see below | Controls tool schema drift detection[^11] — see "Tool schema drift detection" above. `enabled: true` by default changes `instrumentMcpServer()`'s throw behavior on upgrade — see that section's "Behavior change on upgrade" |
 
 [^10]: `{ enabled?, threshold?, windowMs?, maxTrackedKeys?, entryTtlMs?, reEmitAfter?, assumeSingleSession? }`, all fields optional, individually defaulted, and individually overridable via an `OTEL_MCP_THRASH_*` env var — see "Agent Thrash Detection" → "Configuration" above for the full table.
+[^11]: `{ enabled?, maxTrackedTools? }`, all fields optional, individually defaulted, and individually overridable via an `OTEL_MCP_SCHEMA_DRIFT_*` env var — see "Tool schema drift detection" → "Configuration" above for the full table.
 
 [^9]: `{ enabled?: boolean; pricingTable?: PricingTable; extractor?: UsageExtractor; budget?: { perSessionUsd?: number; perToolUsd?: number } }`, all fields optional and individually defaulted — `{ enabled: true, pricingTable: DEFAULT_PRICING, extractor: defaultExtractor }` with budget tracking off.
 [^2]: Required only when `setupNodeSdk` is `true`. Has no effect otherwise — the host app's registered `TracerProvider` owns the resource; passing it anyway logs a one-time `diag.warn`.
@@ -819,6 +1058,14 @@ before `server.setRequestHandler(CallToolRequestSchema, ...)` (low-level
 `Server`) or before any `.tool()`/`.registerTool()` call (`McpServer`).
 See ADR 002 in `docs/adr/` for the detection logic that catches violations
 of this at instrument time.
+
+**Since v0.8.0, this also applies to `tools/list`** — i.e. before
+`server.setRequestHandler(ListToolsRequestSchema, ...)` — whenever
+`schemaDrift.enabled` is `true` (the default). `McpServer` users are
+unaffected, since it registers both together atomically; low-level
+`Server` users who register `tools/list` independently should read "Tool
+schema drift detection" → "Behavior change on upgrade" above before
+upgrading from a pre-v0.8.0 version.
 
 ## Two modes
 
@@ -852,12 +1099,14 @@ moved there from the main `semantic-conventions` repo, where the MCP
 conventions are now deprecated) for everything they define, and adds
 namespaces of its own where they don't yet: `mcp.tool.*` (call-count and
 duration metrics, and — as of v0.5.0 — token/cost attribution and budget
-attributes), `mcp.failure.*` (failure fingerprinting), and — as of
-v0.6.0 — `mcp.tool.loop.*` / `mcp.loop.*` (Agent Thrash Detection). All
-are documented as non-spec at every attribute (`src/attributes.js`,
-`src/fingerprint/attributes.js`, `src/thrash/attributes.js`), and are
-candidates to fold into the spec's own metrics/error vocabulary if it
-grows an equivalent. Full reasoning: ADR 004 in `docs/adr/`.
+attributes), `mcp.failure.*` (failure fingerprinting), `mcp.tool.loop.*` /
+`mcp.loop.*` (v0.6.0, Agent Thrash Detection), and — as of v0.8.0 —
+`mcp.tool.schema_drift.*` (tool schema drift detection). All are
+documented as non-spec at every attribute (`src/attributes.js`,
+`src/fingerprint/attributes.js`, `src/thrash/attributes.js`,
+`src/schema-drift/attributes.js`), and are candidates to fold into the
+spec's own metrics/error vocabulary if it grows an equivalent. Full
+reasoning: ADR 004 in `docs/adr/`.
 
 One exception, also in `src/attributes.js`: `gen_ai.response.model` *is*
 a real spec attribute, co-emitted alongside the custom `mcp.tool.model`
@@ -894,6 +1143,21 @@ pragmatic choice rather than a spec-pure one.
   partial convergence within it, an observation-liveness contract, the
   pre-handler parse-failure gap, and client-side retry caps — are tracked
   in `docs/known-gaps.md`, not silently dropped.
+- v0.8: Tool schema drift detection ✓ — see "Tool schema drift detection"
+  above and ADR 010. Detects a tool's `inputSchema` changing between two
+  observed `tools/list` responses, classified into `field_added` /
+  `field_removed` / `type_changed` / `required_changed` / `multiple` /
+  `unknown`. **Behavior change on upgrade**: the instrument-first ordering
+  requirement now also covers `tools/list` for low-level `Server` users,
+  since `schemaDrift.enabled` defaults to `true` — see that section's
+  "Behavior change on upgrade" and the CHANGELOG. Two other investigations
+  from the same v0.8.0 cycle were **not** implemented, by design: ADR 011
+  found in-process cost-aware tail sampling isn't achievable (this
+  package doesn't own the `Sampler`/`SpanProcessor` chain in its default
+  configuration) and recommends a Collector recipe instead; the ADR 008
+  update reframed observation liveness into a two-axis
+  `ToolOutcome`/`ObservationIntegrity` contract but left implementation
+  open, same as the original ADR.
 - Future: failure clustering + regression detection; recovery hints;
   root-cause chaining across parent spans; alignment with the OTel GenAI
   SIG's MCP semantic conventions when published

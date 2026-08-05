@@ -7,6 +7,7 @@ import { diag } from '@opentelemetry/api';
 import { DEFAULT_PRICING } from './cost/pricing.js';
 import { defaultExtractor } from './cost/extractor.js';
 import { resolveThrashConfig } from './thrash/config.js';
+import { resolveSchemaDriftConfig } from './schema-drift/config.js';
 
 /**
  * @typedef {object} CostTrackingOptions
@@ -65,6 +66,16 @@ import { resolveThrashConfig } from './thrash/config.js';
  *   costTracking above. Requires `fingerprinting` to also be enabled (the default): thrash detection keys
  *   off the same mcp.failure.fingerprint fingerprinting computes, so with fingerprinting off there is
  *   nothing to key off and detection silently never fires, regardless of this option.
+ * @property {Partial<import('./schema-drift/config.js').SchemaDriftConfig>} [schemaDrift] - Controls tool
+ *   schema drift detection (ADR 010, v0.8.0): capturing each tool's inputSchema on every tools/list call
+ *   and flagging when it differs from what was last observed for that tool (see instrument.js's
+ *   wrapToolsListHandler(), src/schema-drift/detector.js, and src/schema-drift/emitter.js). Resolved via
+ *   resolveSchemaDriftConfig() (src/schema-drift/config.js) — same partial-overrides-individual-defaults
+ *   behavior as costTracking/thrashDetection above. Independent of `fingerprinting`/`thrashDetection` —
+ *   schema drift has its own, unconditional, OTel-independent bookkeeping and is never gated behind either.
+ *   `enabled: false` (or the default when this option is omitted) is a true no-op: tools/list is not
+ *   wrapped at all, unlike thrashDetection/costTracking whose disabled state still wraps tools/call for
+ *   other reasons and merely skips inner logic.
  */
 
 // Guards the "serviceName has no effect" diagnostic below so it fires once
@@ -121,5 +132,6 @@ export function resolveOptions(options) {
       budget: rawCostTracking.budget,
     },
     thrashDetection: resolveThrashConfig(opts.thrashDetection),
+    schemaDrift: resolveSchemaDriftConfig(opts.schemaDrift),
   };
 }

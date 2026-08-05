@@ -210,6 +210,16 @@ describe('createThrashEmitter', () => {
       }
     }
 
+    // metrics.setGlobalMeterProvider() silently no-ops on a second
+    // registration (@opentelemetry/api's registerGlobal() only overrides
+    // when the previous one was explicitly unregistered — see
+    // internal/global-utils.js's registerGlobal(): `if (!allowOverride &&
+    // api[type]) return false`, and MetricsAPI.setGlobalMeterProvider()
+    // never passes allowOverride). beforeEach already registered a real
+    // MeterProvider, so metrics.disable() must run first here or this
+    // test silently keeps using the real one and passes regardless of
+    // whether the broken path was ever exercised.
+    metrics.disable();
     metrics.setGlobalMeterProvider(new BrokenMeterProvider());
     const emitter = createThrashEmitter('0.0.0-test');
 

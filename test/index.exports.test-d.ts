@@ -1,6 +1,15 @@
 import { expectTypeOf } from 'vitest';
 import { instrumentMcpServer } from '../src/index.js';
-import type { InstrumentOptions, ThrashConfig, ThrashSummary, ThrashOffender, FailureChannel } from '../src/index.js';
+import type {
+  InstrumentOptions,
+  ThrashConfig,
+  ThrashSummary,
+  ThrashOffender,
+  FailureChannel,
+  SchemaDriftConfig,
+  SchemaDriftKind,
+  SchemaDriftEvent,
+} from '../src/index.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 
 // A consumer can construct options with a PARTIAL thrash config — every
@@ -166,3 +175,103 @@ void unknownChannel;
 // @ts-expect-error -- "protocol.something_else" is not a member of FailureChannel
 const invalidChannel: FailureChannel = 'protocol.something_else';
 void invalidChannel;
+
+// Tool schema drift detection (ADR 010, v0.8.0): a consumer can construct
+// options with a PARTIAL schemaDrift config — every field individually
+// optional, matching resolveSchemaDriftConfig()'s actual runtime behavior
+// (src/schema-drift/config.js), not requiring the full SchemaDriftConfig
+// shape. Same pattern as partialThrash above.
+const partialSchemaDrift: InstrumentOptions = {
+  schemaDrift: {
+    maxTrackedTools: 500,
+  },
+};
+expectTypeOf(partialSchemaDrift).toMatchTypeOf<InstrumentOptions>();
+
+// enabled alone, omitting maxTrackedTools entirely.
+const partialSchemaDriftEnabled: InstrumentOptions = {
+  schemaDrift: {
+    enabled: false,
+  },
+};
+expectTypeOf(partialSchemaDriftEnabled).toMatchTypeOf<InstrumentOptions>();
+
+// An empty schemaDrift object is also valid (every field defaults) — same
+// as emptyThrash above.
+const emptySchemaDrift: InstrumentOptions = { schemaDrift: {} };
+expectTypeOf(emptySchemaDrift).toMatchTypeOf<InstrumentOptions>();
+
+// Both together, alongside other top-level options.
+const combinedSchemaDrift: InstrumentOptions = {
+  serviceName: 'svc',
+  thrashDetection: { enabled: true },
+  schemaDrift: { enabled: true, maxTrackedTools: 2000 },
+};
+expectTypeOf(combinedSchemaDrift).toMatchTypeOf<InstrumentOptions>();
+
+// A fully-specified SchemaDriftConfig (as resolveSchemaDriftConfig()
+// returns) is assignable where a Partial<SchemaDriftConfig> is expected.
+const fullSchemaDriftConfig: SchemaDriftConfig = {
+  enabled: true,
+  maxTrackedTools: 1000,
+};
+expectTypeOf(fullSchemaDriftConfig).toMatchTypeOf<Partial<SchemaDriftConfig>>();
+
+// Negative check: an unknown field on schemaDrift must NOT type-check —
+// guards against this test suite silently passing if SchemaDriftConfig's
+// fields ever stop being enforced. Same discipline as invalidThrash above.
+const invalidSchemaDrift: InstrumentOptions = {
+  // @ts-expect-error -- "notARealField" is not a key of SchemaDriftConfig
+  schemaDrift: { notARealField: true },
+};
+void invalidSchemaDrift;
+
+// SchemaDriftKind (ADR 010): the exact six-member union diffSchemas()
+// (src/schema-drift/diff.js) can produce, importable from the package
+// root without reaching into src/schema-drift/diff.js directly.
+// Deliberately does NOT include 'description_changed' — see diff.js's own
+// docblock for why that would be an unreachable member.
+expectTypeOf<SchemaDriftKind>().toEqualTypeOf<
+  'field_added' | 'field_removed' | 'type_changed' | 'required_changed' | 'multiple' | 'unknown'
+>();
+
+// Each individual literal must be assignable -- if any one of these six
+// weren't a real member of SchemaDriftKind, the corresponding line below
+// would fail to compile.
+const fieldAdded: SchemaDriftKind = 'field_added';
+const fieldRemoved: SchemaDriftKind = 'field_removed';
+const typeChanged: SchemaDriftKind = 'type_changed';
+const requiredChanged: SchemaDriftKind = 'required_changed';
+const multiple: SchemaDriftKind = 'multiple';
+const unknownKind: SchemaDriftKind = 'unknown';
+void fieldAdded;
+void fieldRemoved;
+void typeChanged;
+void requiredChanged;
+void multiple;
+void unknownKind;
+
+// Negative check: an arbitrary string is not a valid SchemaDriftKind —
+// this is a closed union, not `string`. Guards against SchemaDriftKind
+// silently widening.
+// @ts-expect-error -- "description_changed" is not a member of SchemaDriftKind
+const invalidKind: SchemaDriftKind = 'description_changed';
+void invalidKind;
+
+// A SchemaDriftEvent a consumer builds by hand (e.g. typing their own
+// span-event processing code) must match the real shape
+// schemaDriftEmitter.emit() consumes (src/schema-drift/emitter.js).
+const driftEvent: SchemaDriftEvent = {
+  scope: 'server',
+  toolName: 'search',
+  previousHash: 'aaaaaaaaaaaaaaaa',
+  currentHash: 'bbbbbbbbbbbbbbbb',
+  kind: 'field_added',
+  addedFields: ['limit'],
+  removedFields: [],
+  changedFields: [],
+  requiredChanged: false,
+};
+expectTypeOf(driftEvent).toEqualTypeOf<SchemaDriftEvent>();
+expectTypeOf<SchemaDriftEvent['kind']>().toEqualTypeOf<SchemaDriftKind>();
+expectTypeOf<SchemaDriftEvent['addedFields']>().toEqualTypeOf<readonly string[]>();

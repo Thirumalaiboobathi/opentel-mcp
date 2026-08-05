@@ -1,6 +1,17 @@
 # ADR 008: Observation liveness
 
-**Status:** Accepted, implementation deferred to a future release. The
+**Status:** Superseded by the "Update (2026-08-05)" section at the end of
+this document — external review (Massimiliano Brighindi, who also raised
+the original gap this ADR investigates) reframed the requirement from
+"detect a broken observation pipeline" to "stop implying health by
+omission," which splits the single four-state contract below into two
+independent fields. The original investigation and its four-state
+contract are kept below as the historical record the update builds on and
+corrects — do not implement the four-state contract as originally
+written; see the Update section for the current design. Implementation
+is still deferred to a future release.
+
+**Original status (superseded):** Accepted, implementation deferred to a future release. The
 investigation and design below (the four-state contract, the top-level
 accessor) are accepted as the right direction; no code has been written
 against it yet. This ADR answers the question `docs/known-gaps.md`'s
@@ -274,3 +285,208 @@ doesn't apply).
   `docs/known-gaps.md`'s "Observation liveness contract" entry, now with
   this investigation's findings to decide from instead of an open
   question.
+
+## Update (2026-08-05): The two-axis reframe
+
+Third of three investigations scoped for v0.8.0. **This section
+supersedes the four-state contract above.** Credit to Massimiliano
+Brighindi, who raised the original gap this ADR investigates, for also
+supplying the reframe: the requirement was never to *detect* a broken
+observation pipeline (the four-state contract above, in trying to do
+that, still ended up implying more confidence than the evidence
+supports — see Finding 1 below) — it is to *stop implying health by
+omission*. That reframe splits one combined enum into two independent
+fields:
+
+```
+ToolOutcome:          SUCCESS | FAILURE | UNKNOWN
+ObservationIntegrity: DEGRADED | UNKNOWN   (see Finding 1 — HEALTHY dropped)
+```
+
+Both default to `UNKNOWN`; either only moves off it on positive
+evidence. Every mechanism below was re-verified against the currently
+installed `@opentelemetry/api@1.9.1` / `@opentelemetry/sdk-trace@2.9.0`
+(unchanged since the original investigation above), not assumed to still
+hold.
+
+### Finding 1 — HEALTHY can never be positively attested, in either provider configuration
+
+The original investigation above found mode (a) (no provider at all)
+partially detectable and modes (b)/(c) (exporter failing, queue
+dropping) undetectable "without unsafe or internal means." Re-checked
+directly against the installed SDK, the conclusion is sharper than that:
+**there is no configuration in which this library's own code can
+positively confirm telemetry is flowing.**
+
+- **Host-owned provider (`setupNodeSdk: false`, the default):** unchanged
+  from the original finding — `trace.getTracerProvider()`
+  (`TraceAPI.getTracerProvider()`, `api/trace.js:51-53`) and
+  `metrics.getMeterProvider()` (`MetricsAPI.getMeterProvider()`,
+  `api/metrics.js:32-34`) give no access to exporter or queue health at
+  all.
+- **Self-owned provider (`setupNodeSdk: true`):** the one lead the
+  original investigation found — SDK self-observability metrics
+  (`otel.sdk.processor.span.processed`, `SpanProcessorMetrics.js:25`,
+  tagged `error.type: queue_full` on drop at `SpanProcessorMetrics.js:44`)
+  — is real, and still requires an explicit `selfObsMeterProvider` this
+  library doesn't pass today (`instrument.js:274-277` constructs
+  `NodeTracerProvider` with no such option). **But there is a harder
+  blocker the original investigation didn't state as plainly: even if
+  wired up, this metric could never be read back by the code that
+  created it.** The OTel Metrics API's `Counter` interface has exactly
+  one method — `add(value, attributes?, context?): void`
+  (`@opentelemetry/api`'s `Metric.d.ts`, the complete interface, no
+  `getValue()` or any synchronous read-back). A `Counter` can only be
+  written to by instrumented code and read by a `MetricReader` on its own
+  export schedule. This metric is real and useful to an **external**
+  system (a Collector, a Prometheus scrape) consuming the exported
+  stream — it can never become something `instrumentMcpServer()`'s own
+  synchronous accessor reads and turns into a verdict, no matter how it's
+  wired up.
+
+**HEALTHY is not merely hard to reach today — it is structurally
+unreachable in both configurations, by anything this library's own code
+could ever do.** Applying this ADR's own "a three-value enum where one
+value is unreachable should be a two-value enum" standard, `HEALTHY` is
+dropped from `ObservationIntegrity` entirely. (Considered and rejected: a
+host-supplied "I confirm telemetry is flowing" callback the library just
+trusts. That's not attestation, independent verification, or detection —
+it's a pass-through of the host's own claim, answering a different
+question than the one this contract exists to answer.)
+
+### Finding 2 — DEGRADED is reachable, but only in the configuration you'd expect it least
+
+Re-checking the original `ProxyTracerProvider` reference-equality trick
+(`ProxyTracerProvider.getDelegate()` returning `this._delegate ??
+NOOP_TRACER_PROVIDER`, a module-scoped, unexported singleton —
+`ProxyTracerProvider.js`) against the installed API: it still works,
+with the same fragility already documented above (deprecated class,
+dual-package-hazard-prone). Confirming "no delegate set" is genuine
+positive evidence — of an absence, not a presence, but a confidently
+confirmed fact either way, which is exactly what `DEGRADED` should mean.
+**This makes `DEGRADED` reachable — not aspirational — but only for
+`setupNodeSdk: false`.**
+
+For `setupNodeSdk: true`, this same trigger can **never** fire:
+`instrumentMcpServer()` calls `provider.register()` itself
+(`instrument.js:278`) — it knows, with certainty, not by inference, that
+a delegate is registered. There is nothing left to "detect." (Considered
+and rejected as a substitute trigger for this path: "no `exporterUrl`
+configured, so spans only reach stderr." That's `StderrSpanExporter`'s
+own documented, intentional default behavior — ADR 003 — not evidence of
+anything broken, and flagging it as `DEGRADED` would itself be a form of
+overclaiming this update exists to avoid.)
+
+So the two provider configurations are asymmetric in *opposite*
+directions: `setupNodeSdk: true` can never show `DEGRADED` (a delegate is
+always known-present) but also never shows `HEALTHY` (per Finding 1);
+`setupNodeSdk: false` can show `DEGRADED` (fragile absence-detection) but
+also never `HEALTHY`. Either way, `UNKNOWN` is what most deployments will
+see most of the time — an honest disclaimer, not a signal, exactly as
+this investigation was asked to confirm plainly rather than dress up as
+detection. One additional correction this reframe surfaces: the original
+contract's `OBSERVED_CLEAN` state (absence-check inconclusive + zero
+bookkept failures) was itself already a mild instance of "implying
+health" — "we didn't confirm it's broken" quietly stood in for "it's
+fine," a double-negative, not positive evidence. The two-axis split
+retires that framing along with the rest of the four-state contract.
+
+### Finding 3 — `ToolOutcome` needs its own counter, decoupled from fingerprinting/thrash config
+
+`ToolOutcome` answers a cumulative, since-instrumentation question — has
+this server ever recorded a tool failure — analogous to the original
+contract's `OBSERVED_CLEAN`/`OBSERVED_FAILING` split, now decoupled from
+provider-liveness entirely. The obvious implementation — read it off
+`ThrashDetector`'s existing bookkeeping (`getThrashSummary()`) — is
+wrong: `applyThrashDetection()` only records anything when a fingerprint
+was computed (`instrument.js:544`, guarded on `fingerprintingEnabled` at
+`instrument.js:721`), so with `fingerprinting: false` — a fully
+supported, documented configuration, not an edge case — `getThrashSummary()`
+would report zero failures regardless of how many actually occurred.
+That's the exact silent-success failure mode this whole feature exists
+to close, just relocated into the fix. `ToolOutcome` needs a new, small,
+always-on counter, independent of `fingerprinting`/`thrashDetection`
+config, updated from the same unconditional `isToolResultError(result)` /
+catch-block check `wrapToolCallHandler` already runs on every call
+(`instrument.js:302-304,714,785`) regardless of any feature flag — not a
+read of state any config option can turn off. `UNKNOWN` is reserved for
+the (currently nonexistent, since this counter doesn't exist yet) case
+where even that bookkeeping mechanism itself couldn't run.
+
+### Finding 4 — still a top-level accessor, now for a stronger reason
+
+The original "Where it lives" reasoning holds and is reinforced by
+Finding 3: `ThrashSummary` already returns an all-zero summary when
+`thrashDetection.enabled` is `false`, and Finding 3 shows a naive
+`ToolOutcome` implementation would inherit that exact contamination from
+an unrelated feature flag. A consumer using only cost tracking or only
+fingerprinting, who never touches thrash detection, has no reason to
+reach through a thrash-shaped return value for a question that has
+nothing to do with thrash. **Decision unchanged: a top-level accessor**,
+named `getObservationState()` (superseding the original's speculative
+`getObservationLiveness()`, since the return shape changed from one
+four-state field to two independent ones) returning `{ toolOutcome,
+observationIntegrity }`, attached the same way `shutdown()` /
+`getThrashSummary()` already are — unconditional, omitted only when
+`options.enabled` is `false`. `observationIntegrity` is re-evaluated on
+every call (the `ProxyTracerProvider` check is cheap — object
+construction plus a reference comparison — and "is a provider registered"
+can change over a long-lived process's life if the host registers one
+asynchronously after `instrumentMcpServer()` already ran); `toolOutcome`
+reads the new counter from Finding 3.
+
+### Finding 5 — `ToolOutcome` deliberately duplicates span status; that's the point, not a flaw
+
+`span.setStatus({code: SpanStatusCode.OK})` / `SpanStatusCode.ERROR`
+(`instrument.js:716,777,787`) and the metric-only `mcp.tool.outcome`
+attribute (`ATTR_MCP_TOOL_OUTCOME` — success/error/silent_failure, set
+only on the `mcp.tool.duration` histogram, `metrics.js:119-125`, never as
+a span attribute) already carry this exact information today.
+`ToolOutcome`'s `SUCCESS`/`FAILURE` value space is not new semantic
+content — it is a direct restatement of what the span and the metric
+already express. What's actually new is the delivery path: span status
+and the metric attribute are both OTel signals, which are exactly what
+might not be trustworthy when `observationIntegrity` isn't `DEGRADED`-
+confirmed-fine (which, per Finding 1, is never, since `DEGRADED` only
+ever confirms absence, not presence). `ToolOutcome` has to duplicate the
+span's information through an OTel-independent path — the same
+"you can't ask a span whether spans are working" principle the original
+investigation already established — precisely so it stays trustworthy in
+the scenario the span-based signal might not be. If it didn't duplicate
+the span, it would be useless for the one job it exists to do.
+
+### Decision
+
+- `ObservationIntegrity`: **`DEGRADED | UNKNOWN`** (two values — `HEALTHY`
+  dropped per Finding 1).
+- `ToolOutcome`: **`SUCCESS | FAILURE | UNKNOWN`**, backed by a new,
+  always-on, config-independent counter (Finding 3) — not a read of
+  `ThrashDetector` state.
+- Lives on a new top-level accessor, `getObservationState()`, replacing
+  the original's `getObservationLiveness()` (Finding 4).
+- `ToolOutcome` intentionally duplicates span status / the
+  `mcp.tool.outcome` metric attribute (Finding 5) — flagged explicitly in
+  any implementation's documentation as deliberate redundancy, not an
+  oversight or a third source of truth to reconcile.
+- The original four-state contract (`OBSERVED_CLEAN` /
+  `OBSERVED_FAILING` / `OBSERVATION_UNAVAILABLE` /
+  `LIVENESS_INDETERMINATE`) is retired. `LIVENESS_INDETERMINATE`'s job —
+  a safe fallback for "the detection mechanism itself didn't run
+  confidently" — falls out for free as `UNKNOWN`'s default status in the
+  two-axis design, rather than needing a dedicated fourth value; this is
+  a genuine simplification the split produces, not just a rename.
+- `test/thrash/observation-liveness.test.js` (the original speculative
+  test, `summary.observation` / `'healthy' | 'unavailable' | 'unknown'`)
+  is now doubly superseded — first by the original ADR's top-level-
+  accessor decision, now again by this two-axis split — and is left
+  as-is (still `describe.skip`, still documenting its own provisional
+  status) rather than rewritten, since nothing here changes its function
+  as a historical record of the first framing. A new test,
+  `test/thrash/observation-integrity.test.js`, specs the two-axis
+  contract's more realistic failure mode — a provider genuinely
+  registered, but its export path deliberately broken — under the same
+  `describe.skip` discipline.
+- This section does not decide whether to implement any of this now —
+  same as the original ADR, that call is left to whoever picks up
+  `docs/known-gaps.md`'s entry, now with a corrected, honestly-scoped
+  contract to implement against instead of the original four-state one.

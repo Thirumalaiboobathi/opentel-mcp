@@ -73,6 +73,9 @@ export const GEN_AI_OPERATION_NAME_EXECUTE_TOOL = 'execute_tool';
 /** Well-known mcp.method.name value for a tools/call request. */
 export const MCP_METHOD_NAME_TOOLS_CALL = 'tools/call';
 
+/** Well-known mcp.method.name value for a tools/list request (ADR 010, schema drift detection). */
+export const MCP_METHOD_NAME_TOOLS_LIST = 'tools/list';
+
 // --- Custom (non-spec) attributes ---
 
 /**

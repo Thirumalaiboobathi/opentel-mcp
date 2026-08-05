@@ -5,7 +5,7 @@
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { trace, diag, SpanStatusCode, SpanKind } from '@opentelemetry/api';
-import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { NodeTracerProvider, SimpleSpanProcessor, BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
@@ -21,6 +21,8 @@ import { calculateCost } from './cost/calculator.js';
 import { createBudgetTracker } from './cost/budget.js';
 import { ThrashDetector } from './thrash/detector.js';
 import { createThrashEmitter } from './thrash/emitter.js';
+import { SchemaDriftDetector } from './schema-drift/detector.js';
+import { createSchemaDriftEmitter } from './schema-drift/emitter.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_TOOL_NAME,
@@ -41,6 +43,7 @@ import {
   ERROR_TYPE_TOOL_ERROR,
   GEN_AI_OPERATION_NAME_EXECUTE_TOOL,
   MCP_METHOD_NAME_TOOLS_CALL,
+  MCP_METHOD_NAME_TOOLS_LIST,
   MCP_TOOL_OUTCOME_SUCCESS,
   MCP_TOOL_OUTCOME_ERROR,
   MCP_TOOL_OUTCOME_SILENT_FAILURE,
@@ -53,6 +56,22 @@ const { version: PACKAGE_VERSION } = require('../package.json');
 // derived from CallToolRequestSchema's zod internals — see ADR 001. Reused
 // as the mcp.method.name attribute value and span-name prefix (ADR 004).
 const TOOLS_CALL_METHOD = MCP_METHOD_NAME_TOOLS_CALL;
+
+// Same reasoning as TOOLS_CALL_METHOD above, for the tools/list branch ADR
+// 010 (docs/adr/010-schema-drift.md) added alongside it — reused as both
+// the mcp.method.name attribute value and the tools/list span's name.
+const TOOLS_LIST_METHOD = MCP_METHOD_NAME_TOOLS_LIST;
+
+// ADR 010, Q4: schema drift state is per-server-instance, never
+// per-session — unlike thrashConnectionFallbackSessionId (randomUUID()),
+// this value never needs process-wide uniqueness: SchemaDriftDetector's
+// store is already fully isolated per instrumented server instance (one
+// detector per instrumentMcpServer() call, exactly like thrashDetector),
+// and "scope" is never emitted on any span/metric (see
+// schema-drift/emitter.js) — it exists purely to key this one detector's
+// internal Map, so any fixed, consistent value works. A literal constant
+// is simplest and avoids an unnecessary randomUUID() call per server.
+const SCHEMA_DRIFT_SCOPE = 'server';
 
 // Symbol.for(): must be visible across duplicate installs of this package
 // (e.g. monorepos with dedup issues), not just within one module instance.
@@ -154,7 +173,7 @@ export function instrumentMcpServer(input, options) {
     return input;
   }
 
-  assertInstrumentFirst(server);
+  assertInstrumentFirst(server, resolved);
 
   const tracer = setupTracer(server, resolved);
   const metricsRecorder = resolved.enableMetrics ? setupMeter(PACKAGE_VERSION) : null;
@@ -202,6 +221,23 @@ export function instrumentMcpServer(input, options) {
     outer.shutdown = server.shutdown;
   }
 
+  // ADR 010 (docs/adr/010-schema-drift.md), Phase 4: unlike thrashDetector/
+  // thrashEmitter above, these are constructed ONLY when
+  // resolved.schemaDrift.enabled — there is no independent reason to wrap
+  // tools/list at all when this feature is off (the tools/list span it
+  // introduces exists purely for schema drift, unlike the tools/call span,
+  // which already serves other purposes regardless of fingerprinting/
+  // thrash/cost). Skipping construction entirely here — not just gating
+  // per-call use — is what actually delivers "no allocation when
+  // disabled." schemaDriftEmitter is additionally gated on enableMetrics,
+  // mirroring thrashEmitter exactly: detection/state-tracking is
+  // independent of metrics on/off, only emission is gated.
+  const schemaDriftDetector = resolved.schemaDrift.enabled
+    ? new SchemaDriftDetector({ maxTrackedTools: resolved.schemaDrift.maxTrackedTools })
+    : null;
+  const schemaDriftEmitter =
+    resolved.schemaDrift.enabled && resolved.enableMetrics ? createSchemaDriftEmitter(PACKAGE_VERSION) : null;
+
   const originalSetRequestHandler = server.setRequestHandler.bind(server);
   server.setRequestHandler = (schema, handler) => {
     if (schema === CallToolRequestSchema) {
@@ -219,6 +255,8 @@ export function instrumentMcpServer(input, options) {
         thrashSessionState,
         server,
       );
+    } else if (schema === ListToolsRequestSchema && schemaDriftDetector) {
+      handler = wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftEmitter, SCHEMA_DRIFT_SCOPE);
     }
     return originalSetRequestHandler(schema, handler);
   };
@@ -229,7 +267,8 @@ export function instrumentMcpServer(input, options) {
 }
 
 /**
- * Throws INSTRUMENT_FIRST_ERROR if a tools/call handler is already
+ * Throws INSTRUMENT_FIRST_ERROR if a tools/call handler — or, when schema
+ * drift detection is enabled, a tools/list handler — is already
  * registered on `server`. Uses the SDK's own public
  * assertCanSetRequestHandler(method) — the same check McpServer uses
  * internally — rather than reaching into the private _requestHandlers Map.
@@ -238,16 +277,25 @@ export function instrumentMcpServer(input, options) {
  * Works identically whether `server` came from a low-level Server or was
  * unwrapped from an McpServer, since McpServer's .tool()/.registerTool()
  * lazily call this same server's setRequestHandler(CallToolRequestSchema)
- * on first registration.
+ * (and, in the same call, ListToolsRequestSchema) on first registration.
+ *
+ * tools/list is only checked when resolved.schemaDrift.enabled: ADR 010
+ * (Q2) extends this exact constraint to the new branch, but there's no
+ * reason to enforce ordering for a schema this instance won't wrap at
+ * all (see instrumentMcpServer()'s conditional wrapping decision below).
  *
  * @param {import('@modelcontextprotocol/sdk/server/index.js').Server} server
+ * @param {Required<import('./config.js').InstrumentOptions>} resolved
  */
-function assertInstrumentFirst(server) {
+function assertInstrumentFirst(server, resolved) {
   if (typeof server.assertCanSetRequestHandler !== 'function') {
     return;
   }
   try {
     server.assertCanSetRequestHandler(TOOLS_CALL_METHOD);
+    if (resolved.schemaDrift.enabled) {
+      server.assertCanSetRequestHandler(TOOLS_LIST_METHOD);
+    }
   } catch {
     throw new Error(INSTRUMENT_FIRST_ERROR);
   }
@@ -834,6 +882,77 @@ function wrapToolCallHandler(
         }
         metricsRecorder?.recordError(toolName, errorType, failureCategory);
         metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_ERROR, failureCategory);
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
+  };
+}
+
+/**
+ * Wraps a tools/list handler in a span covering its execution (ADR 010,
+ * docs/adr/010-schema-drift.md — Phase 4: wiring). Same span-lifecycle
+ * shape as wrapToolCallHandler above (tracer.startActiveSpan(), try/
+ * finally around span.end()), but scoped to what ADR 010 actually decided
+ * for tools/list: one span per call, named just TOOLS_LIST_METHOD — no
+ * per-tool-name suffix, since one tools/list response covers every tool
+ * at once, unlike one tools/call covering exactly one.
+ *
+ * After the original handler resolves, every tool in its response is run
+ * through schemaDriftDetector.capture() (src/schema-drift/detector.js,
+ * Phase 2); any returned SchemaDriftEvent is handed to
+ * schemaDriftEmitter.emit() (src/schema-drift/emitter.js, Phase 3). No
+ * detection or emission logic lives here — this function is purely the
+ * wiring ADR 010's Q2 identified as a direct, unmodified extension of ADR
+ * 001's patching strategy, the same conclusion this file's own
+ * `if (schema === CallToolRequestSchema)` branch already applies.
+ *
+ * The capture/detect/emit block is its own try/catch, entirely separate
+ * from the outer try/catch guarding the underlying handler's own success/
+ * failure: a bug in schema-drift's own code must never affect the real
+ * tools/list response the client receives, but a genuine failure from the
+ * underlying handler itself must still propagate normally, unmodified —
+ * the same defense-in-depth split applyThrashDetection() already keeps
+ * relative to wrapToolCallHandler's success/failure branches above.
+ *
+ * @param {Function} handler - Original tools/list handler.
+ * @param {import('@opentelemetry/api').Tracer} tracer
+ * @param {SchemaDriftDetector} schemaDriftDetector
+ * @param {ReturnType<typeof createSchemaDriftEmitter> | null} schemaDriftEmitter
+ * @param {string} schemaDriftScope - Fixed per instrumented server instance — see instrumentMcpServer().
+ */
+function wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftEmitter, schemaDriftScope) {
+  return (request, extra) => {
+    return tracer.startActiveSpan(TOOLS_LIST_METHOD, { kind: SpanKind.SERVER }, async (span) => {
+      span.setAttribute(ATTR_MCP_METHOD_NAME, TOOLS_LIST_METHOD);
+      if (extra?.requestId !== undefined && extra?.requestId !== null) {
+        span.setAttribute(ATTR_JSONRPC_REQUEST_ID, String(extra.requestId));
+      }
+
+      try {
+        const result = await handler(request, extra);
+
+        try {
+          const tools = Array.isArray(result?.tools) ? result.tools : [];
+          for (const tool of tools) {
+            const event = schemaDriftDetector.capture(schemaDriftScope, tool);
+            if (event) {
+              schemaDriftEmitter?.emit(event);
+            }
+          }
+        } catch (err) {
+          diag.debug(
+            'opentel-mcp: schema drift capture failed, skipping mcp.tool.schema_drift.* telemetry for this tools/list call',
+            err,
+          );
+        }
+
+        span.setStatus({ code: SpanStatusCode.OK });
+        return result;
+      } catch (err) {
+        span.recordException(err);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
         throw err;
       } finally {
         span.end();

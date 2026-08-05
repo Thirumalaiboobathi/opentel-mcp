@@ -2,6 +2,7 @@ import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CostTrackingOptions } from './cost/types.d.ts';
 import type { ThrashConfig, ThrashSummary } from './thrash/types.d.ts';
+import type { SchemaDriftConfig } from './schema-drift/types.d.ts';
 
 /**
  * Options for {@link instrumentMcpServer}.
@@ -98,6 +99,20 @@ export interface InstrumentOptions {
    * false-positive loops.
    */
   thrashDetection?: Partial<ThrashConfig>;
+
+  /**
+   * Controls tool schema drift detection (ADR 010, v0.8.0): capturing each tool's `inputSchema` on every
+   * `tools/list` call and flagging when it differs from what was last observed for that tool (a new
+   * `tools/list` span plus an `mcp.tool.schema_drift.detected` metric and span event — see
+   * `docs/adr/010-schema-drift.md`). Any fields you omit from a partial object fall back to their
+   * defaults individually, same as `costTracking`/`thrashDetection` above. Independent of
+   * `fingerprinting`/`thrashDetection` — schema drift has its own, unconditional, OTel-independent
+   * bookkeeping. `{ enabled: false }` (or omitting this option) is a true no-op: `tools/list` is not
+   * wrapped at all, unlike `thrashDetection`/`costTracking`, whose disabled state still wraps `tools/call`
+   * for other reasons and merely skips inner logic. See {@link SchemaDriftConfig}
+   * (`src/schema-drift/types.d.ts`) for the full field list and defaults.
+   */
+  schemaDrift?: Partial<SchemaDriftConfig>;
 }
 
 /**
@@ -132,6 +147,17 @@ export type DuckTypedMcpServer = {
  * `.tool()`/`.registerTool()` (McpServer) calls. Idempotent: calling this
  * more than once — on the same object, or on the outer `McpServer` and its
  * inner `Server` interchangeably — is a no-op after the first call.
+ *
+ * **v0.8.0 behavior change:** since `schemaDrift.enabled` defaults to
+ * `true`, this same before-registration requirement now ALSO applies to
+ * `tools/list` — i.e. before any `server.setRequestHandler(ListToolsRequestSchema, ...)`
+ * call — for low-level `Server` users specifically. `McpServer` users are
+ * unaffected (it registers both together, only once `.tool()`/`.registerTool()`
+ * is first called). If your low-level `Server` registers a `tools/list`
+ * handler before calling {@link instrumentMcpServer}, upgrading will make
+ * this throw where it previously didn't — either reorder that
+ * registration, or pass `schemaDrift: { enabled: false }` to opt out. See
+ * the README's "Known limitations" and the CHANGELOG's v0.8.0 entry.
  *
  * @param server - The server instance to instrument.
  * @param options - Instrumentation options.
@@ -207,3 +233,15 @@ export { calculateCost } from './cost/calculator.js';
 // instrument.js's wiring, not part of the public API.
 
 export type { ThrashConfig, ThrashDetectedEvent, ThrashSummary, ThrashOffender } from './thrash/types.d.ts';
+
+// --- Tool schema drift detection (src/schema-drift/) ---
+//
+// Re-exported here so TypeScript consumers get these types from the
+// package root instead of reaching into src/schema-drift/* directly. See
+// src/schema-drift/types.d.ts for the full shape documentation and ADR 010
+// (docs/adr/010-schema-drift.md). Same posture as Agent Thrash Detection
+// above — no runtime values re-exported: SchemaDriftDetector and
+// createSchemaDriftEmitter are internal to instrument.js's wiring, not
+// part of the public API.
+
+export type { SchemaDriftConfig, SchemaDriftKind, SchemaDriftEvent } from './schema-drift/types.d.ts';
