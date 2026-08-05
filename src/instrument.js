@@ -23,6 +23,8 @@ import { ThrashDetector } from './thrash/detector.js';
 import { createThrashEmitter } from './thrash/emitter.js';
 import { SchemaDriftDetector } from './schema-drift/detector.js';
 import { createSchemaDriftEmitter } from './schema-drift/emitter.js';
+import { ToolOutcomeCounter } from './observation/tool-outcome-counter.js';
+import { detectObservationIntegrity } from './observation/integrity.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_TOOL_NAME,
@@ -144,9 +146,18 @@ function detectServerKind(input) {
  *   attached; lifecycle of the global provider belongs to whoever
  *   registered it. Also gets a `getThrashSummary()` method (v0.6.0,
  *   unconditional — not gated behind `setupNodeSdk`) returning
- *   `ThrashDetector.getSummary()`'s in-process summary; both are omitted
- *   when `options.enabled` is `false`, since nothing is instrumented at
- *   all in that case.
+ *   `ThrashDetector.getSummary()`'s in-process summary, and a
+ *   `getObservationState()` method (ADR 008 "Update", v0.8.0 —
+ *   also unconditional) returning `{ toolOutcome: { success, failure,
+ *   unknown }, observationIntegrity: 'DEGRADED' | 'UNKNOWN' }` —
+ *   `toolOutcome` from a counter that increments on every tool call
+ *   regardless of `fingerprinting`/`thrashDetection`/`enableMetrics`;
+ *   `observationIntegrity` re-evaluated fresh on every call to this
+ *   accessor, not cached from instrument time, since a host may register
+ *   a `TracerProvider` asynchronously after this function already ran.
+ *   All three of `shutdown`/`getThrashSummary`/`getObservationState` are
+ *   omitted when `options.enabled` is `false`, since nothing is
+ *   instrumented at all in that case.
  */
 export function instrumentMcpServer(input, options) {
   const detected = detectServerKind(input);
@@ -221,6 +232,35 @@ export function instrumentMcpServer(input, options) {
     outer.shutdown = server.shutdown;
   }
 
+  // ADR 008 (docs/adr/008-observation-liveness.md), "Update (2026-08-05):
+  // The two-axis reframe", Phase 3: constructed unconditionally, same as
+  // thrashDetector above — there is no separate "observation enabled"
+  // config flag at all (unlike schemaDriftDetector below), since
+  // ToolOutcome/ObservationIntegrity are a structural, always-on part of
+  // instrumentation whenever instrumentation itself is on, not an
+  // optional sub-feature. Deliberately NOT gated on fingerprinting,
+  // thrashDetection, or enableMetrics — see ToolOutcomeCounter's own
+  // docblock for why (Finding 3: those flags gate OTHER bookkeeping this
+  // counter must stay independent of).
+  const toolOutcomeCounter = new ToolOutcomeCounter();
+  // Additive to instrumentMcpServer()'s existing return contract, same
+  // pattern as getThrashSummary above: a getObservationState() method,
+  // unconditional (not gated on setupNodeSdk), omitted entirely when
+  // options.enabled is false (nothing is instrumented at all in that
+  // case, so toolOutcomeCounter is never even constructed — see above).
+  // detectObservationIntegrity() is called HERE, inside the accessor
+  // closure, not once at instrument time: ADR 008 Finding 4 explicitly
+  // requires re-evaluating it on every call, since "is a provider
+  // registered" can change over a long-lived process's life if the host
+  // registers one asynchronously after instrumentMcpServer() already
+  // ran — a value computed once at startup would go stale the moment
+  // that happens.
+  server.getObservationState = () => ({
+    toolOutcome: toolOutcomeCounter.getCounts(),
+    observationIntegrity: detectObservationIntegrity(resolved.setupNodeSdk),
+  });
+  if (outer) outer.getObservationState = server.getObservationState;
+
   // ADR 010 (docs/adr/010-schema-drift.md), Phase 4: unlike thrashDetector/
   // thrashEmitter above, these are constructed ONLY when
   // resolved.schemaDrift.enabled — there is no independent reason to wrap
@@ -253,6 +293,7 @@ export function instrumentMcpServer(input, options) {
         thrashEmitter,
         thrashConnectionFallbackSessionId,
         thrashSessionState,
+        toolOutcomeCounter,
         server,
       );
     } else if (schema === ListToolsRequestSchema && schemaDriftDetector) {
@@ -637,6 +678,50 @@ function applyThrashSuccessClear(thrashConfig, thrashDetector, sessionId, toolNa
 }
 
 /**
+ * Records a resolved tool call's outcome for the ToolOutcome half of the
+ * two-axis observation contract (ADR 008, docs/adr/008-observation-liveness.md,
+ * "Update (2026-08-05)", Finding 3). No enabled-check here at all —
+ * unlike applyThrashSuccessClear above, this must run unconditionally,
+ * independent of fingerprinting/thrashDetection/costTracking/
+ * enableMetrics (see ToolOutcomeCounter's own docblock). Covers both the
+ * isError and success cases in one call: ToolOutcomeCounter.recordResult()
+ * does its own isError check internally, so this is called once per
+ * resolved call, not once per branch.
+ *
+ * The whole body is one try/catch: ToolOutcomeCounter's own methods
+ * already document themselves as never-throw, but this call site's own
+ * glue isn't proven never-throw, and a failure here must never affect
+ * the tool call result — same defense-in-depth reasoning as
+ * applyCostAttribution/applyThrashDetection above.
+ *
+ * @param {ToolOutcomeCounter} toolOutcomeCounter
+ * @param {*} result
+ */
+function applyToolOutcomeResult(toolOutcomeCounter, result) {
+  try {
+    toolOutcomeCounter.recordResult(result);
+  } catch (err) {
+    diag.debug('opentel-mcp: tool outcome recording failed, skipping ToolOutcome bookkeeping for this call', err);
+  }
+}
+
+/**
+ * Records a thrown/rejected tool call's outcome — always FAILURE, since
+ * a thrown/rejected call is unambiguous evidence of failure regardless
+ * of what shape the thrown value has. Same unconditional, defense-in-
+ * depth discipline as applyToolOutcomeResult above.
+ *
+ * @param {ToolOutcomeCounter} toolOutcomeCounter
+ */
+function applyToolOutcomeThrown(toolOutcomeCounter) {
+  try {
+    toolOutcomeCounter.recordThrown();
+  } catch (err) {
+    diag.debug('opentel-mcp: tool outcome recording failed, skipping ToolOutcome bookkeeping for this call', err);
+  }
+}
+
+/**
  * Wraps a tools/call handler in a span covering its execution, plus the
  * mcp.tool.* metrics (see src/metrics.js). This sits as the innermost layer
  * relative to Server's own request/response validation wrapping (see ADR
@@ -692,6 +777,16 @@ function applyThrashSuccessClear(thrashConfig, thrashDetector, sessionId, toolNa
  * converging), a lower `notFoundThreshold` for 'protocol.not_found'
  * (retrying a nonexistent tool is never convergence).
  *
+ * ToolOutcome bookkeeping (ADR 008 "Update" — see applyToolOutcomeResult()/
+ * applyToolOutcomeThrown() below) runs unconditionally in every branch —
+ * the resolved-result branch (covering both isError and success, since
+ * ToolOutcomeCounter.recordResult() does its own isError check
+ * internally) and the thrown/rejected branch — independent of
+ * `fingerprintingEnabled`, `thrashConfig`, `costTracking`, or
+ * `metricsRecorder` being null. This is deliberate: see
+ * ToolOutcomeCounter's own docblock for why it must never be gated
+ * behind any of those flags.
+ *
  * @param {Function} handler
  * @param {import('@opentelemetry/api').Tracer} tracer
  * @param {ReturnType<import('./metrics.js').setupMeter> | null} metricsRecorder
@@ -703,6 +798,7 @@ function applyThrashSuccessClear(thrashConfig, thrashDetector, sessionId, toolNa
  * @param {ReturnType<typeof createThrashEmitter> | null} thrashEmitter
  * @param {string} thrashConnectionFallbackSessionId
  * @param {{ hasSeenRealSessionId: boolean, hasWarnedFallbackUsed: boolean }} thrashSessionState
+ * @param {ToolOutcomeCounter} toolOutcomeCounter
  * @param {*} server - Passed through only for isSingleConnectionTransport()'s server.transport check.
  */
 function wrapToolCallHandler(
@@ -717,6 +813,7 @@ function wrapToolCallHandler(
   thrashEmitter,
   thrashConnectionFallbackSessionId,
   thrashSessionState,
+  toolOutcomeCounter,
   server,
 ) {
   return (request, extra) => {
@@ -759,6 +856,7 @@ function wrapToolCallHandler(
 
       try {
         const result = await handler(request, extra);
+        applyToolOutcomeResult(toolOutcomeCounter, result);
         if (isToolResultError(result)) {
           span.setAttribute(ATTR_ERROR_TYPE, ERROR_TYPE_TOOL_ERROR);
           span.setStatus({ code: SpanStatusCode.ERROR });
@@ -831,6 +929,7 @@ function wrapToolCallHandler(
         }
         return result;
       } catch (err) {
+        applyToolOutcomeThrown(toolOutcomeCounter);
         span.recordException(err);
         span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
         const errorType = err?.name ?? 'Error';

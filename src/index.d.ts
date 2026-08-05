@@ -3,6 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CostTrackingOptions } from './cost/types.d.ts';
 import type { ThrashConfig, ThrashSummary } from './thrash/types.d.ts';
 import type { SchemaDriftConfig } from './schema-drift/types.d.ts';
+import type { ObservationState } from './observation/types.d.ts';
 
 /**
  * Options for {@link instrumentMcpServer}.
@@ -175,6 +176,20 @@ export type DuckTypedMcpServer = {
  *   `setupNodeSdk`) — still typed as optional because it, like `shutdown`,
  *   is never attached when `options.enabled` is `false` (nothing is
  *   instrumented at all in that case).
+ *
+ *   The returned object also gets a `getObservationState()` method (ADR
+ *   008 "Update", v0.8.0) returning the two-axis {@link ObservationState}:
+ *   `toolOutcome` (cumulative tool-call outcome counts, from a counter
+ *   that increments on every call regardless of `fingerprinting`,
+ *   `thrashDetection`, or `enableMetrics`) and `observationIntegrity`
+ *   (`'DEGRADED' | 'UNKNOWN'` — note there is no `'HEALTHY'` value; see
+ *   the README's "Two-axis observation contract" section for why).
+ *   `observationIntegrity` is recomputed on every call to
+ *   `getObservationState()`, never cached from instrument time — a host
+ *   may register a `TracerProvider` asynchronously after
+ *   {@link instrumentMcpServer} already ran. Attached unconditionally, same
+ *   as `getThrashSummary`; also never attached when `options.enabled` is
+ *   `false`.
  */
 export function instrumentMcpServer<T extends Server | McpServer | DuckTypedMcpServer>(
   server: T,
@@ -182,6 +197,7 @@ export function instrumentMcpServer<T extends Server | McpServer | DuckTypedMcpS
 ): T & {
   shutdown?: () => Promise<void>;
   getThrashSummary?: (options?: { topOffendersLimit?: number }) => ThrashSummary;
+  getObservationState?: () => ObservationState;
 };
 
 // --- Deep-failure fingerprinting (src/fingerprint/) ---
@@ -245,3 +261,16 @@ export type { ThrashConfig, ThrashDetectedEvent, ThrashSummary, ThrashOffender }
 // part of the public API.
 
 export type { SchemaDriftConfig, SchemaDriftKind, SchemaDriftEvent } from './schema-drift/types.d.ts';
+
+// --- Two-axis observation contract (src/observation/) ---
+//
+// Re-exported here so TypeScript consumers get these types from the
+// package root instead of reaching into src/observation/* directly. See
+// src/observation/types.d.ts for the full shape documentation and ADR 008
+// (docs/adr/008-observation-liveness.md, "Update (2026-08-05): The
+// two-axis reframe"). Same posture as Agent Thrash Detection and schema
+// drift above — no runtime values re-exported: ToolOutcomeCounter and
+// detectObservationIntegrity() are internal to instrument.js's wiring,
+// not part of the public API.
+
+export type { ToolOutcome, ToolOutcomeCounts, ObservationIntegrity, ObservationState } from './observation/types.d.ts';

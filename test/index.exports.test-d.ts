@@ -9,6 +9,10 @@ import type {
   SchemaDriftConfig,
   SchemaDriftKind,
   SchemaDriftEvent,
+  ToolOutcome,
+  ToolOutcomeCounts,
+  ObservationIntegrity,
+  ObservationState,
 } from '../src/index.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 
@@ -275,3 +279,72 @@ const driftEvent: SchemaDriftEvent = {
 expectTypeOf(driftEvent).toEqualTypeOf<SchemaDriftEvent>();
 expectTypeOf<SchemaDriftEvent['kind']>().toEqualTypeOf<SchemaDriftKind>();
 expectTypeOf<SchemaDriftEvent['addedFields']>().toEqualTypeOf<readonly string[]>();
+
+// Two-axis observation contract (ADR 008 "Update (2026-08-05)"): ToolOutcome
+// is the exact three-member union the ADR specifies, importable from the
+// package root without reaching into src/observation/types.d.ts directly.
+expectTypeOf<ToolOutcome>().toEqualTypeOf<'SUCCESS' | 'FAILURE' | 'UNKNOWN'>();
+
+const success: ToolOutcome = 'SUCCESS';
+const failure: ToolOutcome = 'FAILURE';
+const unknownOutcome: ToolOutcome = 'UNKNOWN';
+void success;
+void failure;
+void unknownOutcome;
+
+// Negative check: an arbitrary string is not a valid ToolOutcome — a
+// closed union, not `string`.
+// @ts-expect-error -- "SUCCEEDED" is not a member of ToolOutcome
+const invalidOutcome: ToolOutcome = 'SUCCEEDED';
+void invalidOutcome;
+
+// ToolOutcomeCounts is the cumulative counts breakdown
+// getObservationState().toolOutcome actually returns (a raw breakdown,
+// not a single collapsed ToolOutcome verdict — see observation/types.d.ts).
+const counts: ToolOutcomeCounts = { success: 2, failure: 1, unknown: 0 };
+expectTypeOf(counts).toEqualTypeOf<ToolOutcomeCounts>();
+
+// ObservationIntegrity: the exact two-member union ADR 008's Finding 1
+// concluded — HEALTHY is unreachable in every configuration and must NOT
+// be part of the type at all, not merely unused at runtime. This is the
+// core assertion this phase asks for: the type system enforces what the
+// ADR concluded, not just documentation saying so.
+expectTypeOf<ObservationIntegrity>().toEqualTypeOf<'DEGRADED' | 'UNKNOWN'>();
+
+const degraded: ObservationIntegrity = 'DEGRADED';
+const integrityUnknown: ObservationIntegrity = 'UNKNOWN';
+void degraded;
+void integrityUnknown;
+
+// Negative check: 'HEALTHY' must not be assignable to ObservationIntegrity
+// — this is the one @ts-expect-error in this file that isn't guarding
+// against a typo, it's guarding against ADR 008's own conclusion being
+// silently relaxed later (e.g. someone adding HEALTHY back without
+// revisiting Finding 1's reasoning).
+// @ts-expect-error -- "HEALTHY" is not, and must never become, a member of ObservationIntegrity
+const invalidIntegrity: ObservationIntegrity = 'HEALTHY';
+void invalidIntegrity;
+
+// Also guard against the union silently widening to `string` in general
+// (a broader version of the same mistake).
+// @ts-expect-error -- an arbitrary string is not a valid ObservationIntegrity
+const arbitraryIntegrity: ObservationIntegrity = 'not-a-real-value';
+void arbitraryIntegrity;
+
+// ObservationState is exactly what getObservationState() returns — a
+// consumer typing their own health-check response, or a mock, must match
+// this shape.
+const observationState: ObservationState = {
+  toolOutcome: { success: 10, failure: 2, unknown: 0 },
+  observationIntegrity: 'DEGRADED',
+};
+expectTypeOf(observationState).toEqualTypeOf<ObservationState>();
+expectTypeOf<ObservationState['observationIntegrity']>().toEqualTypeOf<ObservationIntegrity>();
+expectTypeOf<ObservationState['toolOutcome']>().toEqualTypeOf<ToolOutcomeCounts>();
+
+// instrumentMcpServer()'s returned object gets an optional
+// getObservationState() (v0.8.0, additive — see index.d.ts's docblock on
+// why it's optional: never attached when options.enabled is false), same
+// pattern as the existing getThrashSummary assertion above.
+const instrumentedForObservation = instrumentMcpServer(someServer);
+expectTypeOf(instrumentedForObservation.getObservationState).toEqualTypeOf<(() => ObservationState) | undefined>();

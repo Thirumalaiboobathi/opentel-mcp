@@ -2,11 +2,18 @@
 
 ## 0.8.0
 
-Tool schema drift detection: a server that silently changes a tool's
-`inputSchema` between deployments — a parameter renamed, a type tightened, a
-`required` field added — currently breaks agents with no signal pointing at
-the actual cause. Full investigation and design: ADR 010
-(`docs/adr/010-schema-drift.md`).
+Two features. **Tool schema drift detection**: a server that silently
+changes a tool's `inputSchema` between deployments — a parameter renamed, a
+type tightened, a `required` field added — currently breaks agents with no
+signal pointing at the actual cause. Full investigation and design: ADR 010
+(`docs/adr/010-schema-drift.md`). **Two-axis observation contract**:
+prompted by external review (Massimiliano Brighindi), who first raised that
+`instrumentMcpServer()` with no `TracerProvider`/`MeterProvider` registered
+silently no-ops — a failed tool call in that state produces zero telemetry,
+indistinguishable from one that never failed — and then supplied the reframe
+that shaped what shipped: not "detect a broken pipeline," but "stop implying
+health by omission." Full investigation and design: ADR 008
+(`docs/adr/008-observation-liveness.md`, "Update (2026-08-05)" section).
 
 ### Added
 
@@ -82,6 +89,60 @@ the actual cause. Full investigation and design: ADR 010
     restore v0.7.0 behavior. There is no change if you don't use a
     low-level `Server` with an independently-registered `tools/list`
     handler.
+
+### Added — Two-axis observation contract
+
+- **`getObservationState()`**, a new accessor attached to the object
+  `instrumentMcpServer()` returns — unconditional (not gated behind
+  `setupNodeSdk`), same additive pattern as `shutdown()`/`getThrashSummary()`,
+  omitted entirely when `options.enabled` is `false`. Returns:
+  ```
+  {
+    toolOutcome: { success, failure, unknown },
+    observationIntegrity: 'DEGRADED' | 'UNKNOWN',
+  }
+  ```
+  No OTel emission — purely in-process, nothing sent anywhere, safe to
+  call from application code (a health-check endpoint, a periodic
+  `console.log`, a debugger). See the README's "Two-axis observation
+  contract" section for the full design rationale.
+  - **`toolOutcome`**: cumulative tool-call outcome counts since
+    instrumentation, from a **new counter that increments on every tool
+    call unconditionally** — independent of `fingerprinting`,
+    `thrashDetection`, and `enableMetrics`. Deliberately NOT read off
+    `ThrashDetector`/`getThrashSummary()`: that bookkeeping only runs
+    when a fingerprint was computed, so with `fingerprinting: false` (a
+    fully supported configuration) it would silently report zero
+    failures regardless of how many actually occurred — the exact
+    silent-success failure mode this feature exists to close. A
+    malformed, unrecognizable tool result (not a real `CallToolResult`
+    shape) increments `unknown` rather than silently defaulting to
+    `success`.
+  - **`observationIntegrity`**: `'DEGRADED' | 'UNKNOWN'` — note there is
+    no `'HEALTHY'` value, and this is not an oversight. Investigated and
+    found structurally unreachable in every configuration: the one lead
+    (OTel SDK self-observability metrics) is a write-only `Counter` with
+    no synchronous read-back API in `@opentelemetry/api`, so this
+    library's own code can never positively confirm telemetry is
+    flowing, no matter how it's wired up. `HEALTHY` is therefore absent
+    from the type entirely, not merely never returned — enforced by
+    TypeScript, not just documentation (see the new type-level tests in
+    `test/index.exports.test-d.ts`).
+    - `DEGRADED` is detected via a fragile `ProxyTracerProvider`
+      reference-equality check, and is reachable **only** under
+      `setupNodeSdk: false` (the default) — when no `TracerProvider` has
+      been registered globally at all.
+    - Under `setupNodeSdk: true`, this library registers the provider
+      itself, so absence can never be confirmed — `observationIntegrity`
+      is **always** `'UNKNOWN'` in that configuration, without even
+      attempting the check.
+    - Recomputed fresh on **every call** to `getObservationState()`,
+      never cached from instrument time — a host may register a
+      `TracerProvider` asynchronously after `instrumentMcpServer()`
+      already ran, and a value cached at startup would go stale the
+      moment that happens.
+  - `ToolOutcome`, `ToolOutcomeCounts`, `ObservationIntegrity`,
+    `ObservationState` types, exported from the package root.
 
 ## 0.7.0
 

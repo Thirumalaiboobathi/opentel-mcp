@@ -1021,6 +1021,169 @@ behavior. See the CHANGELOG's v0.8.0 entry for the same note.
 - **Description drift is not detected** — see "What gets captured" above.
   Tracked as a follow-up, not built in this release.
 
+## Two-axis observation contract (v0.8.0+)
+
+Answers a different question than every other feature in this README:
+not "did a tool call fail," but "can this library's own signal about that
+be trusted right now." Prompted by external review (Massimiliano
+Brighindi), who first raised that `instrumentMcpServer()` with no
+`TracerProvider`/`MeterProvider` registered silently no-ops — a tool call
+that fails in that state produces exactly zero telemetry, indistinguishable
+from a tool that never failed at all — and then, on a follow-up
+investigation, supplied the reframe that shaped what actually shipped:
+the goal was never to *detect* a broken pipeline, it's to *stop implying
+health by omission*. Full investigation and design: ADR 008
+(`docs/adr/008-observation-liveness.md`, see the "Update (2026-08-05)"
+section — it supersedes the original four-state contract earlier in that
+document).
+
+### Zero-config quick-start
+
+```js
+import { instrumentMcpServer } from 'opentel-mcp';
+
+const server = instrumentMcpServer(new Server(...), {
+  serviceName: 'my-mcp-server',
+});
+
+// ...later, e.g. in a health-check handler:
+console.log(server.getObservationState());
+// {
+//   toolOutcome: { success: 41, failure: 3, unknown: 0 },
+//   observationIntegrity: 'DEGRADED',
+// }
+```
+
+No configuration, no opt-in — `getObservationState()` is attached
+unconditionally whenever instrumentation itself is enabled, the same way
+`getThrashSummary()` is. No OTel involved in computing either field;
+nothing sent anywhere; safe to call from application code.
+
+### The two axes, and why they're separate
+
+- **`toolOutcome`** — `{ success, failure, unknown }`, cumulative counts
+  since this server was instrumented. Backed by a counter that increments
+  on **every** tool call, unconditionally — independent of
+  `fingerprinting`, `thrashDetection`, and `enableMetrics`. This is
+  deliberate, not an oversight: `getThrashSummary()` already returns an
+  all-zero summary when `thrashDetection` is disabled, and reading
+  `toolOutcome` off that same bookkeeping would silently report "no
+  failures" whenever fingerprinting is off (a fully supported,
+  documented configuration) — the exact silent-success failure mode this
+  whole feature exists to close, just relocated into the "fix." This
+  counter has no dependency on any of those flags at all.
+- **`observationIntegrity`** — `'DEGRADED' | 'UNKNOWN'`. Answers "is
+  there positive evidence this library's own telemetry pipeline is
+  broken," independently of whether any tool call has ever failed.
+
+These are independent on purpose: a healthy-looking `toolOutcome` next to
+`observationIntegrity: 'DEGRADED'` means "nothing has failed *that we
+could tell you about* — but we can't currently vouch for whether that's
+because nothing failed, or because failures aren't reaching anywhere."
+Collapsing them into one field would force exactly the conflation this
+feature exists to prevent.
+
+### Why `toolOutcome` deliberately duplicates span status — read this before filing it as redundant
+
+`span.setStatus({ code: SpanStatusCode.OK / ERROR })` and the metric-only
+`mcp.tool.outcome` attribute already carry this same success/failure
+information today. A reviewer's first instinct on seeing `toolOutcome`
+will likely be "isn't this the same signal already on the span, just
+copied?" — **yes, and that's the entire point, not a flaw.** A signal
+that travels the same channel as the thing you're using it to question is
+worthless for that purpose: asking "is the span/metric pipeline
+trustworthy?" by reading a value that only exists *if* the span/metric
+pipeline is working is circular — it can never say anything when the
+pipeline is the thing in doubt. `toolOutcome` has to be computed and
+stored somewhere that doesn't depend on OTel at all, specifically so it
+still means something in the one situation where the OTel-based signal
+might not: this is the same "you can't ask a span whether spans are
+working" principle ADR 008's original investigation already established
+for provider-liveness detection, now applied to outcome-tracking too.
+
+### Why `HEALTHY` does not exist
+
+The obvious design would be a three-state `observationIntegrity`:
+`HEALTHY | DEGRADED | UNKNOWN`. It isn't that, and not by omission —
+`HEALTHY` was investigated and found to be **structurally unreachable in
+every configuration this library runs in.** The one real lead — OTel's
+SDK self-observability metrics (`otel.sdk.processor.span.processed`) —
+is a write-only `Counter`: the `@opentelemetry/api` Metrics API gives it
+exactly one method, `add()`, with no way for the code that created it to
+read its own current value back. That metric is real and useful to an
+*external* system (a Collector, a Prometheus scrape) — it can never
+become something this library's own synchronous accessor reads and turns
+into a verdict, no matter how it's wired up. Applying this project's own
+"a three-value enum where one value is unreachable should be a two-value
+enum" standard (see "Tool schema drift detection" above for the same
+discipline applied to `SchemaDriftKind`), `HEALTHY` is dropped from the
+type entirely — not just never returned, structurally absent, so a
+future implementation can't silently add it back without revisiting why
+it was removed. TypeScript enforces this directly:
+`'HEALTHY'` is not assignable to `ObservationIntegrity` at all — see the
+type-level tests in `test/index.exports.test-d.ts`.
+
+### `UNKNOWN` is an honest disclaimer, not a detected state
+
+`UNKNOWN` is `observationIntegrity`'s default, and — for most
+deployments, most of the time — its only ever-observed value. It does
+not mean "we checked and found something specific"; it means "we have no
+positive evidence either way." Both axes default to it and only move off
+it on positive evidence, never a guess:
+
+- `toolOutcome` starts at `{ success: 0, failure: 0, unknown: 0 }` and
+  only increments a bucket when a call's outcome is confidently
+  classified — a malformed, unrecognizable result (not a real
+  `CallToolResult` shape at all) increments `unknown` rather than
+  silently defaulting to `success`.
+- `observationIntegrity` stays `UNKNOWN` unless the absence-detection
+  mechanism below *confidently* resolves to "no delegate registered."
+  Anything it can't confirm — including the mechanism itself throwing, or
+  the SDK's shape looking unexpected — degrades to `UNKNOWN`, never a
+  guessed `DEGRADED`.
+
+### When `DEGRADED` is reachable, and when it never is
+
+`DEGRADED` is detected via a fragile reference-equality trick against
+`@opentelemetry/api`'s `ProxyTracerProvider`: a throwaway
+`new ProxyTracerProvider().getDelegate()` and the real, globally
+registered provider's own `getDelegate()` resolve to the same
+module-scoped no-op singleton whenever nothing has ever been registered
+— confirming absence, not merely failing to confirm presence.
+
+- **`setupNodeSdk: false` (the default, host-owned provider):** this
+  check runs, and `DEGRADED` is genuinely reachable — it fires whenever
+  no `TracerProvider` has been registered globally at all.
+- **`setupNodeSdk: true` (opentel-mcp owns the provider):** `instrumentMcpServer()`
+  registers a delegate itself. It **always** returns `UNKNOWN` here,
+  without even attempting the check — there is nothing left to detect;
+  a delegate is known-present with certainty, not by inference. This is
+  the one configuration where `DEGRADED` can never fire, full stop.
+
+**This check is fragile on two independent axes**, both already true of
+the installed `@opentelemetry/api`: it depends on `ProxyTracerProvider`,
+a class its own maintainers have marked for removal in a future major
+version, and its comparison singleton isn't registered via the
+`globalThis`-keyed mechanism this same API otherwise uses to survive
+multiple installed copies of itself — the same class of dual-package-hazard
+bug this project already guards against elsewhere (`detectServerKind()`,
+ADR 001). Both fragilities degrade to `UNKNOWN`, never a thrown error and
+never a wrong confident `DEGRADED`, if the check itself throws or the
+SDK's shape ever looks different than expected.
+
+### `observationIntegrity` is computed per call, not cached
+
+Every call to `getObservationState()` re-runs the absence-check fresh
+against whatever `TracerProvider` is registered globally *at that
+moment* — it is never computed once at `instrumentMcpServer()` time and
+reused. If your host registers its OTel SDK asynchronously, after
+`instrumentMcpServer()` already ran (a normal, common startup order), a
+value cached at instrument time would report `DEGRADED` forever even
+after a provider shows up — the very first health check after that
+registration reflects it correctly, with no restart needed. The check
+itself is cheap (an object construction and a reference comparison), so
+there's no performance reason to cache it either.
+
 ## Configuration
 
 All options passed to `instrumentMcpServer(server, options)`. Source of
@@ -1150,14 +1313,23 @@ pragmatic choice rather than a spec-pure one.
   `unknown`. **Behavior change on upgrade**: the instrument-first ordering
   requirement now also covers `tools/list` for low-level `Server` users,
   since `schemaDrift.enabled` defaults to `true` — see that section's
-  "Behavior change on upgrade" and the CHANGELOG. Two other investigations
-  from the same v0.8.0 cycle were **not** implemented, by design: ADR 011
-  found in-process cost-aware tail sampling isn't achievable (this
-  package doesn't own the `Sampler`/`SpanProcessor` chain in its default
-  configuration) and recommends a Collector recipe instead; the ADR 008
-  update reframed observation liveness into a two-axis
-  `ToolOutcome`/`ObservationIntegrity` contract but left implementation
-  open, same as the original ADR.
+  "Behavior change on upgrade" and the CHANGELOG.
+- v0.8: Two-axis observation contract ✓ — see "Two-axis observation
+  contract" above and ADR 008's "Update (2026-08-05)" section. Prompted
+  by external review (Massimiliano Brighindi), who raised the original
+  observation-liveness gap and then supplied the reframe that shaped what
+  shipped: not "detect a broken pipeline," but "stop implying health by
+  omission." `getObservationState()` returns `toolOutcome` (cumulative
+  success/failure/unknown counts, from a counter independent of
+  `fingerprinting`/`thrashDetection`/`enableMetrics`) and
+  `observationIntegrity` (`'DEGRADED' | 'UNKNOWN'` — `HEALTHY` was
+  investigated and found structurally unreachable in every
+  configuration, so it isn't part of the type at all). One other
+  investigation from the same v0.8.0 cycle was **not** implemented, by
+  design: ADR 011 found in-process cost-aware tail sampling isn't
+  achievable (this package doesn't own the `Sampler`/`SpanProcessor`
+  chain in its default configuration) and recommends a Collector recipe
+  instead.
 - Future: failure clustering + regression detection; recovery hints;
   root-cause chaining across parent spans; alignment with the OTel GenAI
   SIG's MCP semantic conventions when published
