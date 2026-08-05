@@ -85,6 +85,61 @@ metrics.
 **Target:** v0.8.0
 **Raised by:** Massimiliano Brighindi (external review)
 
+**Status update (v0.8.0): investigated and shipped, but narrowed — not the
+same contract as the one speculated below.** Massimiliano Brighindi, who
+raised this gap, also supplied the reframe that shaped what shipped:
+investigated in ADR 008's "Update (2026-08-05): The two-axis reframe"
+section (`docs/adr/008-observation-liveness.md`), which found that the
+single four-state field speculated below was itself already a mild
+instance of the overclaiming this gap exists to guard against — one of
+its three provisional values quietly implied health by the absence of
+evidence to the contrary, exactly the pattern the original report was
+worried about. The shipped design splits it into two independent fields
+instead, both backing a new `getObservationState()` accessor (see the
+README's "Two-axis observation contract" section):
+
+- `toolOutcome` — `{ success, failure, unknown }`, from a new always-on
+  counter independent of `fingerprinting`/`thrashDetection`/`enableMetrics`
+  (not a read of `ThrashDetector`/`getThrashSummary()`, which would have
+  inherited exactly the kind of config-flag-gated blind spot this gap
+  exists to close).
+- `observationIntegrity` — `'DEGRADED' | 'UNKNOWN'`.
+
+**The gap narrowed; it did not close.** The three provisional values below
+speculated a `HEALTHY`-equivalent state (`OBSERVED_CLEAN`) was reachable.
+The actual investigation found `HEALTHY` is **structurally unreachable in
+every configuration this library runs in** — the one lead, OTel SDK
+self-observability metrics, is a write-only `Counter` with no synchronous
+read-back API in `@opentelemetry/api`, so this library's own code can
+never positively confirm telemetry is flowing, no matter how it's wired
+up. `HEALTHY` was therefore dropped from the type entirely (enforced by
+TypeScript, not just documentation — see `test/index.exports.test-d.ts`),
+rather than shipped as a value nothing could ever produce. `DEGRADED` *is*
+reachable, but only under `setupNodeSdk: false`, via the same kind of
+fragile SDK-internals-adjacent check this entry's own "open question"
+below anticipated would be needed ("the obvious approaches... reach into
+implementation detail that isn't guaranteed stable") — under
+`setupNodeSdk: true` this axis is permanently `UNKNOWN`, not merely rarely
+`DEGRADED`. Implemented as a new **top-level accessor**, not a
+`ThrashSummary` field — correcting the placement this speculative test
+originally guessed at, per ADR 008's Finding 4.
+
+**Test status**: the shipped feature has full, passing (not skipped)
+coverage — `test/observation/tool-outcome-counter.test.js`,
+`test/observation/integrity.test.js`, and `test/instrument.observation.test.js`.
+The two *original* exploratory spec files below remain `describe.skip`,
+left as-is rather than rewritten: `test/thrash/observation-liveness.test.js`
+(this entry's own original speculative test, kept as a historical record
+of the four-state framing this update supersedes) and
+`test/thrash/observation-integrity.test.js` (added during the same
+investigation to spec the more realistic "provider registered but export
+broken" failure mode — still describe.skip because it specs a
+config-driven trace-export failure that the shipped `toolOutcome`
+counter's own tests don't need in order to prove the counter itself is
+correct).
+
+The body below is kept as the original report for context.
+
 ### Body
 
 `instrumentMcpServer()` with no `TracerProvider`/`MeterProvider`

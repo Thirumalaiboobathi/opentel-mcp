@@ -406,3 +406,32 @@ conclusion.
   build in-process" conclusion is conditional on the installed SDK's
   current public surface, stated as such, not a permanent architectural
   ruling independent of upstream changes.
+
+## Update: marker attribute name diverges from this ADR
+
+**Implemented as `mcp.tool.thrash_detected`, not `mcp.tool.loop.detected`
+as specified above.** This ADR's Q5 and Decision sections name the new
+span attribute `mcp.tool.loop.detected`, deliberately reusing the
+pre-existing `mcp.tool.loop.detected` metric counter's own name, on the
+reasoning that a metric name and a span attribute key occupy separate
+OTel namespaces with no technical conflict. That reasoning is still
+correct, but it turned out to be the wrong call once actually reviewed:
+the one reader who most needs this name to be unambiguous — someone
+writing a Collector tail-sampling policy — sees a bare string with no
+namespace markers and has no way to tell, from the name alone, which of
+the two same-named signals (the counter or the attribute) they're keying
+on. That ambiguity is precisely what this attribute exists to eliminate,
+so shipping it under a name that reintroduces a different flavor of the
+same ambiguity would have undercut its own purpose.
+
+Implemented instead as `mcp.tool.thrash_detected`: drops "loop" entirely
+rather than searching for a non-colliding sub-name within the existing
+`mcp.tool.loop.*` metric family (`length`, `wasted_tokens`,
+`wasted_cost_usd`, `duration`), and keeps the `_detected` suffix
+convention this codebase already uses for "this happened" signals
+(`mcp.loop.detected`, the span event; `mcp.tool.schema_drift.detected`,
+ADR 010). Every other decision in this ADR — marking instead of
+buffering, no in-process sampler, the Collector recipe, leaving
+`mcp.tool.cost.usd`/`mcp.tool.cost.budget_exceeded` unchanged — is
+implemented exactly as decided above; only this one string differs from
+its literal text.

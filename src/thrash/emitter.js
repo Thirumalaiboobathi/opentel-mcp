@@ -10,7 +10,8 @@
  * metrics.getMeter('opentel-mcp', packageVersion); the OTel API defines
  * meter identity by that name+version pair, not by JS object identity, so
  * a second getMeter() call here still reports under the same meter to any
- * backend), plus one span event on the currently active span.
+ * backend), plus one span event and one boolean span attribute (ADR 011,
+ * docs/adr/011-cost-aware-sampling.md) on the currently active span.
  *
  * Metric attributes are gen_ai.tool.name ONLY. mcp.failure.fingerprint and
  * mcp.loop.session_id are deliberately excluded from every metric here —
@@ -36,6 +37,7 @@ import {
   ATTR_MCP_LOOP_FIRST_SPAN_ID,
   ATTR_MCP_LOOP_FIRST_TRACE_ID,
   ATTR_MCP_LOOP_SESSION_ID,
+  ATTR_MCP_TOOL_THRASH_DETECTED,
 } from './attributes.js';
 
 /** @typedef {import('./types.d.ts').ThrashDetectedEvent} ThrashDetectedEvent */
@@ -77,11 +79,17 @@ export function createThrashEmitter(packageVersion) {
      * span (via trace.getActiveSpan(); this never creates a new span) —
      * one mcp.loop.detected span event carrying the full detail,
      * including mcp.failure.fingerprint and mcp.loop.session_id (neither
-     * of which ever goes on a metric label — see this module's docblock).
-     * Never throws: a broken
-     * meter/instrument, a malformed event, or no active span all degrade
-     * to a silent no-op rather than surfacing to the caller, matching
-     * this library's fail-open philosophy. Metrics and the span event are
+     * of which ever goes on a metric label — see this module's docblock),
+     * plus (ADR 011, docs/adr/011-cost-aware-sampling.md) a boolean
+     * mcp.tool.thrash_detected span ATTRIBUTE on that same span — a
+     * Collector tail-sampling policy can key on it directly, without
+     * depending on whether span-event data is matchable at all (see
+     * thrash/attributes.js's ATTR_MCP_TOOL_THRASH_DETECTED docblock). Set
+     * only to `true`, never `false` — this call site only runs when a
+     * loop was actually detected. Never throws: a broken meter/instrument,
+     * a malformed event, or no active span all degrade to a silent no-op
+     * rather than surfacing to the caller, matching this library's
+     * fail-open philosophy. Metrics and the span event/attribute are
      * independently guarded, so a failure in one never suppresses the
      * other.
      *
@@ -114,6 +122,7 @@ export function createThrashEmitter(packageVersion) {
           [ATTR_MCP_LOOP_SESSION_ID]: event.sessionId,
           [ATTRIBUTE_KEYS.FINGERPRINT]: event.fingerprint,
         });
+        span.setAttribute(ATTR_MCP_TOOL_THRASH_DETECTED, true);
       } catch {
         // Never throw — see emit()'s docblock.
       }

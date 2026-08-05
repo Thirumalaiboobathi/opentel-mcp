@@ -2,7 +2,7 @@
 
 ## 0.8.0
 
-Two features. **Tool schema drift detection**: a server that silently
+Three features. **Tool schema drift detection**: a server that silently
 changes a tool's `inputSchema` between deployments — a parameter renamed, a
 type tightened, a `required` field added — currently breaks agents with no
 signal pointing at the actual cause. Full investigation and design: ADR 010
@@ -14,6 +14,49 @@ indistinguishable from one that never failed — and then supplied the reframe
 that shaped what shipped: not "detect a broken pipeline," but "stop implying
 health by omission." Full investigation and design: ADR 008
 (`docs/adr/008-observation-liveness.md`, "Update (2026-08-05)" section).
+**Cost-aware trace sampling**: investigated whether traces that were
+expensive or thrashed could be kept regardless of the head sampler's
+decision. Found that this cannot be an in-process library feature — a
+`Sampler` decides at span start, cost/thrash are only known at span end, and
+this package doesn't own the `Sampler`/`SpanProcessor` chain in its default
+configuration anyway. Ships a marker attribute plus a documented Collector
+recipe instead of a sampler. Full investigation and design: ADR 011
+(`docs/adr/011-cost-aware-sampling.md`).
+
+**⚠️ Read "Changed — behavior change on upgrade" immediately below before
+updating.** One of the three features above changes when
+`instrumentMcpServer()` throws, for a subset of low-level `Server` users,
+purely from the new default-on config — no code change of your own
+required to hit it.
+
+### Changed — behavior change on upgrade, read before updating
+
+- **The instrument-first ordering requirement now also covers `tools/list`,
+  for low-level `Server` users specifically, because `schemaDrift.enabled`
+  defaults to `true`.** `instrumentMcpServer()` has always required being
+  called before any `tools/call` handler is registered; as of this release,
+  with schema drift enabled (the default), it also requires being called
+  before any `tools/list` handler is registered. If your low-level `Server`
+  code registers `server.setRequestHandler(ListToolsRequestSchema, ...)`
+  before calling `instrumentMcpServer()` — never previously an error, since
+  this library was blind to `tools/list` entirely before this release —
+  upgrading will make that throw `INSTRUMENT_FIRST_ERROR` where it didn't
+  before, with no other code changes on your part.
+  - **`McpServer` users are unaffected.** `McpServer` registers `tools/list`
+    and `tools/call` together, atomically, the first time `.tool()` or
+    `.registerTool()` is called — so anyone already following the
+    documented instrument-before-registration rule for `tools/call`
+    automatically satisfies it for `tools/list` too.
+  - **Migration**: either reorder your `tools/list` registration to after
+    `instrumentMcpServer()`, or pass `schemaDrift: { enabled: false }` to
+    opt out and keep your existing registration order — both fully
+    restore v0.7.0 behavior. There is no change if you don't use a
+    low-level `Server` with an independently-registered `tools/list`
+    handler.
+  - Only `schemaDrift` (schema drift detection, below) causes this — the
+    two-axis observation contract and cost-aware sampling features in this
+    same release are purely additive, with no effect on when
+    `instrumentMcpServer()` throws.
 
 ### Added
 
@@ -64,31 +107,6 @@ health by omission." Full investigation and design: ADR 008
     sub-feature flags.
   - `SchemaDriftConfig`, `SchemaDriftKind`, `SchemaDriftEvent` types,
     exported from the package root.
-
-### Changed — behavior change on upgrade, read before updating
-
-- **The instrument-first ordering requirement now also covers `tools/list`,
-  for low-level `Server` users specifically, because `schemaDrift.enabled`
-  defaults to `true`.** `instrumentMcpServer()` has always required being
-  called before any `tools/call` handler is registered; as of this release,
-  with schema drift enabled (the default), it also requires being called
-  before any `tools/list` handler is registered. If your low-level `Server`
-  code registers `server.setRequestHandler(ListToolsRequestSchema, ...)`
-  before calling `instrumentMcpServer()` — never previously an error, since
-  this library was blind to `tools/list` entirely before this release —
-  upgrading will make that throw `INSTRUMENT_FIRST_ERROR` where it didn't
-  before, with no other code changes on your part.
-  - **`McpServer` users are unaffected.** `McpServer` registers `tools/list`
-    and `tools/call` together, atomically, the first time `.tool()` or
-    `.registerTool()` is called — so anyone already following the
-    documented instrument-before-registration rule for `tools/call`
-    automatically satisfies it for `tools/list` too.
-  - **Migration**: either reorder your `tools/list` registration to after
-    `instrumentMcpServer()`, or pass `schemaDrift: { enabled: false }` to
-    opt out and keep your existing registration order — both fully
-    restore v0.7.0 behavior. There is no change if you don't use a
-    low-level `Server` with an independently-registered `tools/list`
-    handler.
 
 ### Added — Two-axis observation contract
 
@@ -143,6 +161,53 @@ health by omission." Full investigation and design: ADR 008
       moment that happens.
   - `ToolOutcome`, `ToolOutcomeCounts`, `ObservationIntegrity`,
     `ObservationState` types, exported from the package root.
+
+### Added — Cost-aware trace sampling (marker attribute + Collector recipe)
+
+- **`mcp.tool.thrash_detected`, a new boolean span attribute**, set
+  alongside (never instead of) the existing `mcp.loop.detected` span
+  event, in the same `thrash/emitter.js` call site — set only when
+  `thrashDetection` is enabled and a loop was actually detected on this
+  call, same reachability as the existing event, no new failure mode.
+  Exists specifically so an OpenTelemetry Collector's
+  `tailsamplingprocessor` has an unambiguous, attribute-level signal to
+  key on: whether a `boolean_attribute` policy can also match span-*event*
+  data was investigated and left genuinely unverified (the processor is
+  Go source in a separate repository, not installed here), so this
+  attribute removes that uncertainty entirely rather than leaving tail
+  sampling dependent on an unconfirmed answer. **Named deliberately
+  differently** from the pre-existing `mcp.tool.loop.detected` **metric**
+  counter, not reusing its string as ADR 011 originally specified — see
+  that ADR's "Update" note. A metric name and a span attribute key are
+  unrelated OTel namespaces with no technical conflict, but reusing the
+  name left the one reader who most needs it to be unambiguous — someone
+  writing a Collector tail-sampling policy — unable to tell, from the
+  name alone, which of the two same-named signals they were keying on.
+- **No new cost-threshold attribute or config.** `mcp.tool.cost.usd` and
+  `mcp.tool.cost.budget_exceeded` (both already shipped, v0.5.0) already
+  fully suffice for a Collector `numeric_attribute` / `boolean_attribute`
+  policy — the numeric threshold itself lives entirely in the
+  Collector's own policy config (the YAML), not in this package's
+  `InstrumentOptions`. No new env var, no new `instrumentMcpServer()`
+  option.
+- **A documented, pasteable OpenTelemetry Collector `tailsamplingprocessor`
+  config** (README's "Cost-aware trace sampling" section) keeping any
+  trace with an expensive call, a budget-exceeded call, or a detected
+  thrash loop, alongside an ordinary probabilistic sample for everything
+  else.
+- **No in-process sampler or buffering `SpanProcessor` was built, and none
+  is planned** — investigated and rejected on two independent grounds
+  (ADR 011): this package doesn't own the `Sampler`/`SpanProcessor` chain
+  in its default configuration (no public API to inject either into a
+  host-owned `TracerProvider`), and even where a custom processor could
+  theoretically be installed, an in-process decision can only ever rescue
+  the one span this package itself creates — never an already-finished
+  child span from other instrumentation, never an upstream span in a
+  different process. "Keep the trace" is not achievable in-process; at
+  best, "keep this one span" is, which is a materially smaller guarantee
+  than the stated goal. Real cross-span, cross-process trace buffering is
+  what the Collector's `tailsamplingprocessor` already does correctly —
+  not something to partially re-implement inside this package.
 
 ## 0.7.0
 

@@ -606,6 +606,23 @@ metric above fires.
 | `mcp.loop.session_id` | The session this loop belongs to |
 | `mcp.failure.fingerprint` | The shared fingerprint (see "Failure Fingerprinting" above) |
 
+**Also sets a boolean span *attribute*, `mcp.tool.thrash_detected: true`**,
+on that same span, alongside the event above (v0.8.0, ADR 011 —
+`docs/adr/011-cost-aware-sampling.md`). This exists for one specific
+consumer: an OpenTelemetry Collector's `tailsamplingprocessor`, whose
+`boolean_attribute` policy matches top-level span attributes — whether
+such a policy can also match span-*event* data was investigated and left
+genuinely unverified (no Go source to check against in this repository),
+so the attribute exists to remove that uncertainty entirely for anyone
+wiring up cost/thrash-aware tail sampling. See "Cost-aware trace sampling
+(a Collector recipe, not a library feature)" below. Deliberately named
+*differently* from the `mcp.tool.loop.detected` **metric** counter above,
+not reusing its string: a metric name and a span attribute key are
+unrelated OTel namespaces with no actual technical conflict, but the one
+reader who most needs this name to be unambiguous — someone writing a
+Collector tail-sampling policy — would otherwise see one bare string with
+no way to tell which of the two same-named signals they're keying on.
+
 ### Configuration
 
 All fields of `thrashDetection`, each independently overridable by its own
@@ -1184,6 +1201,129 @@ registration reflects it correctly, with no restart needed. The check
 itself is cheap (an object construction and a reference comparison), so
 there's no performance reason to cache it either.
 
+## Cost-aware trace sampling (a Collector recipe, not a library feature)
+
+The ask that keeps coming up: keep traces that were expensive or that
+thrashed, *regardless of what the head sampler decided* — don't sample
+away the one call that burned $2 and 40 retries just because it lost a
+1-in-10 coin flip at span start. This package does not, and will not,
+implement that itself. Full investigation and reasoning: ADR 011
+(`docs/adr/011-cost-aware-sampling.md`).
+
+**Why this can't be a library feature — read this before filing an issue
+asking why `instrumentMcpServer()` doesn't just do it:** OpenTelemetry's
+`Sampler` decides whether to keep a span at span **start**
+(`Tracer.startSpan()`, before the span object even exists) — cost
+(`mcp.tool.cost.usd`) and thrash (`mcp.tool.thrash_detected`) are only known
+at span **end**, after the tool handler has actually run. A head-based
+sampler cannot see either signal, because the entire concept of "turns
+out to be expensive" happens after the sampling decision already ran and
+already produced an immutable result — this isn't a missing feature, it's
+what "head sampling" means. Investigated further (ADR 011, Q2): even
+setting that timing problem aside, this library doesn't own the
+`Sampler` or the `SpanProcessor` chain in its default (and recommended)
+configuration — both belong to whatever `TracerProvider` the host
+application already registered, with no public API to inject either
+after construction. Building this in-process would mean asking every host
+application to change how *they* construct their own OTel SDK — a
+fundamentally bigger, more invasive ask than `instrumentMcpServer(server,
+options)`, and exactly the class of intervention this project has already
+ruled out elsewhere (never override a host's own OpenTelemetry setup).
+
+**What this package does instead: mark, don't decide.** Two of the three
+signals a tail-sampling policy needs already exist as plain span
+attributes with no changes required — `mcp.tool.cost.usd` (see "Cost &
+Token Attribution" above) and `mcp.tool.cost.budget_exceeded` (a
+cumulative budget guardrail, same section). The third,
+`mcp.tool.thrash_detected` — a boolean span attribute set alongside the
+existing `mcp.loop.detected` span event (see "Agent Thrash Detection" →
+"Span event" above) — is the one new addition this release makes,
+specifically so a tail-sampling policy has an unambiguous, attribute-level
+signal to key on. The actual decision — buffer a trace, evaluate a
+policy, keep or drop the whole thing — belongs to the OpenTelemetry
+Collector's `tailsamplingprocessor`, which already does this correctly,
+already handles the hard parts (per-trace span buffering across a wait
+window, multi-service traces, decision policies), and runs where it can
+see every span in a trace regardless of which process produced it —
+something this library, running inside one MCP server process, never can.
+
+### A working Collector config
+
+Real, pasteable `tailsamplingprocessor` config — not pseudo-config. Keeps
+any trace containing an expensive call, a budget-exceeded call, or a
+detected thrash loop; everything else gets an ordinary probabilistic
+sample. (Standard OpenTelemetry Collector Contrib syntax — external to
+this repository, so treat field names as this component's own documented
+contract, not something confirmed against code living here.)
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 50000
+    expected_new_traces_per_sec: 10
+    policies:
+      # Keep any trace containing a call that cost more than $0.10.
+      - name: expensive-tool-calls
+        type: numeric_attribute
+        numeric_attribute:
+          key: mcp.tool.cost.usd
+          min_value: 0.10
+
+      # Keep any trace where a configured cost budget was crossed.
+      - name: budget-exceeded-calls
+        type: boolean_attribute
+        boolean_attribute:
+          key: mcp.tool.cost.budget_exceeded
+          value: true
+
+      # Keep any trace containing a detected agent thrash loop.
+      - name: thrash-loops
+        type: boolean_attribute
+        boolean_attribute:
+          key: mcp.tool.thrash_detected
+          value: true
+
+      # Everything else: an ordinary 10% probabilistic sample. Policies
+      # are OR'd together by the processor, so this doesn't reduce
+      # anything the three policies above already decided to keep — it
+      # only adds baseline visibility into the traces none of them matched.
+      - name: baseline-sample
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+exporters:
+  otlp:
+    endpoint: your-backend:4317
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [tail_sampling]
+      exporters: [otlp]
+```
+
+Point `instrumentMcpServer({ exporterUrl: 'http://localhost:4318/v1/traces' })`
+(or your host's own OTLP exporter configuration) at this Collector's
+`otlp` receiver, and it sits in front of your real trace backend, applying
+this policy before anything is exported downstream.
+
+**Adjust `min_value`/`sampling_percentage` to your own cost/volume
+profile** — `0.10` and `10%` above are illustrative starting points, not
+recommendations; `decision_wait`/`num_traces` should scale with your
+actual traffic volume (the Collector's own docs cover sizing these). If
+your schema-drift or two-axis observation signals matter for retention
+too, add `mcp.tool.schema_drift.detected` (boolean_attribute) as another
+OR'd policy the same way.
+
 ## Configuration
 
 All options passed to `instrumentMcpServer(server, options)`. Source of
@@ -1324,12 +1464,22 @@ pragmatic choice rather than a spec-pure one.
   `fingerprinting`/`thrashDetection`/`enableMetrics`) and
   `observationIntegrity` (`'DEGRADED' | 'UNKNOWN'` — `HEALTHY` was
   investigated and found structurally unreachable in every
-  configuration, so it isn't part of the type at all). One other
-  investigation from the same v0.8.0 cycle was **not** implemented, by
-  design: ADR 011 found in-process cost-aware tail sampling isn't
-  achievable (this package doesn't own the `Sampler`/`SpanProcessor`
-  chain in its default configuration) and recommends a Collector recipe
-  instead.
+  configuration, so it isn't part of the type at all).
+- v0.8: Cost-aware trace sampling — marker attribute + Collector recipe,
+  **not** an in-process sampler ✓ — see "Cost-aware trace sampling" above
+  and ADR 011. In-process tail sampling was investigated and found not
+  achievable by design: this package doesn't own the
+  `Sampler`/`SpanProcessor` chain in its default configuration (no public
+  API to inject either into a host-owned `TracerProvider`), and even
+  where a custom processor could theoretically be installed, an
+  in-process decision can only ever rescue the one span this package
+  itself creates, never a whole trace. What *is* shipped: a new boolean
+  `mcp.tool.thrash_detected` span attribute (alongside the pre-existing
+  `mcp.loop.detected` span event), joining the already-sufficient
+  `mcp.tool.cost.usd` / `mcp.tool.cost.budget_exceeded` attributes, plus
+  a documented, pasteable OpenTelemetry Collector `tailsamplingprocessor`
+  config that keeps expensive/budget-exceeded/thrashing traces alongside
+  a normal probabilistic sample for everything else.
 - Future: failure clustering + regression detection; recovery hints;
   root-cause chaining across parent spans; alignment with the OTel GenAI
   SIG's MCP semantic conventions when published

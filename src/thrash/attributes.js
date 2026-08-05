@@ -48,3 +48,41 @@ export const ATTR_MCP_LOOP_FIRST_TRACE_ID = 'mcp.loop.first_trace_id';
  * cardinality hazard METRIC_SAFE_ATTRIBUTES exists to prevent.
  */
 export const ATTR_MCP_LOOP_SESSION_ID = 'mcp.loop.session_id';
+
+/**
+ * Boolean span ATTRIBUTE marking a detected agent thrash loop — added
+ * alongside, never instead of, the `mcp.loop.detected` span EVENT above
+ * (ADR 011, docs/adr/011-cost-aware-sampling.md, "Cost-aware sampling":
+ * the marking-not-buffering decision). ADR 011 investigated whether an
+ * OTel Collector `tailsamplingprocessor`'s `boolean_attribute` policy can
+ * match span-EVENT data (as opposed to top-level span attributes) and
+ * could not confirm it either way — the processor is Go source in a
+ * separate repository, not installed here. This attribute exists
+ * specifically so a tail-sampling policy has something unambiguous to
+ * key on regardless of that answer.
+ *
+ * NAME DIVERGES FROM ADR 011'S LITERAL TEXT — see that ADR's "Update"
+ * note for the full record. ADR 011's Decision section names this
+ * `mcp.tool.loop.detected`, deliberately reusing the pre-existing
+ * `mcp.tool.loop.detected` METRIC counter's own name (this module's
+ * sibling `emitter.js`'s `meter.createCounter('mcp.tool.loop.detected',
+ * ...)`), reasoning that a metric name and a span attribute key occupy
+ * separate OTel namespaces so there's no technical conflict. That's
+ * still true, but it turned out to be the wrong call in practice: the
+ * one reader who most needs this name to be unambiguous — someone
+ * writing a Collector tail-sampling policy — sees a bare string with no
+ * namespace markers and has no way to tell, from the name alone, which
+ * of the two same-named signals they're keying on. Implemented instead
+ * as `mcp.tool.thrash_detected`: drops "loop" entirely rather than
+ * hunting for a non-colliding sub-name within the existing
+ * `mcp.tool.loop.*` metric family, and keeps the `_detected` suffix
+ * convention already established by `mcp.loop.detected` (the event) and
+ * `mcp.tool.schema_drift.detected` (ADR 010).
+ *
+ * Only ever set to `true`, and only when a loop was actually detected on
+ * this call (`thrashConfig.enabled` and a threshold crossed) — never
+ * explicitly set `false` for a clean call, matching this codebase's
+ * existing "omit rather than set a negative/empty value" convention
+ * (e.g. `fingerprint/classify/validation-paths.js`).
+ */
+export const ATTR_MCP_TOOL_THRASH_DETECTED = 'mcp.tool.thrash_detected';

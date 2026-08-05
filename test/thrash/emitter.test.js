@@ -16,6 +16,7 @@ import {
   ATTR_MCP_LOOP_FIRST_SPAN_ID,
   ATTR_MCP_LOOP_FIRST_TRACE_ID,
   ATTR_MCP_LOOP_SESSION_ID,
+  ATTR_MCP_TOOL_THRASH_DETECTED,
 } from '../../src/thrash/attributes.js';
 
 /** Minimal in-memory MetricReader — mirrors test/metrics.test.js's TestMetricReader. */
@@ -161,6 +162,22 @@ describe('createThrashEmitter', () => {
     expect(attrs[ATTR_MCP_LOOP_FIRST_TRACE_ID]).toBe('trace-first');
     expect(attrs[ATTR_MCP_LOOP_SESSION_ID]).toBe('session-xyz');
     expect(attrs[ATTRIBUTE_KEYS.FINGERPRINT]).toBe('fp-xyz');
+  });
+
+  it('sets the mcp.tool.thrash_detected boolean span ATTRIBUTE alongside the span event (ADR 011)', () => {
+    const emitter = createThrashEmitter('0.0.0-test');
+    const tracer = trace.getTracer('test');
+
+    tracer.startActiveSpan('span', (span) => {
+      emitter.emit(mkEvent());
+      span.end();
+    });
+
+    const [span] = spanExporter.getFinishedSpans();
+    // A top-level span attribute, distinct from the span event asserted
+    // above — a Collector tail-sampling policy can key on this directly
+    // without depending on whether span-event data is matchable at all.
+    expect(span.attributes[ATTR_MCP_TOOL_THRASH_DETECTED]).toBe(true);
   });
 
   it('skips the span event silently, but still emits metrics, when there is no active span', async () => {
