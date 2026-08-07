@@ -37,8 +37,13 @@ export type ToolOutcome = 'SUCCESS' | 'FAILURE' | 'UNKNOWN';
 /**
  * Cumulative tool-call outcome counts since this counter was constructed
  * — see src/observation/tool-outcome-counter.js's
- * `ToolOutcomeCounter.getCounts()`. Process-lifetime, in-memory, no
- * per-session or per-tool breakdown in this phase.
+ * `ToolOutcomeCounter.getCounts()`. In-memory, no per-session or per-tool
+ * breakdown in this phase. Scoped to the `instrumentMcpServer()` call
+ * that constructed the counter, NOT necessarily the whole process — see
+ * that module's docblock and ADR 012
+ * (docs/adr/012-tracker-lifecycle-and-shared-state.md) for why those are
+ * only equivalent under a long-lived, once-per-process instrumented
+ * instance.
  */
 export interface ToolOutcomeCounts {
   success: number;

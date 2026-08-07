@@ -332,7 +332,7 @@ alongside the diagnostic attribute in v0.7.0.
 ## 6. Four in-memory trackers reset every `instrumentMcpServer()` call under stateless HTTP
 
 **Target:** v0.9.0 (proposed — see ADR 012)
-**Raised by:** [reporter attribution — fill in]
+**Found by:** internal self-review, not an external report
 
 ### Body
 

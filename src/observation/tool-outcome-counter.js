@@ -1,8 +1,11 @@
 /**
  * @module observation/tool-outcome-counter
  *
- * A new, unconditional, process-lifetime counter of tool-call outcomes
- * (ADR 008, docs/adr/008-observation-liveness.md — "Update (2026-08-05):
+ * A new, unconditional counter of tool-call outcomes, scoped to the
+ * lifetime of the `instrumentMcpServer()` call that constructs it — see
+ * the note at the bottom of this docblock before assuming that means
+ * "for the whole process" (ADR 008, docs/adr/008-observation-liveness.md
+ * — "Update (2026-08-05):
  * The two-axis reframe", Finding 3). Backs the `ToolOutcome` half of the
  * two-axis observation contract. Phase 1 of the rollout: this counter
  * only — no `ObservationIntegrity` detection (Phase 2), no
@@ -25,9 +28,18 @@
  * by whichever future wiring phase decides not to construct or call this
  * counter at all in that case — not by anything in this module.
  *
- * In-memory, process-lifetime, cumulative — no per-session or per-tool
- * breakdown in this phase. No OTel emission here either; this is the
- * pure bookkeeping layer only.
+ * In-memory, cumulative for as long as this instance survives — no
+ * per-session or per-tool breakdown in this phase. No OTel emission
+ * here either; this is the pure bookkeeping layer only.
+ *
+ * NOT necessarily process-lifetime: this instance is constructed fresh
+ * inside every `instrumentMcpServer()` call (instrument.js), with no
+ * state shared across calls. That's only equivalent to "process-lifetime"
+ * when a host instruments one long-lived `Server`/`McpServer` once. Under
+ * a fresh-`Server`-per-request deployment (e.g. stateless Streamable
+ * HTTP), a new instance is constructed per request and this counter
+ * resets to all-zero every time — a confirmed gap, not a hypothetical.
+ * See ADR 012, docs/adr/012-tracker-lifecycle-and-shared-state.md.
  */
 
 /** @typedef {import('./types.d.ts').ToolOutcomeCounts} ToolOutcomeCounts */
