@@ -436,10 +436,12 @@ convenience default, not a maintained price list.
   hot path (e.g. over historical spans).
 - Disable everything in this section with `costTracking: { enabled:
   false }`; tracing, metrics, and fingerprinting are all unaffected.
-- Budget tracking (`costTracking.budget`) is in-memory and per
-  `instrumentMcpServer()` call — it resets on process restart, and
-  session-scoped limits are skipped gracefully (not enforced against a
-  fallback key) for transports with no session id, like stdio.
+- Budget tracking (`costTracking.budget`) is in-memory and scoped to one
+  `instrumentMcpServer()` call — see "In-memory tracker state is scoped to
+  one instrumentMcpServer() call" below for what that means under a
+  fresh-`Server`-per-request deployment. Session-scoped limits are also
+  skipped gracefully (not enforced against a fallback key) for transports
+  with no session id, like stdio.
 
 ## Agent Thrash Detection (v0.6.0+)
 
@@ -746,6 +748,13 @@ internal `reset()`), not "what's currently active." Don't read
 
 ### Known limitations
 
+**In-memory tracker state is scoped to one `instrumentMcpServer()` call** —
+see "In-memory tracker state is scoped to one instrumentMcpServer() call"
+below. Under a fresh-`Server`-per-request deployment (e.g. stateless
+Streamable HTTP), consecutive-failure tracking never accumulates past a
+single call, and `mcp.tool.loop.detected` never fires — silently. Confirmed
+gap, ADR 012.
+
 **A malformed `tools/call` request produces zero telemetry — no span, no
 fingerprint, nothing.** If a request fails `CallToolRequestSchema`
 validation itself (e.g. a missing or wrongly-typed `name`/`arguments`
@@ -925,8 +934,10 @@ this package's own thrash-detection session resolution already assumes
 (one instrumented instance, many sessions). A host that instead
 constructs a *fresh* `Server`/`McpServer` per HTTP session (stateless
 mode) gets no cross-session drift detection at all, silently, by
-construction — this package has no way to detect or fix that topology
-choice.
+construction. **This is not unique to schema drift** — see "In-memory
+tracker state is scoped to one instrumentMcpServer() call" below, which
+supersedes the framing above: the same construction pattern affects three
+other features too, and ADR 012 tracks a proposed fix.
 
 ### Span volume: expect one span per `tools/list` call, not per drift
 
@@ -1029,8 +1040,11 @@ behavior. See the CHANGELOG's v0.8.0 entry for the same note.
   definitions or top-level `oneOf`/`anyOf`/`allOf`: you'll see drift
   detected (the hash changes correctly) without a field name attached.
 - **Per-server-instance scope assumes a long-lived instrumented instance**
-  — see "Scope" above. Stateless-per-session HTTP deployments get no
-  cross-session drift detection, silently, by construction.
+  — see "Scope" above and "In-memory tracker state is scoped to one
+  instrumentMcpServer() call" below. Stateless-per-session HTTP
+  deployments get no cross-session drift detection, silently, by
+  construction — not unique to this feature; ADR 012 tracks a proposed fix
+  covering all four affected trackers.
 - **`tools/list` call frequency, and therefore span/capture-and-hash
   cost, is entirely client-controlled** — unlike `tools/call`, which is
   naturally rate-limited by actual agent tool usage. See "Span volume"
@@ -1201,6 +1215,15 @@ registration reflects it correctly, with no restart needed. The check
 itself is cheap (an object construction and a reference comparison), so
 there's no performance reason to cache it either.
 
+### Known limitations
+
+**`toolOutcome` is scoped to one `instrumentMcpServer()` call, not the
+whole process** — see "In-memory tracker state is scoped to one
+instrumentMcpServer() call" below. Under a fresh-`Server`-per-request
+deployment, `toolOutcome` resets to all-zero every request instead of
+accumulating, contrary to what an earlier version of this feature's own
+source docblock claimed. Confirmed gap, ADR 012.
+
 ## Cost-aware trace sampling (a Collector recipe, not a library feature)
 
 The ask that keeps coming up: keep traces that were expensive or that
@@ -1369,6 +1392,42 @@ unaffected, since it registers both together atomically; low-level
 `Server` users who register `tools/list` independently should read "Tool
 schema drift detection" → "Behavior change on upgrade" above before
 upgrading from a pre-v0.8.0 version.
+
+## In-memory tracker state is scoped to one instrumentMcpServer() call
+
+Four features in this README keep their own in-memory state across tool
+calls: Agent Thrash Detection's consecutive-failure tracking, Cost & Token
+Attribution's budget totals, Tool schema drift detection's per-tool schema
+history, and the Two-axis observation contract's `toolOutcome` counts.
+**All four live inside the object `instrumentMcpServer()` constructs for
+one call — they do not survive past it, and nothing shares state between
+two separate calls.**
+
+This is invisible, and correct, for the deployment shape every one of
+these features was designed against: one `Server`/`McpServer` instance,
+instrumented once, kept alive for the life of the process — stdio's single
+persistent connection, or an HTTP server that keeps one instrumented
+instance around across many sessions. It becomes a real problem under a
+different, also-common shape: **"stateless" Streamable HTTP, where a fresh
+`Server` is constructed — and re-instrumented — on every incoming POST.**
+Under that topology, every one of these four trackers is discarded and
+rebuilt from empty before it ever sees a second data point. Nothing
+accumulates, nothing crosses a threshold, and today nothing warns that
+this is happening — the affected feature is silently inert.
+
+**This is a confirmed, currently-unfixed gap, not a hypothetical.**
+Reproduced directly in `test/integration/thrash-stateless-http-lifecycle.test.js`
+(`describe.skip` — a living reproduction, not a working fix): it drives 5
+identical tool failures across 5 separate `instrumentMcpServer()` calls and
+confirms `mcp.tool.loop.detected` never fires, even past the default
+`threshold: 3`, purely because of this lifecycle mismatch. Full
+investigation, root cause across all four trackers, and the design under
+consideration to fix it: ADR 012
+(`docs/adr/012-tracker-lifecycle-and-shared-state.md`). Tracked in
+`docs/known-gaps.md`.
+
+**If you instrument a fresh `Server`/`McpServer` per request, assume none
+of these four features work as documented until ADR 012's fix ships.**
 
 ## Two modes
 

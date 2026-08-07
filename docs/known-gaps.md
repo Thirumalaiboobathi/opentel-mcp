@@ -326,3 +326,60 @@ Implementing any one of these without settling the others first would
 mean inventing a design ADR 009 deliberately left open, not following
 one it decided — which is why this was deferred rather than built
 alongside the diagnostic attribute in v0.7.0.
+
+---
+
+## 6. Four in-memory trackers reset every `instrumentMcpServer()` call under stateless HTTP
+
+**Target:** v0.9.0 (proposed — see ADR 012)
+**Raised by:** [reporter attribution — fill in]
+
+### Body
+
+Agent Thrash Detection, Cost & Token Attribution's budget tracking, Tool
+schema drift detection, and the Two-axis observation contract's
+`toolOutcome` counter all keep in-memory state across tool calls — and all
+four are constructed as local variables inside `instrumentMcpServer()`'s
+own function body, freshly, on every single call:
+
+- `budgetTracker` — `src/instrument.js:194`
+- `thrashDetector` — `src/instrument.js:200`
+- `toolOutcomeCounter` — `src/instrument.js:245`
+- `schemaDriftDetector` — `src/instrument.js:275`
+
+Under a "stateless" Streamable HTTP deployment — a fresh `Server`
+constructed, and re-instrumented, on every incoming POST — every one of
+these four trackers is discarded and rebuilt from empty before it ever
+sees a second data point. Nothing accumulates, no threshold is ever
+crossed, and nothing warns that this is happening. The existing
+`kInstrumented` idempotency guard doesn't help: it only prevents
+re-instrumenting the *same* object twice, and this deployment shape hands
+`instrumentMcpServer()` a genuinely different, freshly-constructed object
+on every request.
+
+Reproduced directly:
+`test/integration/thrash-stateless-http-lifecycle.test.js`
+(`describe.skip` — a confirmed, unfixed gap kept as a living reproduction,
+not a working fix). It drives 5 identical-fingerprint tool failures across
+5 separate `instrumentMcpServer()` calls and confirms
+`mcp.tool.loop.detected` never fires, even past the default `threshold:
+3`, purely because of this lifecycle mismatch — not because the detection
+logic itself is wrong.
+
+**This was already documented once, too narrowly.** ADR 010
+(`docs/adr/010-schema-drift.md`) accepted the identical root cause as a
+schema-drift-specific limitation without noticing `thrashDetector` and
+`budgetTracker` already shared the same construction pattern, or that
+`toolOutcomeCounter` (v0.8.0) would ship afterward with a docblock
+claiming "process-lifetime" — an assumption this gap shows is false under
+this topology.
+
+Full investigation, why tracer/meter identity isn't affected (and is what
+makes the bug observable via the metric at all), and a proposed fix —
+a host-supplied `instanceKey` resolved through an internal, bounded
+registry, argued against a module-level store and against exporting the
+trackers as injectable public objects: ADR 012
+(`docs/adr/012-tracker-lifecycle-and-shared-state.md`). Not yet
+implemented; see that ADR's "Consequences" section for the recommended
+release sequencing (a documentation-only caveat first, the
+`instanceKey` fix as a later minor release).
