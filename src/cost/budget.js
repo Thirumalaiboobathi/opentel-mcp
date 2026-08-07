@@ -63,10 +63,19 @@ function accumulate(map, key, amount) {
  * Creates a budget tracker scoped to one instrumented server (one call per
  * `instrumentMcpServer()` invocation — see src/instrument.js). Holds two
  * independent, unbounded-lifetime in-memory Maps: one keyed by MCP session
- * id, one keyed by tool name. Neither is ever cleared — this mirrors the
- * process-lifetime accumulation the "per session" / "per tool" limits are
- * meant to describe; restart the process (or, for long-lived servers,
- * build your own eviction on top) to reset.
+ * id, one keyed by tool name. Neither is ever cleared within that call's
+ * lifetime.
+ *
+ * NOT necessarily process-lifetime: this tracker is constructed fresh
+ * inside every `instrumentMcpServer()` call, with no state shared across
+ * calls. That's only equivalent to "process-lifetime" when a host
+ * instruments one long-lived `Server`/`McpServer` once. Under a
+ * fresh-`Server`-per-request deployment (e.g. stateless Streamable HTTP),
+ * a new tracker is constructed per request and these totals reset to zero
+ * every time — a confirmed gap, not a hypothetical. See ADR 012,
+ * docs/adr/012-tracker-lifecycle-and-shared-state.md. Restart the process
+ * (or, for a long-lived server, build your own eviction on top) to reset
+ * intentionally.
  *
  * @param {BudgetConfig | undefined} budget - costTracking.budget from config.js. Omitted/undefined limits
  *   mean that scope is never tracked or checked — recordAndCheck() becomes a pure no-op for it.

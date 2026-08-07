@@ -122,12 +122,23 @@ export class ThrashDetector {
    */
   #activeFingerprint;
 
-  // Cumulative, process-lifetime counters for getSummary() — deliberately
-  // NOT derived from #store (which is bounded and lazily-expiring, so a
-  // live scan would silently lose evicted/expired episodes). Incremented
-  // at emit time in record() below; see that method for how double-
-  // counting across re-emissions of the same loop is avoided. reset()
-  // zeroes these too, same as the store.
+  // Cumulative counters for getSummary(), for as long as this
+  // ThrashDetector instance survives — deliberately NOT derived from
+  // #store (which is bounded and lazily-expiring, so a live scan would
+  // silently lose evicted/expired episodes). Incremented at emit time in
+  // record() below; see that method for how double-counting across
+  // re-emissions of the same loop is avoided. reset() zeroes these too,
+  // same as the store.
+  //
+  // NOT necessarily process-lifetime: this instance is constructed fresh
+  // inside every instrumentMcpServer() call (instrument.js), with no
+  // state shared across calls. That's only equivalent to
+  // "process-lifetime" when a host instruments one long-lived
+  // Server/McpServer once. Under a fresh-Server-per-request deployment
+  // (e.g. stateless Streamable HTTP), a new instance is constructed per
+  // request and these totals reset to zero every time — a confirmed gap,
+  // not a hypothetical. See ADR 012,
+  // docs/adr/012-tracker-lifecycle-and-shared-state.md.
   #totalLoopsDetected = 0;
   #totalWastedTokensIn = 0;
   #totalWastedTokensOut = 0;
