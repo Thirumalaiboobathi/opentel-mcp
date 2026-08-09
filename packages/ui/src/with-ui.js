@@ -38,6 +38,7 @@ import { trace, diag } from '@opentelemetry/api';
 import { CollectorSpanProcessor } from './collector-span-processor.js';
 import { createServer } from './server.js';
 import { openBrowser } from './open-browser.js';
+import { loadBuiltSpaHtml } from './spa-html.js';
 
 /**
  * Resolves whatever concrete `TracerProvider` is currently registered,
@@ -96,7 +97,7 @@ export function withUI(instrumentedServer, options = {}) {
     );
   }
 
-  const server = createServer({ instrumentedServer, collector, statelessTransport, spaHtml });
+  const server = createServer({ instrumentedServer, collector, statelessTransport, spaHtml: spaHtml ?? loadBuiltSpaHtml() });
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);

@@ -1,0 +1,113 @@
+/**
+ * Design tokens. Dark-first (see :root defaults), light theme overrides
+ * under [data-theme="light"]. No gradients, no glassmorphism, no drop
+ * shadows on cards -- separation comes from 1px low-opacity borders and
+ * background-level contrast only.
+ *
+ * FONTS: system stacks only, deliberately -- no bundled/CDN font files.
+ * This package promises "no CDN fetches, must work offline" and a tight
+ * gzipped bundle budget; a real Inter/JetBrains Mono woff2 would cost
+ * real KB against that budget for a marginal rendering difference over
+ * today's system font stacks, which already render Inter-close (UI) and
+ * are genuinely excellent (SF Mono/Cascadia Code/JetBrains Mono itself,
+ * if actually installed) for monospace. If a user has Inter or JetBrains
+ * Mono installed locally, these stacks pick them up for free.
+ *
+ * COLOUR SEMANTICS (used starting Step 5 -- tokens defined here since
+ * this file is the single source of truth for all theme colour):
+ *   --color-success      muted, low-saturation green
+ *   --color-failure      a real, visible red
+ *   --color-unobservable amber -- NEVER red. "Can't tell" is not "broken."
+ *   --color-caught       the accent colour, reused deliberately for the
+ *                        "we caught what standard OTel missed" cell --
+ *                        that is a confident, positive claim, not an
+ *                        uncertain one, so it gets the confident colour,
+ *                        not amber and not red. See ADR-008-aware Step 5a.
+ */
+
+:root {
+  /* ---- Dark theme (default) ---- */
+  --bg: #0a0d13;
+  --bg-elevated: #10141c;
+  --bg-sunken: #060810;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+
+  --text-primary: #e7eaf0;
+  --text-secondary: #8b93a5;
+  --text-tertiary: #5b6272;
+
+  --accent: #5b8cff;
+  --accent-bg: rgba(91, 140, 255, 0.12);
+  --accent-border: rgba(91, 140, 255, 0.35);
+
+  --color-success: #4f9d72;
+  --color-success-bg: rgba(79, 157, 114, 0.12);
+  --color-failure: #e5484d;
+  --color-failure-bg: rgba(229, 72, 77, 0.12);
+  --color-unobservable: #d4a24e;
+  --color-unobservable-bg: rgba(212, 162, 78, 0.12);
+
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-border);
+
+  /* ---- Typography ---- */
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono:
+    ui-monospace, 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Roboto Mono', Consolas, 'Liberation Mono',
+    monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2.25rem;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.55;
+
+  /* ---- Spacing (generous, per the design brief) ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+
+  /* ---- Motion: functional only ---- */
+  --fade-duration: 180ms;
+  --fade-easing: ease-out;
+
+  --sidebar-width: 220px;
+}
+
+:root[data-theme='light'] {
+  --bg: #f8f9fb;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #eef0f4;
+  --border: rgba(15, 23, 42, 0.08);
+  --border-strong: rgba(15, 23, 42, 0.16);
+
+  --text-primary: #12151b;
+  --text-secondary: #565f70;
+  --text-tertiary: #8a92a3;
+
+  --accent: #3763e0;
+  --accent-bg: rgba(55, 99, 224, 0.08);
+  --accent-border: rgba(55, 99, 224, 0.3);
+
+  --color-success: #2f7a4f;
+  --color-success-bg: rgba(47, 122, 79, 0.1);
+  --color-failure: #c62c31;
+  --color-failure-bg: rgba(198, 44, 49, 0.08);
+  --color-unobservable: #9a6b1f;
+  --color-unobservable-bg: rgba(154, 107, 31, 0.1);
+
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-border);
+}

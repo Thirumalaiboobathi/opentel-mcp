@@ -26,6 +26,7 @@
 import { createServer } from '../src/server.js';
 import { CollectorSpanProcessor } from '../src/collector-span-processor.js';
 import { openBrowser } from '../src/open-browser.js';
+import { loadBuiltSpaHtml } from '../src/spa-html.js';
 
 function parseArgs(argv) {
   const args = { port: 4319, open: false, statelessTransport: 'auto' };
@@ -42,7 +43,7 @@ export function main(argv = process.argv.slice(2)) {
   const { port, open, statelessTransport } = parseArgs(argv);
 
   const collector = new CollectorSpanProcessor();
-  const server = createServer({ instrumentedServer: null, collector, statelessTransport });
+  const server = createServer({ instrumentedServer: null, collector, statelessTransport, spaHtml: loadBuiltSpaHtml() });
 
   server.listen(port, () => {
     const url = `http://localhost:${port}`;

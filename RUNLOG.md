@@ -301,3 +301,103 @@ faithfully from what core actually emits.
   `exports` entry.
 - `npm run verify:tarball`: still passes after the core `exports` change.
 
+### Mid-run correction received (before Step 4 completed)
+
+You confirmed the Step 2/3 finding and sent a corrected Step 5a spec:
+rows = ToolOutcome (SUCCESS/FAILURE), columns = per-span OTel visibility
+derived from `errorType` (`=== err.name` → VISIBLE; `=== 'tool_error'` →
+MISSED BY OTEL), with `ObservationIntegrity`/tracker availability
+rendered as one panel-level completeness state instead of a matrix axis.
+This is buildable from real per-span data — no further contract mismatch.
+Carrying it into the Step 5 entry below; continuing Step 4 now.
+
+## Step 4 — SPA shell and design system
+
+**Status: done, all acceptance criteria met. Bundle: 62.23 kB gzipped
+(budget was 300 kB) — full number and breakdown below.**
+
+### What shipped
+
+`packages/ui/web/` — a Vite + React 19 + TypeScript app, entirely separate
+tooling from the backend's plain-JS `src/` (different runtime target,
+different toolchain; nothing about this changes core's or contract's
+"no build step" convention, which only ever applied to Node-side code):
+
+- `vite.config.ts` — `vite-plugin-singlefile` inlines the built JS and CSS
+  into ONE `dist/index.html`, zero separate asset requests, so
+  `server.js`'s `spaHtml` option can serve it as a single string. No CDN
+  references anywhere in the config or the output (verified by grepping
+  the built file for `http(s)://` — the only matches are XML-namespace
+  string constants inside React's own compiled code and a
+  react.dev/errors/ URL React only ever string-concatenates into an error
+  message, never fetches).
+- `theme/tokens.css` — the full token set: dark-first palette (near-black
+  with a blue cast, not pure black or slate grey), light-theme overrides
+  under `[data-theme="light"]`, a typography scale, spacing scale, and
+  the semantic colour tokens Step 5 will consume (`--color-success`,
+  `--color-failure`, `--color-unobservable` — amber, never red — plus
+  `--accent`, reserved separately per your Step 5a correction for the
+  "we caught what OTel missed" cell specifically, not general UI chrome).
+- `theme/ThemeProvider.tsx` — dark-first (defaults to dark regardless of
+  OS preference; only an explicit prior toggle, persisted to
+  `localStorage`, overrides it), sets `data-theme` on `<html>`.
+- `components/Sidebar.tsx`, `components/EmptyState.tsx`, `App.tsx` —
+  fixed left sidebar (branding + theme toggle only; no panel nav yet,
+  since none exist until Step 5), main content area, no top bar. Tablet
+  breakpoint at 900px collapses the sidebar to icon-width.
+- `.mono` utility class in `theme/global.css` — the ONE place "render
+  this in monospace" is defined, so Step 5's telemetry data (span ids,
+  tool names, durations, attribute keys) all reach for the same rule
+  rather than each component hand-rolling `font-family: monospace`.
+
+### On fonts — a deliberate deviation from the brief's literal wording
+
+The brief names Inter/Geist (UI) and JetBrains Mono/Berkeley Mono
+(monospace) specifically. I used SYSTEM FONT STACKS instead
+(`-apple-system, ..., 'Inter', 'Segoe UI', ...` and
+`ui-monospace, 'JetBrains Mono', 'SF Mono', 'Cascadia Code', ...`) rather
+than bundling actual font files. Reasoning: "no CDN fetches, must work
+offline" rules out `<link>`-loading them from Google Fonts, which leaves
+only self-hosting/inlining the font files — real weight (a single Inter
+weight alone is commonly 20-30KB woff2, more for JetBrains Mono) against
+the 300KB gzipped budget, for a shell step that has no telemetry data to
+render in monospace yet. The token names/comments in `tokens.css`
+document this trade-off explicitly and list Inter/JetBrains Mono FIRST in
+their respective stacks, so a user who has them installed locally gets
+them for free, and today's system stacks (San Francisco/Segoe UI/Roboto;
+SF Mono/Cascadia Code/JetBrains Mono itself, if installed) are close
+enough that I judged this an acceptable trade against the explicit,
+numeric bundle budget. Flagging this because the brief was specific by
+name and I didn't follow it literally — if you'd rather spend real bundle
+budget on an embedded monospace font (the one place the brief calls "the
+strongest single signal that this is a developer tool"), that's a
+reasonable call to make once Step 5's panels exist and there's an actual
+gzip number to weigh it against.
+
+### Verification
+
+- `npm run typecheck`: added a second `tsc` invocation
+  (`web/tsconfig.json`, strict, `noUncheckedIndexedAccess`) alongside the
+  existing backend one — both clean.
+- `npm run build`: `vite build` — **`dist/index.html`: 196.46 kB raw,
+  62.23 kB gzipped.** Budget was 300 kB gzipped; ~21% of it used, leaving
+  headroom for Step 5's panels.
+- New tests: `web/App.test.tsx` — a real jsdom-rendered-DOM test (not just
+  "the build succeeded"): asserts the empty state text renders, the
+  sidebar/theme-toggle exist, dark-first default, clicking the toggle
+  actually flips `document.documentElement`'s `data-theme` AND persists
+  it to `localStorage`, and that a previously-saved preference is
+  respected on the next render.
+- **What I could NOT verify: actually looking at it.** This environment
+  has no browser/display available to me. I did not visually confirm the
+  dark theme "near-black with a blue cast" reads as intended, that
+  spacing feels "generous," or that the tablet breakpoint looks right at
+  900px — only that the code implementing all of those compiles, builds,
+  and produces the DOM/CSS I intended, verified via jsdom assertions and
+  reading the built output. Please actually open it
+  (`npm run build --workspace=packages/ui && node -e "..."` or
+  `withUI()` against a real server) before trusting the visual design
+  reads the way the brief wants — this is exactly the kind of claim the
+  ground rules ask me not to overstate.
+- `npm run verify:tarball` (core, unaffected by this step): still passes.
+

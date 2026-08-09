@@ -1,0 +1,116 @@
+.app-shell {
+  display: flex;
+  min-height: 100%;
+}
+
+.sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: var(--sidebar-width);
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-5) var(--space-4);
+  background: var(--bg-elevated);
+  border-right: 1px solid var(--border);
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sidebar-mark {
+  color: var(--accent);
+  font-size: var(--text-sm);
+}
+
+.sidebar-wordmark {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+
+.sidebar-spacer {
+  flex: 1;
+}
+
+.theme-toggle {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color var(--fade-duration) var(--fade-easing), color var(--fade-duration) var(--fade-easing);
+}
+
+.theme-toggle:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.main-content {
+  margin-left: var(--sidebar-width);
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-6) var(--space-7);
+}
+
+.empty-state {
+  max-width: 32rem;
+  margin-top: var(--space-8);
+}
+
+.empty-state-title {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-3);
+}
+
+.empty-state-body {
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  margin: 0;
+}
+
+.empty-state-body code {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.05em 0.4em;
+  font-size: 0.9em;
+}
+
+/* Tablet: narrower sidebar, tighter content padding. Mobile is out of
+   scope per the brief. */
+@media (max-width: 900px) {
+  :root {
+    --sidebar-width: 72px;
+  }
+
+  .sidebar-wordmark {
+    display: none;
+  }
+
+  .sidebar-brand {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .theme-toggle {
+    align-self: center;
+    padding: var(--space-2);
+  }
+
+  .main-content {
+    padding: var(--space-5) var(--space-4);
+  }
+}

@@ -17,7 +17,8 @@
   },
   "files": [
     "src",
-    "bin"
+    "bin",
+    "dist"
   ],
   "engines": {
     "node": ">=20"
@@ -25,8 +26,9 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
-    "build": "node -e \"console.log('opentel-mcp-ui: backend has no build step; frontend build lands in a later step')\""
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
+    "build": "vite build",
+    "dev:web": "vite"
   },
   "author": "Thirumalaiboobathi B",
   "license": "MIT",
@@ -50,6 +52,14 @@
     "@opentelemetry/sdk-trace-base": "^2.9.0",
     "@opentelemetry/sdk-trace-node": "^2.9.0",
     "typescript": "^7.0.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "vite": "^8.2.1",
+    "@vitejs/plugin-react": "^6.0.5",
+    "vite-plugin-singlefile": "^2.3.3",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "jsdom": "^30.0.1"
   }
 }
