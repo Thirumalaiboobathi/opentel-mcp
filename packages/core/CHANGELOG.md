@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.0
+
+**Two-axis observation contract extracted into a standalone package,
+`opentel-mcp-contract`** (zero runtime dependencies — types and frozen
+constant objects only). Motivation: the upcoming local dashboard UI
+(`opentel-mcp-ui`) renders `ToolOutcome`/`ObservationIntegrity`, and needs
+to import the exact same definitions this package emits from, so a
+mismatch is a build-time type error instead of a UI silently rendering a
+stale value. `opentel-mcp` now depends on `opentel-mcp-contract` and
+re-exports everything it previously exported for this contract —
+`ToolOutcome`, `ToolOutcomeCounts`, `ObservationIntegrity`,
+`ObservationState` — unchanged, now marked `@deprecated` in favor of
+importing from `opentel-mcp-contract` directly. No behavior change; no
+major version bump; existing `import { ToolOutcome } from 'opentel-mcp'`
+consumers are unaffected.
+
 ## 0.8.0
 
 Three features. **Tool schema drift detection**: a server that silently

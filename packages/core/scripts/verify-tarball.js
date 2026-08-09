@@ -18,15 +18,57 @@
 // healthy) to confirm every named value export actually resolves. Cleans up
 // its temp dirs on both success and failure; exits non-zero with a clear
 // message on any failure.
+//
+// v0.9.0: this package gained a real `dependencies` entry on a sibling
+// workspace package (`opentel-mcp-contract`, from the two-axis observation
+// contract extraction). The throwaway consumer project below is
+// deliberately OUTSIDE this repo/workspace, so a plain `npm install
+// <core tarball>` would try to fetch `opentel-mcp-contract` from the real
+// npm registry — which 404s until it's actually published there. Rather
+// than skip that (and silently stop testing the exact install a real
+// consumer will do), `packLocalWorkspaceDeps()` below packs any
+// `dependencies` entry that resolves to a sibling `packages/*` workspace
+// too, and both tarballs are installed together in one `npm install` call
+// — Node's module resolution is purely filesystem-based for two flat
+// top-level `node_modules` entries, so this reproduces a real consumer's
+// install faithfully without needing either package actually published.
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8'));
+
+/**
+ * Finds, for each name in `pkg.dependencies`, a sibling directory under
+ * `packages/*` whose own package.json declares that exact name — i.e. a
+ * same-monorepo workspace dependency, not a real published-to-npm one.
+ * Returns their absolute directory paths, to be packed alongside this
+ * package for the throwaway consumer install below. Silently returns
+ * nothing for a dependency name that isn't a local workspace (e.g. a real
+ * npm dependency) — those install from the registry normally.
+ *
+ * @returns {string[]}
+ */
+function findLocalWorkspaceDependencyDirs() {
+  const dependencyNames = new Set(Object.keys(pkg.dependencies ?? {}));
+  if (dependencyNames.size === 0) return [];
+
+  const packagesDir = join(rootDir, '..');
+  const found = [];
+  for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const candidateDir = join(packagesDir, entry.name);
+    const candidatePkgPath = join(candidateDir, 'package.json');
+    if (!existsSync(candidatePkgPath)) continue;
+    const candidatePkg = JSON.parse(readFileSync(candidatePkgPath, 'utf8'));
+    if (dependencyNames.has(candidatePkg.name)) found.push(candidateDir);
+  }
+  return found;
+}
 
 /**
  * Parses `src/index.d.ts` for every top-level `export`, split into value
@@ -98,9 +140,18 @@ async function main() {
     const [{ filename }] = JSON.parse(packOutput);
     const tarballPath = join(packDir, filename);
 
-    console.log('verify-tarball: installing the packed tarball into a clean project...');
+    const localWorkspaceDependencyDirs = findLocalWorkspaceDependencyDirs();
+    const tarballPaths = [tarballPath];
+    for (const dependencyDir of localWorkspaceDependencyDirs) {
+      console.log(`verify-tarball: npm pack local workspace dependency ${dependencyDir}...`);
+      const depPackOutput = run('npm', ['pack', '--json', '--pack-destination', packDir], { cwd: dependencyDir });
+      const [{ filename: depFilename }] = JSON.parse(depPackOutput);
+      tarballPaths.push(join(packDir, depFilename));
+    }
+
+    console.log('verify-tarball: installing the packed tarball(s) into a clean project...');
     run('npm', ['init', '-y'], { cwd: consumerDir });
-    run('npm', ['install', tarballPath], { cwd: consumerDir });
+    run('npm', ['install', ...tarballPaths], { cwd: consumerDir });
     run('npm', ['install', '-D', 'typescript'], { cwd: consumerDir });
 
     const checkTsLines = [];

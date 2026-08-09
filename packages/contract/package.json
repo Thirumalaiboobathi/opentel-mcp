@@ -1,7 +1,6 @@
 {
   "name": "opentel-mcp-contract",
   "version": "0.1.0",
-  "private": true,
   "description": "Shared types and constants for opentel-mcp's two-axis observation contract (ToolOutcome + ObservationIntegrity)",
   "type": "module",
   "main": "src/index.js",
@@ -10,7 +9,8 @@
     ".": {
       "types": "./src/index.d.ts",
       "default": "./src/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "src"

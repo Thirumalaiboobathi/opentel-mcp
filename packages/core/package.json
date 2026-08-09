@@ -1,6 +1,6 @@
 {
   "name": "opentel-mcp",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "One-line OpenTelemetry instrumentation for Model Context Protocol (MCP) servers",
   "type": "module",
   "main": "src/index.js",
@@ -59,7 +59,8 @@
   "dependencies": {
     "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
     "@opentelemetry/resources": "^2.9.0",
-    "@opentelemetry/sdk-trace-node": "^2.9.0"
+    "@opentelemetry/sdk-trace-node": "^2.9.0",
+    "opentel-mcp-contract": "^0.1.0"
   },
   "devDependencies": {
     "@opentelemetry/api": "^1.9.0",

@@ -15,6 +15,12 @@ import type {
   ObservationState,
 } from '../src/index.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import type {
+  ToolOutcome as ContractToolOutcome,
+  ToolOutcomeCounts as ContractToolOutcomeCounts,
+  ObservationIntegrity as ContractObservationIntegrity,
+  ObservationState as ContractObservationState,
+} from 'opentel-mcp-contract';
 
 // A consumer can construct options with a PARTIAL thrash config — every
 // field individually optional, matching resolveThrashConfig()'s actual
@@ -348,3 +354,16 @@ expectTypeOf<ObservationState['toolOutcome']>().toEqualTypeOf<ToolOutcomeCounts>
 // pattern as the existing getThrashSummary assertion above.
 const instrumentedForObservation = instrumentMcpServer(someServer);
 expectTypeOf(instrumentedForObservation.getObservationState).toEqualTypeOf<(() => ObservationState) | undefined>();
+
+// v0.9.0: these four types moved to the standalone opentel-mcp-contract
+// package (see RUNLOG.md, Step 2). The assertions above already prove
+// core's re-exported shapes are still correct post-refactor; this block
+// additionally proves they are the SAME type as the extracted package's
+// own — not an independently-hand-maintained duplicate that could
+// silently drift out of sync later. This is the compile-time half of
+// test/observation/contract-reexport.test.js's runtime reference-identity
+// checks (`toBe`, not `toEqual`) for the two frozen enum objects.
+expectTypeOf<ToolOutcome>().toEqualTypeOf<ContractToolOutcome>();
+expectTypeOf<ToolOutcomeCounts>().toEqualTypeOf<ContractToolOutcomeCounts>();
+expectTypeOf<ObservationIntegrity>().toEqualTypeOf<ContractObservationIntegrity>();
+expectTypeOf<ObservationState>().toEqualTypeOf<ContractObservationState>();

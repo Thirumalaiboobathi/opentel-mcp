@@ -45,17 +45,18 @@
  * `UNKNOWN` — never throw, and never claim `DEGRADED` on a shaky signal —
  * if the check itself throws or the SDK's shape ever looks different
  * than expected.
+ *
+ * v0.9.0: the `OBSERVATION_INTEGRITY` frozen enum object moved to the
+ * standalone `opentel-mcp-contract` package (re-exported below) so this
+ * module's emission and any consumer share the exact same object — only
+ * the detection logic below, which needs `@opentelemetry/api`, stays
+ * here (contract has zero runtime dependencies).
  */
 
 import { trace, ProxyTracerProvider } from '@opentelemetry/api';
+import { OBSERVATION_INTEGRITY } from 'opentel-mcp-contract';
 
-/** @typedef {import('./types.d.ts').ObservationIntegrity} ObservationIntegrity */
-
-/** @type {Readonly<Record<'DEGRADED' | 'UNKNOWN', ObservationIntegrity>>} */
-export const OBSERVATION_INTEGRITY = Object.freeze({
-  DEGRADED: 'DEGRADED',
-  UNKNOWN: 'UNKNOWN',
-});
+export { OBSERVATION_INTEGRITY };
 
 /**
  * Detects `ObservationIntegrity` for one instrumented server. Never
