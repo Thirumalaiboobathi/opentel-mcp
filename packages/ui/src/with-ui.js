@@ -39,6 +39,7 @@ import { CollectorSpanProcessor } from './collector-span-processor.js';
 import { createServer } from './server.js';
 import { openBrowser } from './open-browser.js';
 import { loadBuiltSpaHtml } from './spa-html.js';
+import { buildDemoFixture } from './demo-fixture.js';
 
 /**
  * Resolves whatever concrete `TracerProvider` is currently registered,
@@ -68,7 +69,10 @@ function resolveAttachableProvider() {
  *   bufferCapacity?: number,
  *   statelessTransport?: boolean | 'auto',
  *   spaHtml?: string,
- * }} [options]
+ *   demo?: boolean,
+ * }} [options] `demo: true` seeds a realistic fixture (src/demo-fixture.js)
+ *   so the dashboard has something to render immediately -- for reviewing
+ *   the UI itself, not for production use.
  * @returns {Promise<{
  *   server: import('node:http').Server,
  *   collector: CollectorSpanProcessor,
@@ -80,9 +84,12 @@ function resolveAttachableProvider() {
  *   fired yet, only serving HTTP requests does.
  */
 export function withUI(instrumentedServer, options = {}) {
-  const { port = 4319, open = false, bufferCapacity, statelessTransport = 'auto', spaHtml } = options;
+  const { port = 4319, open = false, bufferCapacity, statelessTransport = 'auto', spaHtml, demo = false } = options;
 
   const collector = new CollectorSpanProcessor({ capacity: bufferCapacity });
+  if (demo) {
+    for (const span of buildDemoFixture()) collector.ingestSerializedSpan(span);
+  }
 
   const provider = resolveAttachableProvider();
   if (provider) {

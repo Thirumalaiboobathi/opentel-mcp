@@ -20,39 +20,50 @@
  * auto-detection can't determine from here, same
  * `statelessTransport`-style escape hatch `withUI()` takes.
  *
- * Flags: --port=<n> (default 4319), --open, --stateless, --stateful.
+ * Flags: --port=<n> (default 4319), --open, --stateless, --stateful,
+ * --demo (seeds a realistic fixture -- see src/demo-fixture.js -- so the
+ * dashboard can be reviewed/screenshotted with no live MCP server at all).
  */
 
 import { createServer } from '../src/server.js';
 import { CollectorSpanProcessor } from '../src/collector-span-processor.js';
 import { openBrowser } from '../src/open-browser.js';
 import { loadBuiltSpaHtml } from '../src/spa-html.js';
+import { buildDemoFixture } from '../src/demo-fixture.js';
 
 function parseArgs(argv) {
-  const args = { port: 4319, open: false, statelessTransport: 'auto' };
+  const args = { port: 4319, open: false, statelessTransport: 'auto', demo: false };
   for (const arg of argv) {
     if (arg.startsWith('--port=')) args.port = Number(arg.slice('--port='.length));
     else if (arg === '--open') args.open = true;
     else if (arg === '--stateless') args.statelessTransport = true;
     else if (arg === '--stateful') args.statelessTransport = false;
+    else if (arg === '--demo') args.demo = true;
   }
   return args;
 }
 
 export function main(argv = process.argv.slice(2)) {
-  const { port, open, statelessTransport } = parseArgs(argv);
+  const { port, open, statelessTransport, demo } = parseArgs(argv);
 
   const collector = new CollectorSpanProcessor();
+  if (demo) {
+    for (const span of buildDemoFixture()) collector.ingestSerializedSpan(span);
+  }
   const server = createServer({ instrumentedServer: null, collector, statelessTransport, spaHtml: loadBuiltSpaHtml() });
 
   server.listen(port, () => {
     const url = `http://localhost:${port}`;
     console.log(`opentel-mcp-ui: dashboard listening at ${url}`);
-    console.log(`opentel-mcp-ui: OTLP/HTTP JSON trace receiver at ${url}/v1/traces`);
-    console.log(
-      "opentel-mcp-ui: point your instrumented server's exporterUrl at the URL above " +
-        '(instrumentMcpServer(server, { setupNodeSdk: true, exporterUrl: ... })).',
-    );
+    if (demo) {
+      console.log(`opentel-mcp-ui: seeded ${collector.buffer.size} demo spans -- no live MCP server needed.`);
+    } else {
+      console.log(`opentel-mcp-ui: OTLP/HTTP JSON trace receiver at ${url}/v1/traces`);
+      console.log(
+        "opentel-mcp-ui: point your instrumented server's exporterUrl at the URL above " +
+          '(instrumentMcpServer(server, { setupNodeSdk: true, exporterUrl: ... })).',
+      );
+    }
     if (open) openBrowser(url);
   });
 

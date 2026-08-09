@@ -401,3 +401,139 @@ gzip number to weigh it against.
   ground rules ask me not to overstate.
 - `npm run verify:tarball` (core, unaffected by this step): still passes.
 
+## Step 5 — Observation matrix, silent failure feed, detector status
+
+**Status: done, all acceptance criteria met, against your corrected 5a
+spec (see the mid-run correction above). No further contract mismatches
+found. All three panels wired against real backend data, with a demo
+fixture for screenshotting without a live MCP server.**
+
+### 5a — Observation matrix
+
+Built exactly to the corrected spec: rows = ToolOutcome (SUCCESS/FAILURE),
+columns = per-span OTel visibility derived from `errorType`
+(`web/data/classify.ts`'s `classifySpan()` — `'tool_error'` → MISSED BY
+OTEL, anything else on a FAILURE → VISIBLE). Confirmed while implementing
+that this needs ZERO backend changes: `/api/summary`'s existing
+three-bucket `buffered` shape (`success`/`error`/`silentFailure`, built
+in Step 3) already IS three of the four cells —
+`successVisible`/`failureVisible`/`failureMissed` map onto it directly.
+The fourth, `successMissed`, has no backend bucket at all and is always
+rendered as `0`/`—`: a span can only get `errorType: 'tool_error'` in the
+exact branch of `instrument.js` that also sets its status to `ERROR` (see
+`classify.ts`'s docblock), so "SUCCESS status + missed-by-OTel errorType"
+is not just rare, it's unreachable given how core actually emits — kept
+as a real, hardcoded-zero cell per your instruction to render it, not
+hide it, with a hover explanation of why.
+
+The `failureMissed` cell (the product) gets `--accent` colour and a
+raised/bordered treatment (`.matrix-cell-product` in
+`ObservationMatrix.css`) — deliberately not amber, not red, per your
+correction: this is a confident "we caught it" claim, not an uncertain
+one. Cells are real `<button>` elements; clicking one sets `selectedCell`
+state in `App.tsx`, which both the matrix (for the pressed/selected
+outline) and the feed (for filtering) consume.
+
+**Panel-level integrity** (`web/data/completeness.ts`'s
+`computeCompleteness()`) replaces the axis you originally asked for and I
+flagged as unbuildable: it reads all four of `/api/meta`'s detector
+statuses (thrash, budget, schema drift, ToolOutcome — all four, per ADR
+012, not just thrash) and renders exactly the three-state line you
+specified, choosing the message by priority (`unavailable` on any
+detector → "Partial view"; else `unknown` on any → "Completeness
+unknown"; else → "Complete view"). The three states are read from
+`/api/meta` as-is and never flattened, per your instruction — verified by
+a dedicated test (`does not flatten an "unknown" detector status into
+"unavailable" styling/copy`).
+
+### 5b — Silent failure feed
+
+`SilentFailureFeed.tsx`, generalized slightly beyond the literal brief:
+it defaults to showing `failureMissed` spans (the silent-failure feed,
+with the side-by-side "Standard OTel would show" / "opentel-mcp detected"
+comparison, designed as one self-contained, screenshot-in-isolation row —
+see `SilentFailureFeed.css`'s comment on why nothing else in the row
+competes with that comparison visually), but reuses the exact same
+component to satisfy 5a's "clicking a cell filters the feed" acceptance
+criterion for the OTHER three cells too — those render a simpler
+single-line row (no discrepancy to illustrate for a `SUCCESS` row, so no
+two-pane treatment). I made this call because the two acceptance
+criteria ("the silent failure feed is the demo, side-by-side" and "any
+matrix cell filters the feed") only both hold if the feed is one
+generalized component with a default view, not two separate list
+implementations — flagging in case you'd rather the two other cells not
+share a feed at all (e.g. no interaction on non-failure cells).
+
+Virtualization is hand-rolled (`VirtualizedList.tsx`) — fixed row height,
+absolute-positioned visible window plus overscan — rather than a
+dependency (react-window etc.): this package's whole premise is a
+minimal install, and a single windowing algorithm is a small, well-
+understood amount of code. Verified with a dedicated test asserting only
+a bounded number of DOM rows exist for a 1,000-item list (well under 50,
+regardless of the 1,000 total) — this can't measure actual frame rate
+without a browser (flagged, same as Step 4), but it proves the mechanism
+that WOULD make it smooth is real, not just intended.
+
+New spans fade in (`.fade-in`, defined in Step 4's `global.css`) — the
+one thing that animates, per the brief. `useNewlyArrivedIds()` seeds its
+"already seen" set from the FIRST render with data, specifically so the
+initial history load doesn't burst-animate every row at once; only spans
+that arrive afterward, live, get the fade.
+
+### 5c — Detector status banner
+
+`DetectorBanner.tsx`: persistent (no dismiss button/state at all — not
+"dismissible but defaulted open"), styled with the same neutral
+`--bg-elevated`/1px-border treatment every other panel uses (not a
+warning colour/icon), reads `/api/meta`'s reason text VERBATIM rather
+than inventing banner-specific copy, so the banner can never drift from
+what the backend actually determined. Renders one line per detector
+that isn't confidently `'live'`; when all four are live, shows a single
+calm confirmation line instead of an empty/missing banner (a "credibility
+feature" should be visible in the healthy case too, not only appear when
+something's wrong — otherwise its absence stops meaning anything).
+
+### Demo fixture
+
+`src/demo-fixture.js`: `buildDemoFixture()` produces exactly the mix the
+brief's own worked example uses (42 success, 7 visible failures, 11
+silent failures — verified by test to summarize to precisely that via
+the real `computeSummary()` function, not a separate hand check). Wired
+into both integration modes: `npx opentel-mcp-ui --demo` (seeds the
+standalone server's buffer directly, no live MCP server needed at all —
+the literal acceptance criterion) and `withUI(server, { demo: true })`
+for in-process review. Ran it end-to-end: `--demo` correctly reports
+`/api/summary`'s buffered bucket as `{total:60, success:42, error:7,
+silentFailure:11}` and serves the real built bundle.
+
+One thing worth noting, not a bug: `--demo` alone reports all four
+detectors as `'unknown'` (standalone mode has no `instrumentedServer` to
+inspect transport from — see Step 3's entry). This isn't a broken demo;
+it's the honesty-banner's own "unknown" state, genuinely worth reviewing
+alongside the "healthy" state. Pass `--demo --stateful` for the clean
+"all four live" banner instead.
+
+### Verification
+
+- `npm test`: core 642/6 (unchanged), ui **82/0** (up from 68 — 14 new:
+  13 in `App.test.tsx` covering matrix-counts-match-summary, cell-click-
+  filtering, both the stateful and stateless banner acceptance criteria,
+  the "unknown" vs "unavailable" non-flattening check, and a live-SSE-
+  updates-the-matrix test; plus 3 in a new `VirtualizedList.test.tsx` for
+  the 1,000-item bounded-DOM-nodes check; `demo-fixture.test.js` (3) was
+  already counted in Step 3/4's totals' delta above).
+- `npm run typecheck`: clean across all three workspaces, `web/tsconfig.json`
+  included.
+- `npm run build`: **`dist/index.html`: 208.80 kB raw, 65.64 kB gzipped**
+  with all three panels — up from Step 4's shell-only 62.23 kB, still
+  well under the 300 kB budget (~22% used).
+- `npm run verify:tarball` (core): still passes, unaffected.
+- Manual end-to-end smoke test via the real CLI + real built bundle +
+  `--demo`: confirmed `/api/summary`, `/api/meta`, and `/` all serve
+  correctly together, not just in isolation.
+- **What I could not verify: actually looking at it.** Same caveat as
+  Step 4, now covering three real panels with real visual design
+  decisions (the product cell's accent treatment, the feed's side-by-side
+  layout, the banner's tone) — please review visually before trusting
+  the design reads the way the brief wants.
+

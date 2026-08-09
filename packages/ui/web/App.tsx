@@ -1,18 +1,33 @@
+import { useState } from 'react';
 import './App.css';
 import { Sidebar } from './components/Sidebar';
 import { EmptyState } from './components/EmptyState';
+import { ObservationMatrix } from './components/ObservationMatrix';
+import { SilentFailureFeed } from './components/SilentFailureFeed';
+import { DetectorBanner } from './components/DetectorBanner';
+import { useDashboardData } from './data/useDashboardData';
+import { matrixCountsFromSummary, type MatrixCell } from './data/classify';
 
-/**
- * Step 4 scope: shell only. Fixed left sidebar, main content area, no
- * top bar. Step 5 replaces <EmptyState /> with the observation matrix,
- * silent-failure feed, and detector status banner once spans exist.
- */
 export function App() {
+  const { spans, summary, meta } = useDashboardData();
+  const [selectedCell, setSelectedCell] = useState<MatrixCell | null>(null);
+
+  const hasSpans = spans.length > 0;
+  const counts = matrixCountsFromSummary(summary);
+
   return (
     <div className="app-shell">
       <Sidebar />
       <main className="main-content">
-        <EmptyState />
+        {hasSpans ? (
+          <>
+            <DetectorBanner meta={meta} />
+            <ObservationMatrix counts={counts} meta={meta} selectedCell={selectedCell} onSelectCell={setSelectedCell} />
+            <SilentFailureFeed spans={spans} selectedCell={selectedCell} />
+          </>
+        ) : (
+          <EmptyState />
+        )}
       </main>
     </div>
   );

@@ -17,6 +17,8 @@ export interface WithUIOptions {
   statelessTransport?: boolean | 'auto';
   /** Overrides the served `/` HTML (the SPA bundle, wired in Step 4). */
   spaHtml?: string;
+  /** Seeds a realistic fixture (src/demo-fixture.js) for reviewing the UI with no live MCP server. @default false */
+  demo?: boolean;
 }
 
 export interface WithUIHandle {

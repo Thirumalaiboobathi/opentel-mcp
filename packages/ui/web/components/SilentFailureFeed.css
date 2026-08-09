@@ -1,0 +1,103 @@
+.feed-panel {
+  margin-bottom: var(--space-7);
+}
+
+.feed-subtitle {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  max-width: 640px;
+  margin: 0 0 var(--space-4);
+}
+
+.feed-subtitle code {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.05em 0.4em;
+}
+
+.feed-empty {
+  color: var(--text-tertiary);
+  padding: var(--space-5);
+}
+
+.virtualized-list {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.feed-row {
+  height: 100%;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.feed-row-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.feed-tool-name {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+
+.feed-timestamp,
+.feed-duration {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+
+/* The comparison IS the demo -- designed to be screenshotted as one row
+   in isolation, so it gets equal visual weight on both sides and nothing
+   competing with it (no card shadow, no extra chrome). */
+.feed-comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.feed-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.feed-side-label {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.feed-pill {
+  display: inline-flex;
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 0.2em 0.6em;
+  border-radius: 999px;
+}
+
+.feed-pill-ok {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.feed-pill-failure {
+  background: var(--color-failure-bg);
+  color: var(--color-failure);
+}
+
+.feed-side-detected {
+  border-color: var(--border-strong);
+}
