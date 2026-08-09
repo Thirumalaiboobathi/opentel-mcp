@@ -1,26 +1,31 @@
 /**
  * The serialised span shape opentel-mcp-ui consumes over the wire (SSE
- * stream and the `/api/spans/history` snapshot — see packages/ui). New in
- * this package (v0.1.0) — did not exist as an explicit type before this
- * extraction; defined now because Step 3's UI backend depends on it.
+ * stream and the `/api/spans/history` snapshot — see `server.js`).
+ *
+ * Originally defined in the standalone `opentel-mcp-contract` package
+ * (v0.9.0's "two-axis observation contract extraction"); moved back here
+ * when that extraction was assessed and reverted before ever publishing
+ * (see `packages/contract/README.md` for the full reasoning). This type
+ * was always UI-specific, not something `opentel-mcp` core produces or
+ * has any reference to — core has zero knowledge of `SerializedSpan`'s
+ * existence, so it belongs in the package that actually defines and
+ * consumes it, not in a shared contract between the two.
  *
  * This is NOT a re-shaping of an OTel `ReadableSpan` — it is a small,
  * stable, JSON-serialisable projection of the handful of fields the
- * dashboard actually renders, produced by whatever hooks into opentel-mcp
- * core's span lifecycle (see opentel-mcp-ui's own docs for the exact
- * hook). Keeping it a separate, deliberate shape means the UI never
- * depends on `@opentelemetry/sdk-trace-base`'s own (larger, less stable)
+ * dashboard actually renders, produced by `serialize-span.js`. Keeping it
+ * a separate, deliberate shape means the UI never depends on
+ * `@opentelemetry/sdk-trace-base`'s own (larger, less stable)
  * `ReadableSpan` interface.
  *
- * WHAT IS DELIBERATELY NOT HERE: `ObservationIntegrity`. Per ADR 008 (see
- * observation-integrity.d.ts's docblock in this same package),
+ * WHAT IS DELIBERATELY NOT HERE: `ObservationIntegrity`. Per ADR 008,
  * `ObservationIntegrity` is a property of the whole instrumented process
  * — not of any individual span — and every `SerializedSpan` a consumer
  * ever receives was, by construction, successfully captured and
  * transmitted (i.e. tautologically "observed"). A per-span integrity
  * field would misrepresent that axis. Render `ObservationIntegrity` from
- * `ObservationState` instead, once, alongside the span feed — not as a
- * column on it.
+ * `ObservationState` instead (imported from `opentel-mcp` — see
+ * `summary.js`), once, alongside the span feed — not as a column on it.
  */
 export interface SerializedSpan {
   /** Lowercase hex span id (`ReadableSpan.spanContext().spanId`). */

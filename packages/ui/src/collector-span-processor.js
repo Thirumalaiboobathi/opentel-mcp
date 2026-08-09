@@ -24,7 +24,7 @@ import { SpanBuffer } from './span-buffer.js';
 import { serializeSpan } from './serialize-span.js';
 
 /** @typedef {import('@opentelemetry/sdk-trace').SpanProcessor} SpanProcessor */
-/** @typedef {import('opentel-mcp-contract').SerializedSpan} SerializedSpan */
+/** @typedef {import('./types.d.ts').SerializedSpan} SerializedSpan */
 
 /**
  * @implements {SpanProcessor}

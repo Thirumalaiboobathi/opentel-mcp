@@ -2,7 +2,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { SerializedSpan } from 'opentel-mcp-contract';
+import type { SerializedSpan } from '../src/types.d.ts';
 import { ThemeProvider } from './theme/ThemeProvider';
 import { App } from './App';
 import type { MetaResponse, SummaryResponse } from './data/types';

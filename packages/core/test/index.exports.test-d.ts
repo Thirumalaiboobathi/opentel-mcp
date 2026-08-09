@@ -15,12 +15,6 @@ import type {
   ObservationState,
 } from '../src/index.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import type {
-  ToolOutcome as ContractToolOutcome,
-  ToolOutcomeCounts as ContractToolOutcomeCounts,
-  ObservationIntegrity as ContractObservationIntegrity,
-  ObservationState as ContractObservationState,
-} from 'opentel-mcp-contract';
 
 // A consumer can construct options with a PARTIAL thrash config — every
 // field individually optional, matching resolveThrashConfig()'s actual
@@ -40,6 +34,29 @@ const partialFingerprinting: InstrumentOptions = {
   fingerprinting: false,
 };
 expectTypeOf(partialFingerprinting).toMatchTypeOf<InstrumentOptions>();
+
+// instanceKey (ADR 012, Phase 2/3): a plain optional string, same shape as
+// fingerprinting above — no nested config object, so this is the whole
+// surface a consumer sees for it. Omittable...
+const noInstanceKey: InstrumentOptions = {};
+expectTypeOf(noInstanceKey).toMatchTypeOf<InstrumentOptions>();
+
+// ...or supplied on its own, alongside other top-level options.
+const withInstanceKey: InstrumentOptions = {
+  serviceName: 'svc',
+  instanceKey: 'my-service',
+};
+expectTypeOf(withInstanceKey).toMatchTypeOf<InstrumentOptions>();
+expectTypeOf<InstrumentOptions['instanceKey']>().toEqualTypeOf<string | undefined>();
+
+// Negative check: a non-string instanceKey must NOT type-check — guards
+// against this field silently widening to `any`/`unknown` later. Same
+// negative-check discipline as invalidThrash/invalidSchemaDrift below.
+const invalidInstanceKey: InstrumentOptions = {
+  // @ts-expect-error -- instanceKey must be a string, not a number
+  instanceKey: 12345,
+};
+void invalidInstanceKey;
 
 // ADR 007 Phase 3's per-channel thresholds (inputThreshold,
 // notFoundThreshold) are individually optional on Partial<ThrashConfig>,
@@ -354,16 +371,3 @@ expectTypeOf<ObservationState['toolOutcome']>().toEqualTypeOf<ToolOutcomeCounts>
 // pattern as the existing getThrashSummary assertion above.
 const instrumentedForObservation = instrumentMcpServer(someServer);
 expectTypeOf(instrumentedForObservation.getObservationState).toEqualTypeOf<(() => ObservationState) | undefined>();
-
-// v0.9.0: these four types moved to the standalone opentel-mcp-contract
-// package (see RUNLOG.md, Step 2). The assertions above already prove
-// core's re-exported shapes are still correct post-refactor; this block
-// additionally proves they are the SAME type as the extracted package's
-// own — not an independently-hand-maintained duplicate that could
-// silently drift out of sync later. This is the compile-time half of
-// test/observation/contract-reexport.test.js's runtime reference-identity
-// checks (`toBe`, not `toEqual`) for the two frozen enum objects.
-expectTypeOf<ToolOutcome>().toEqualTypeOf<ContractToolOutcome>();
-expectTypeOf<ToolOutcomeCounts>().toEqualTypeOf<ContractToolOutcomeCounts>();
-expectTypeOf<ObservationIntegrity>().toEqualTypeOf<ContractObservationIntegrity>();
-expectTypeOf<ObservationState>().toEqualTypeOf<ContractObservationState>();

@@ -20,8 +20,8 @@
  *   design, and both are reported so a consumer can tell).
  */
 
-/** @typedef {import('opentel-mcp-contract').SerializedSpan} SerializedSpan */
-/** @typedef {import('opentel-mcp-contract').ObservationState} ObservationState */
+/** @typedef {import('./types.d.ts').SerializedSpan} SerializedSpan */
+/** @typedef {import('opentel-mcp').ObservationState} ObservationState */
 /** @typedef {import('./span-buffer.js').SpanBuffer} SpanBuffer */
 
 /**

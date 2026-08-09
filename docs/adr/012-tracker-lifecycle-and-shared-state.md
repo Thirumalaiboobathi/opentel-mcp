@@ -425,3 +425,390 @@ every other `diag.debug`/`diag.warn` call site already in `instrument.js`.
   rewrite, not just an unskip, to exercise the fix directly (constructing
   the five ephemeral servers with a shared `instanceKey` and asserting the
   loop *is* now detected) rather than only documenting the absence of one.
+
+## Update (2026-08-09): External review — two additional limitations
+
+Both raised in external review (no names available), after the design
+above was already settled. Neither changes the Recommendation: Option C
+(`instanceKey`) — both scope it more precisely than the original text
+did. Design only, same as the rest of this ADR: nothing here is built.
+
+### Limitation 1: `instanceKey` does not solve multi-instance/serverless distribution
+
+**The gap.** `instanceKey` scopes tracker state to a *process*. On
+Lambda, Cloud Run, or any horizontally-scaled container fleet, concurrent
+requests are routed across concurrently-running instances, and instances
+themselves are recycled. A retry loop of N requests — the exact scenario
+Agent Thrash Detection exists to catch — can land on N different
+instances instead of N calls to one process. Each lands on a tracker
+that has never seen this fingerprint before. Same silent inertness this
+whole ADR is about, reached by a different door.
+
+**Why `instanceKey` doesn't solve it.** The registry Option C proposes is
+a `BoundedTtlMap` living in one process's memory — a module-level
+structure inside whichever copy of `instrument.js` is currently loaded.
+Two concurrent Lambda execution environments (or two Cloud Run
+containers, or two pods) each load their own copy of that module and
+therefore construct their own, entirely independent registry, in
+separate memory, on separate machines. Passing the *identical*
+`instanceKey` string on every call — the fully correct, intended usage —
+does not change this: each process's registry still only ever sees the
+calls routed to it. A `get()` on a key that process has never seen is a
+miss there regardless of how many other processes hold an entry for that
+same key. `instanceKey` was designed to fix "this process keeps
+discarding and rebuilding trackers across calls that should share one";
+it was never designed to fix "these N processes each hold their own
+copy of one tracker" — and nothing about a string-keyed, single-process
+map could fix the second problem without becoming a different kind of
+thing entirely (see external state, below).
+
+This is the same distinction Finding 2 already draws for a different
+purpose, worth restating precisely because it is also the hinge the
+reframe below turns on: the exported **instrument** (the `mcp.tool.loop.detected`
+counter itself) is process-independent by OTel's own identity rules —
+Finding 2 already established this. The **registry** `instanceKey` adds
+is not; it is deliberately, necessarily process-local, because it exists
+to answer an in-process question ("have I already built trackers for
+this key, in this process, before discarding them?") that has no
+meaning across a process boundary.
+
+**External state (Redis, DynamoDB, or equivalent) as an option.** The
+standard fix for distributed counting is a shared external store: an
+atomic increment per event, keyed by `instanceKey` (or, for thrash
+specifically, by fingerprint), with the threshold check reading the
+shared value instead of a local one.
+
+*For:* This is the only design on the table that actually closes the
+gap as stated — real accumulation across real process boundaries, the
+same pattern every distributed rate limiter and every distributed
+counter uses, because it is the correct tool for this exact problem.
+
+*Against, and the recommendation:* Reject as a built-in. Every tracker
+this ADR discusses is today a synchronous, zero-I/O, zero-latency,
+fail-open in-memory structure — `cost/budget.js`'s own docblock states
+the standard this codebase already holds every tracker to: "this module
+never blocks a tool call and never throws." An external store breaks
+that on both counts: the hot tool-call path gains a network round trip
+(or an async fire-and-forget with its own staleness and failure modes
+nothing here has ever needed to reason about), and correctness now
+depends on a service this library doesn't control staying up. It is also
+a first-of-its-kind dependency for this package — `package.json` today
+lists exactly `@opentelemetry/api`/`@modelcontextprotocol/sdk` as peers
+and `@opentelemetry/{exporter-trace-otlp-http,resources,sdk-trace-node}`
+as runtime dependencies; nothing that talks to a database or a cache
+exists anywhere in this codebase. Requiring a host to provision and operate a shared Redis
+instance or a DynamoDB table just to get correct thresholding on one
+optional feature is a materially larger ask than anything else this
+library requires, and it multiplies Option B's already-rejected
+injection-surface problem: now the shape that needs injecting is a
+storage *client*, different per store technology, not a plain class.
+Nothing about this problem justifies that cost today. At most, this
+should be documented as a "bring your own" pattern for hosts who need
+real distributed accumulation and are willing to take the dependency on
+themselves — the same posture this ADR already takes toward Option B
+(put the choice with the host, don't build it in) — not something this
+library ships or maintains.
+
+**Recommended position: counters are instance-local, best-effort, by
+design — not a temporary caveat pending a future fix.** `instanceKey`
+and its registry are an *optimization* that widens what "instance-local"
+means in practice, from "one `instrumentMcpServer()` call" to "one
+process, across as many ephemeral `Server` objects as share a key." They
+are not, and under this recommendation will not become, a
+distributed-counting mechanism. This needs to be a stated invariant of
+the design, not an implied one a host discovers by reading the source —
+which means it belongs in the README's existing "In-memory tracker state
+is scoped to one `instrumentMcpServer()` call" section
+(`packages/core/README.md:1439`), not only in this ADR. That section
+already documents the single-process stateless-HTTP gap and cites this
+ADR by name; once `instanceKey` ships, that section needs an explicit
+follow-on sentence stating the multi-instance/serverless case by name,
+so a reader configuring `instanceKey` for a Lambda deployment does not
+reasonably conclude it fixes the thing they're actually running into.
+Per this ADR's own established discipline (see "Consequences" above —
+documentation is tracked here, not written in this design-only pass),
+this is noted as a required follow-up, not executed now.
+
+### Reframe considered: should threshold evaluation live downstream (Collector/backend) instead of in-process, for distributed deployments?
+
+The premise is correct, and worth crediting precisely because getting it
+right changes the answer: **OTel instrument identity is `(name,
+version)`, not process or object identity — already established above
+(Finding 2) — so every exported `mcp.tool.*` counter and histogram
+already aggregates correctly across any number of concurrently-running
+processes, today, with no change this ADR proposes.** A `sum by
+(gen_ai_tool_name) (rate(mcp_tool_errors_total[5m]))` run against a
+horizontally-scaled fleet exporting to one Prometheus is already
+fleet-wide correct, unconditional on `instanceKey`. This is simply true
+of how OTel's data model and any standard metrics backend work — not
+something this library builds, and not something Limitation 1 changes.
+
+What Limitation 1 actually identifies is narrower than "metrics don't
+aggregate": it's that a *derived, thresholded* signal — "has this
+fingerprint failed 3 times consecutively, therefore emit
+`mcp.tool.loop.detected`" — requires a **decision**, made in-process,
+against only that process's local slice, *before* anything is exported.
+The raw signal each individual failure represents is already
+fleet-correct once it lands in a metric or a span; the decision about
+what those failures mean, evaluated too early and too locally, is the
+actual bug. So: is that decision better made downstream instead? **Per
+tracker, not as one answer** — the four don't behave the same way here,
+and treating them as one would repeat the mistake ADR 010 already made
+once (see Context, above) of generalizing from a single case.
+
+1. **`thrashDetector` — the reframe does not fully apply, and the reason
+   is a decision this project already made deliberately.** Distributed
+   thrash detection needs to group failures by `mcp.failure.fingerprint`.
+   That attribute is deliberately excluded from every metric label
+   (`METRIC_SAFE_ATTRIBUTES`, `src/fingerprint/attributes.js` — unbounded
+   cardinality, span-only by design). A downstream *metrics* query
+   literally has no fingerprint dimension to group by. The fingerprint
+   **is** available, unconditionally, on every failed tool-call span and
+   on the `mcp.loop.detected` span event — so correct distributed thrash
+   detection is a **trace-correlation problem** (query spans across the
+   fleet, grouped by fingerprint, over a window), not a metrics-threshold
+   problem, and evaluating it downstream would need a trace-analytics
+   backend capable of that query (Tempo + TraceQL grouping, a Collector
+   processor, a span-ingesting warehouse) — infrastructure most hosts
+   asking "why doesn't thrash detection fire on Lambda" do not already
+   have, and infrastructure this library has no way to provide or
+   require. Directionally the correct long-term architecture for this
+   signal specifically; not a drop-in substitute for `instanceKey` for
+   hosts without it.
+2. **`budgetTracker`, per-tool scope — the reframe applies cleanly, and
+   is arguably already better than `instanceKey` even for one process.**
+   `mcp.tool.cost.total` is already exported today with exactly
+   `gen_ai.tool.name` + `mcp.tool.model` — both metric-safe, bounded
+   labels (verified directly against a running exporter while building
+   `dashboards/grafana-mcp-health.json`:
+   `mcp_tool_cost_total{gen_ai_tool_name="summarize_ticket",mcp_tool_model="claude-sonnet-5",...}`).
+   A downstream rule — `sum by (gen_ai_tool_name) (mcp_tool_cost_total) >
+   $X` — is fully expressible against data this library already emits,
+   correctly, fleet-wide, with zero code changes. This is exactly the
+   shape of this project's own existing "Cost-aware trace sampling (a
+   Collector recipe, not a library feature)" precedent (ADR 011,
+   `packages/core/README.md`) — the same posture applied to a second
+   signal. For per-tool budget, this isn't just viable, it's already
+   possible today, and it sidesteps `instanceKey`'s own eviction/TTL
+   reasoning entirely.
+3. **`budgetTracker`, per-session scope — the reframe does not apply, for
+   a stronger reason than fingerprint's.** No `mcp.session.id` (or
+   equivalent) attribute exists anywhere in this codebase's span or
+   metric attribute set — confirmed by inspection, not inferred; session
+   id is used only as an internal `Map` key inside `instrument.js` and is
+   never emitted at all. There is no dimension downstream could threshold
+   against, because the data isn't externally observable in the first
+   place — a strictly worse starting point than fingerprint's (which is
+   at least on spans). Out of scope for this ADR to fix; flagged for
+   whoever eventually considers exposing a (necessarily span-only, for
+   the same cardinality reasons as fingerprint) session attribute.
+4. **`schemaDriftDetector` — the reframe does not apply; this isn't a
+   thresholding problem at all.** Drift detection is a diff between the
+   previously-observed schema hash and the current one
+   (`src/schema-drift/diff.js`) — it requires remembering one specific
+   prior value per tool, not aggregating a count past a limit. No
+   metrics query "thresholds" its way to a diff. Evaluating this
+   downstream would require its own external state to remember
+   last-seen-hash-per-tool — which is exactly the external-state design
+   rejected above, not something a Collector rule expresses for free the
+   way `sum(...) > X` does.
+5. **`toolOutcomeCounter` — the premise doesn't reach this tracker at
+   all.** It is not exported as an OTel metric, full stop —
+   `src/observation/tool-outcome-counter.js`'s own docblock: "No OTel
+   emission here either; this is the pure bookkeeping layer only." It is
+   a synchronous in-process accessor (`getObservationState()`), not a
+   signal that reaches any backend to threshold against. "OTel identity
+   already aggregates it" has nothing to aggregate here. Only an
+   in-process fix (`instanceKey` or equivalent) can ever help this
+   tracker.
+
+**Plain answer, since the question deserves one: yes, downstream/Collector-side
+threshold evaluation is a better answer than `instanceKey` for
+distributed deployments — for the subset of signals already exported
+with metric-safe labels, per-tool cost being the clean case today. It is
+not a general replacement for `instanceKey`, and it does not touch
+Agent Thrash Detection's actual promise.** Fingerprint-level correlation
+is a trace problem by this project's own deliberate cardinality decision,
+not a metrics problem; per-session budget and `toolOutcomeCounter` have
+no exported signal to evaluate downstream at all today; schema drift's
+diff semantics don't reduce to thresholding regardless of where it runs.
+Recommendation: document the downstream/Collector-rule pattern as the
+recommended default advice for "I need multi-instance-correct cost or
+error-rate visibility" — most naturally as an extension of the existing
+"Cost-aware trace sampling (a Collector recipe, not a library feature)"
+material rather than a new section — while keeping `instanceKey` as the
+answer for accumulation semantics finer than what's on metric labels
+today: per-session budget, fingerprint-level thrash, schema-hash
+diffing, all within one process. These are complementary fixes for
+different slices of the same symptom, not competing answers to the same
+question, and both should be presented that way when documented. Not
+written in this pass — design only, tracked below.
+
+### Limitation 2: the startup guard isn't reachable — a reachable version fires on first evidence, not at startup
+
+**The suggestion, and the correct diagnosis behind it.** A reviewer
+proposed asserting at startup that each relevant hook actually fires
+under the transport currently in use, noting correctly that
+"registration succeeding is what misled you" — `instrumentMcpServer()`
+returning without error looks identical whether instrumentation is
+about to work correctly or is about to silently do nothing, which is
+exactly the shape of failure this whole ADR is about. The instinct is
+right. The mechanism as stated isn't reachable: this ADR already
+established, in "The `diag.warn` question" above, that `server.transport`
+is `undefined` at the exact moment `instrumentMcpServer()` runs,
+**structurally, always** — not sometimes, not only in the broken case —
+because the SDK only populates it after `connect()`, which runs after
+instrumentation in normal startup order. There is nothing to inspect at
+startup, in any deployment shape, so a startup-time assertion has no
+evidence available to assert against. That finding stands as already
+written; this doesn't re-derive it, only builds past it.
+
+**The reachable version: assert on first fire, not at startup.** Track,
+per tracker instance (scoped to the single `instrumentMcpServer()`
+call/instance that constructed it — this needs no `instanceKey` and no
+cross-call correlation; it is orthogonal machinery to everything else in
+this ADR), how many tool calls that instance has processed. After the
+Nth call, if the tracker's own observable state is still sitting at its
+structurally-initial value, emit a single `diag.warn` — guarded by a
+"has already warned" boolean so it fires at most once per instance, the
+same one-shot-diagnostic shape this codebase already uses elsewhere
+(`config.js`'s `warnedServiceNameIgnored`, `instrument.js:111-117`).
+This is a third, independent lever alongside the keyed/unkeyed
+`instanceKey`-registry-recreation warnings already decided above (now
+three, not two) — independent because it fires from *inside* one
+instance's own lifetime, using only evidence that instance itself
+accumulated, and says something even to a host who has never touched
+`instanceKey` at all, including one running a single, correctly
+long-lived server that merely happens to be sitting quiet.
+
+**This mechanism is not equally trustworthy across the four trackers,
+and the false-positive risk needs naming per tracker, not once in
+general** — the same discipline this ADR already applies to
+`instanceKey`'s uniform-across-four scope decision (see "Constraints
+accepted," above):
+
+- **`toolOutcomeCounter` — strongest signal, low false-positive risk.**
+  It increments unconditionally on every tool call, success or failure,
+  with no precondition. If N calls genuinely passed through an instance
+  and `{success, failure, unknown}` are all still zero, that is close to
+  unambiguous evidence of exactly this ADR's bug (or some other
+  structural break) — there is no legitimate "healthy but quiescent"
+  state for this tracker. Best-suited target for this mechanism, by a
+  wide margin.
+- **`budgetTracker` — conditional signal, real false-positive risk named
+  plainly.** It only moves when a tool result carries token-usage data
+  `src/cost/extractor.js` recognizes (Anthropic/OpenAI/Bedrock-shaped
+  `usage` fields). Confirmed hands-on while building
+  `dashboards/dev/metrics-demo-server.js` for the Grafana dashboard: the
+  stock demo tools reported nothing until usage data was added to them
+  explicitly — real MCP tools very often never echo this at all. A
+  perfectly healthy server whose tools simply don't report usage will
+  trip this warning exactly like the actual bug would, and the tracker
+  itself cannot tell the two apart.
+- **`thrashDetector` — weak, noisy signal, same fundamental ambiguity as
+  the unkeyed call-frequency heuristic's already-documented risk
+  (above).** A healthy server with zero repeated-fingerprint failures in
+  its first N calls is the *correct*, desired steady state — not
+  evidence anything is broken. This heuristic cannot distinguish
+  "nothing to detect" from "detection is broken," full stop; that
+  ambiguity is the false-positive risk, named explicitly rather than
+  smoothed over.
+- **`schemaDriftDetector` — same ambiguity, plus a targeting mismatch.**
+  Its accumulation is driven by `tools/list` calls, not `tools/call`; a
+  literal "N tool calls" gate as described above doesn't even count the
+  right event for this tracker — a corrected version would need to gate
+  on N `tools/list` calls specifically. Even corrected, a schema that
+  legitimately never changes (the common case) produces
+  indistinguishable-from-broken quiescence, the same risk as thrash.
+
+**Position: a secondary mitigation, explicitly weaker than a startup
+guard, included because it checks where evidence exists rather than
+where none does yet — not a substitute for the keyed/unkeyed mechanisms
+already decided, and strongest for exactly one of the four trackers.**
+Same discipline as the existing unkeyed heuristic's `N`/`M`: the value of
+`N` here is not derived from first principles in this pass and is left
+as an implementation-time decision pending real deployment feedback,
+consistent with "Constraints accepted" above.
+
+### Consequences of this update
+
+- Neither limitation changes the Recommendation: Option C
+  (`instanceKey`) above. Both scope what it claims to fix — Limitation 1
+  bounds it to "one process," Limitation 2 adds a narrower, orthogonal
+  detection lever alongside the already-decided keyed/unkeyed warnings,
+  now three tiers instead of two.
+- **README follow-up (tracked, not written in this pass):** once
+  `instanceKey` ships and gets documented, the README's "In-memory
+  tracker state is scoped to one `instrumentMcpServer()` call" section
+  (`packages/core/README.md:1439`) must state the multi-instance/
+  serverless non-solution explicitly, by name, alongside it — not leave
+  a reader to assume a configured `instanceKey` is sufficient on a
+  horizontally-scaled deployment.
+- **A second, independent README follow-up:** the downstream/
+  Collector-rule pattern for per-tool cost (and, more generally,
+  metric-safe-labeled signals) in distributed deployments should be
+  documented as its own recommended pattern, most naturally extending
+  "Cost-aware trace sampling (a Collector recipe, not a library
+  feature)" rather than duplicating that section's framing elsewhere.
+- The "assert on first fire" mechanism should ship documented alongside
+  `instanceKey` and the keyed/unkeyed warnings when that work lands as a
+  single three-tier `diag.warn` story, not introduced separately later —
+  splitting them across releases would ask hosts to learn this
+  package's warning behavior twice.
+
+## Update (2026-08-09): Phase 2 implementation decisions the Decision text left open
+
+Phase 2 (`options.instanceKey`, the config/wiring pass — `src/config.js`,
+`src/instrument.js`) had to resolve two structural questions the Decision
+section above never answers for Option C. Both were confirmed as genuine
+gaps before implementing, not assumed — recorded here as the implementation
+decisions actually shipped, since code comments alone (`instrument.js`'s
+`instanceRegistry` singleton and `getOrCreateTracker()` docblocks) aren't
+where a reader auditing this ADR would look for them.
+
+**Registry lifetime: a module-level singleton, constructed once in
+`instrument.js` at module load.** The word "module-level" appears in this
+ADR exactly twice before this Update — both describing Option A, which was
+*rejected*. Option C's own text ("an internal, bounded registry keyed by
+that string") never states where that registry itself lives. There isn't a
+genuine alternative, though: the entire mechanism — repeated
+`instrumentMcpServer()` calls sharing state via a key — only works if the
+registry persists somewhere reachable across those calls; a per-call local
+variable couldn't be looked up again by a later, unrelated call. A
+module-level singleton is the only architecture consistent with what
+Option C describes. Implemented as exactly that, one `InstanceRegistry`
+instance for the process's lifetime.
+
+**Key namespacing: one shared registry, keys namespaced per tracker type
+(`${instanceKey}:thrash`, `${instanceKey}:budget`, `${instanceKey}:tool-outcome`,
+`${instanceKey}:schema-drift`).** Also unaddressed above: "`instrument.js`
+looks up or creates each of the four trackers in an internal, bounded
+registry keyed by that string" is consistent with either one shared cache
+entry per `instanceKey` (bundling all four trackers into one cached value)
+or four independent entries per key, and the text doesn't say which. Using
+the raw `instanceKey` string directly for all four trackers against a
+single-value-per-key cache (the shape Phase 1's `InstanceRegistry` already
+has — one `factory()`, one cached value, per key) would silently
+type-confuse: a second `getOrCreate(instanceKey, budgetFactory)` call would
+just return the first tracker already cached under that exact key (e.g. a
+`ThrashDetector`) instead of ever running `budgetFactory`. Namespacing the
+key per tracker type avoids this collision structurally — the four tracker
+types can never be handed back in place of one another, because they are
+never stored under the same registry entry.
+
+*Tradeoff, named rather than glossed over:* four separate `InstanceRegistry`
+instances (one per tracker type) would have achieved the identical
+non-collision guarantee without relying on string-namespace hygiene at
+all, and would additionally have given each tracker type its own
+independent cap/TTL bound instead of all four, across every `instanceKey`
+a process uses, sharing one bounded registry's cap and TTL. One shared
+registry with namespaced keys was chosen for this phase as the simpler
+implementation — fewer moving pieces, one place to reason about bounds —
+not because the four-registries alternative was found wanting on
+correctness. If independent per-tracker-type bounds turn out to matter in
+practice (e.g. one tracker type's growth pattern under real deployment
+traffic pressuring out another type's entries prematurely), splitting into
+four registries remains a reasonable, low-risk follow-up: it changes
+`instrument.js`'s internal wiring only, not `options.instanceKey`'s public
+contract, so it would not be a breaking change for any host already using
+the option.

@@ -234,6 +234,49 @@ opentel-mcp doesn't bundle them (see `package.json`'s `peerDependencies`).
 are already runtime dependencies of opentel-mcp itself (its `setupNodeSdk:
 true` dev path uses them), so no extra install is needed for those two.
 
+#### Using the Prometheus exporter instead of OTLP — `service.name` needs an extra option
+
+If you scrape metrics with `@opentelemetry/exporter-prometheus` (pull-based)
+rather than exporting over OTLP (push-based, the example above), be aware
+that the Prometheus exporter does **not** attach resource attributes —
+including `service.name` — to every metric point by default. It only
+exposes them on a separate `target_info` series, which most PromQL you'd
+actually write (`rate(mcp_tool_calls_total[5m])`, grouped `sum by
+(gen_ai_tool_name)`, etc.) never joins against. In a single-service setup
+this is invisible; the moment you're scraping more than one instrumented
+server into the same Prometheus and need to tell their metrics apart —
+which is exactly what a `service.name` filter/template variable is for —
+every series looks identical without it.
+
+Fix: pass `withResourceConstantLabels`, a regex matching the resource
+attribute(s) you want flattened onto every point:
+
+```js
+import { metrics } from '@opentelemetry/api';
+import { MeterProvider } from '@opentelemetry/sdk-metrics';
+import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
+import { resourceFromAttributes } from '@opentelemetry/resources';
+
+const meterProvider = new MeterProvider({
+  resource: resourceFromAttributes({ 'service.name': 'my-mcp-server' }),
+  readers: [
+    new PrometheusExporter({
+      port: 9464,
+      withResourceConstantLabels: /^service\.name$/,
+    }),
+  ],
+});
+metrics.setGlobalMeterProvider(meterProvider);
+```
+
+With this set, `mcp_tool_calls_total{...}` (and every other `mcp.tool.*`
+series) carries a `service_name` label directly, so
+`mcp_tool_calls_total{service_name="my-mcp-server"}` and a Grafana
+`service.name` template variable both work without a `target_info` join.
+See `dashboards/grafana-mcp-health.json` and `dashboards/dev/` in the repo
+for a full worked example (dashboard JSON + a script that exercises this
+exact setup end to end).
+
 ## Failure Fingerprinting (v0.4.0+)
 
 Groups logically identical failures under one stable identifier, even
@@ -1401,7 +1444,8 @@ Attribution's budget totals, Tool schema drift detection's per-tool schema
 history, and the Two-axis observation contract's `toolOutcome` counts.
 **All four live inside the object `instrumentMcpServer()` constructs for
 one call — they do not survive past it, and nothing shares state between
-two separate calls.**
+two separate calls, unless you set `instanceKey` (v0.9.0+ — see the
+section immediately below).**
 
 This is invisible, and correct, for the deployment shape every one of
 these features was designed against: one `Server`/`McpServer` instance,
@@ -1411,23 +1455,160 @@ instance around across many sessions. It becomes a real problem under a
 different, also-common shape: **"stateless" Streamable HTTP, where a fresh
 `Server` is constructed — and re-instrumented — on every incoming POST.**
 Under that topology, every one of these four trackers is discarded and
-rebuilt from empty before it ever sees a second data point. Nothing
-accumulates, nothing crosses a threshold, and today nothing warns that
-this is happening — the affected feature is silently inert.
+rebuilt from empty before it ever sees a second data point, unless
+`instanceKey` is set — and, for Agent Thrash Detection specifically, a
+real session id is also available on every call. Without both, nothing
+accumulates, nothing crosses a threshold, and nothing warns that this is
+happening — the affected feature is silently inert.
 
-**This is a confirmed, currently-unfixed gap, not a hypothetical.**
-Reproduced directly in `test/integration/thrash-stateless-http-lifecycle.test.js`
-(`describe.skip` — a living reproduction, not a working fix): it drives 5
-identical tool failures across 5 separate `instrumentMcpServer()` calls and
-confirms `mcp.tool.loop.detected` never fires, even past the default
-`threshold: 3`, purely because of this lifecycle mismatch. Full
-investigation, root cause across all four trackers, and the design under
-consideration to fix it: ADR 012
+**Confirmed, not a hypothetical, and now has a partial fix.** Reproduced
+directly in `test/integration/thrash-stateless-http-lifecycle.test.js`:
+without `instanceKey`, it still drives 5 identical tool failures across 5
+separate `instrumentMcpServer()` calls and confirms `mcp.tool.loop.detected`
+never fires, even past the default `threshold: 3` — that remains the
+default, unchanged behavior when you don't opt in. With a shared
+`instanceKey` *and* a real session id on every call, the same file's other
+test confirms it now does. Full investigation, root cause across all four
+trackers, and the `instanceKey` design: ADR 012
 (`docs/adr/012-tracker-lifecycle-and-shared-state.md`). Tracked in
 `docs/known-gaps.md`.
 
-**If you instrument a fresh `Server`/`McpServer` per request, assume none
-of these four features work as documented until ADR 012's fix ships.**
+**If you instrument a fresh `Server`/`McpServer` per request: set
+`instanceKey`.** Read the section immediately below in full before relying
+on it — it has one required companion for thrash detection specifically
+(a real session id, not the generated fallback), and it does not help at
+all across multiple processes or containers (Lambda, Cloud Run, or any
+horizontally-scaled deployment). Both are easy to miss and produce the
+exact same silent-inertness symptom as this section describes.
+
+## instanceKey: sharing tracker state across instrumentMcpServer() calls (v0.9.0+)
+
+`instanceKey` (a string option on `instrumentMcpServer()`, or the
+`OTEL_MCP_INSTANCE_KEY` environment variable) lets repeated
+`instrumentMcpServer()` calls that pass the same key share the four
+trackers described above instead of each one resetting to empty. Full
+design: ADR 012 (`docs/adr/012-tracker-lifecycle-and-shared-state.md`).
+
+### When to set it
+
+Set it when `instrumentMcpServer()` runs more than once per process for
+what is logically **one** service — the case the previous section
+describes: a fresh `Server`/`McpServer` constructed and re-instrumented on
+every incoming request, on an otherwise long-lived process. "Stateless"
+Streamable HTTP — a fresh `McpServer` per POST, the process itself kept
+alive — is the common real example. Pick one stable string per logical
+service and pass the same one on every call:
+
+```js
+instrumentMcpServer(server, { instanceKey: 'my-mcp-server' });
+```
+
+(`serviceName` deliberately omitted here — it only has an effect when
+`setupNodeSdk: true`, see "Two modes" below; passing it without that logs
+a one-time `diag.warn` and is unrelated to `instanceKey`, which is
+orthogonal to how spans/metrics get exported.)
+
+Omit it (the default) for the normal case — one `Server`/`McpServer`
+instrumented once and kept alive for the process's life (stdio, or an
+HTTP server that keeps one instrumented instance around across many
+sessions). Behavior is byte-identical to every version before v0.9.0:
+trackers are constructed fresh on every call, and the internal registry is
+never looked up or written to.
+
+### ⚠️ instanceKey alone does not fix thrash detection — read this before relying on it
+
+> **`instanceKey` shares the tracker OBJECT. Agent Thrash Detection also
+> needs a real, transport-provided session id on every call — without
+> both, thrash detection stays silently inert even with `instanceKey`
+> set.** This is the exact same silent-inertness shape as the original
+> gap, now hiding behind what looks like a fix. It was found writing this
+> feature's own regression test, not anticipated in the original design.
+
+Why: `ThrashDetector` — the tracker `instanceKey` shares — looks up
+episodes by `(sessionId, toolName, fingerprint)`, not just fingerprint
+alone (see "Session id resolution" above). Without a real
+`extra.sessionId`, `instrumentMcpServer()` generates its own random
+per-connection fallback session id — and it does this **fresh, on every
+single call**, regardless of `instanceKey`. Sharing the tracker instance
+doesn't change that: five stateless-HTTP requests sharing one
+`instanceKey` still each get recorded under a different, unrelated
+fallback id, so the same shared `ThrashDetector` sees five separate
+one-off episodes instead of one five-long loop. Nothing ever accumulates
+past 1, and nothing warns you.
+
+**Both of these are required together, not either/or:**
+
+1. `instanceKey`, so the tracker itself is shared across calls, **and**
+2. a real `extra.sessionId` on every call, so the lookup key inside that
+   shared tracker is stable across calls too.
+
+Real Streamable HTTP transports give you (2) automatically — the SDK
+threads a real client session id through `extra.sessionId` on every
+request regardless of whether the `Server` object handling it was just
+constructed, so the common "stateless Streamable HTTP" case works with
+`instanceKey` alone, no extra effort. **You will NOT get (2) for free —
+and thrash detection will stay silently inert despite `instanceKey` being
+set — if:** you're using a custom `Transport` implementation that never
+exposes a `sessionId`, you've set `assumeSingleSession: true` (which
+exists specifically to opt into the generated fallback), or anything else
+lands on the fallback path described in "Session id resolution" above. If
+you're in any of those cases, you need your own mechanism for threading a
+stable, real session identity into each call — `instanceKey` cannot
+manufacture one for you, and there is no configuration of it that will.
+
+This composition requirement is specific to Agent Thrash Detection's
+per-session lookup key. Schema drift detection and the `ToolOutcome`
+counter have no session-id dependency at all — `instanceKey` alone is
+sufficient for both. Budget tracking's `perToolUsd` scope is also
+session-independent; its `perSessionUsd` scope inherits the identical
+requirement, for the identical reason.
+
+### Registry bounds, and what eviction means
+
+The internal registry `instanceKey` looks trackers up in is bounded, not
+unbounded (ADR 012's proposed defaults):
+
+- **Cap:** 1000 distinct `instanceKey` values per process. Normal usage —
+  one stable key per logical service, reused across arbitrarily many
+  calls — should never approach this.
+- **TTL:** 24 hours, renewed on every use. Every `instrumentMcpServer()`
+  call under a given key resets that key's 24-hour clock, so a busy
+  service's entry never expires from age alone as long as it keeps being
+  used.
+
+**Eviction mid-use silently resets that key's accumulated state.** Cap
+pressure (more than 1000 distinct keys in active use) or a key genuinely
+going quiet for the full 24-hour TTL both mean the *next* call under that
+key finds nothing and builds fresh trackers — exactly the original bug's
+own behavior, just now gated behind a much narrower condition than "the
+next request arrived." Nothing warns when this happens.
+
+### Does NOT help across process boundaries — Lambda, Cloud Run, or any recycled/horizontally-scaled deployment
+
+**Counters are instance-local and best-effort. The registry is an
+optimization for one process fielding many `instrumentMcpServer()` calls
+— it is not, and will not become, a distributed-counting mechanism.**
+`instanceKey`'s registry lives in one process's memory. On Lambda, Cloud
+Run, or any horizontally-scaled container fleet, concurrent requests are
+routed across concurrently-running instances, and instances themselves get
+recycled — passing the identical `instanceKey` string everywhere does
+**not** change this: each process loads its own copy of the registry and
+only ever sees the calls actually routed to it. A retry loop of N requests
+landing on N different instances still resets to empty on every one of
+them — the same silent inertness this whole feature exists to fix,
+reached through a different door. There is no `instanceKey` configuration
+that closes this gap; it is a structural limitation of an in-process
+registry, not a tuning problem. Full reasoning — including why this
+library deliberately does not add an external store (Redis, DynamoDB, or
+similar) to solve it, consistent with its dependency-free posture
+elsewhere — is in ADR 012's Update section.
+
+### Configuration
+
+`instanceKey?: string` on `instrumentMcpServer()`'s options. Also settable
+via the `OTEL_MCP_INSTANCE_KEY` environment variable (lower precedence
+than the option itself). An empty or whitespace-only value from either
+source is treated the same as omitting it entirely.
 
 ## Two modes
 

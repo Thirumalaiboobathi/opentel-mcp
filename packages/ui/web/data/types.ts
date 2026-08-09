@@ -1,4 +1,4 @@
-import type { ObservationState } from 'opentel-mcp-contract';
+import type { ObservationState } from 'opentel-mcp';
 
 /** Mirrors meta.js's DetectorAvailability + { reason } shape exactly. */
 export interface MetaDetector {

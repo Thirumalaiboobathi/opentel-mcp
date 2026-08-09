@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createServer } from '../src/server.js';
 import { CollectorSpanProcessor } from '../src/collector-span-processor.js';
 
-/** @param {Partial<import('opentel-mcp-contract').SerializedSpan>} overrides */
+/** @param {Partial<import('../src/types.d.ts').SerializedSpan>} overrides */
 function span(overrides) {
   return {
     id: 'id',

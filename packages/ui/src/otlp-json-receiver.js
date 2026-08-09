@@ -76,12 +76,12 @@ function unixNanoToMs(unixNano) {
 
 /**
  * @param {unknown} body - parsed JSON body of a POST to `/v1/traces`.
- * @returns {import('opentel-mcp-contract').SerializedSpan[]} only
+ * @returns {import('./types.d.ts').SerializedSpan[]} only
  *   `tools/call`-shaped spans -- same filter `CollectorSpanProcessor.onEnd()`
  *   applies to the in-process path, kept consistent between both.
  */
 export function parseOtlpJsonTraceRequest(body) {
-  /** @type {import('opentel-mcp-contract').SerializedSpan[]} */
+  /** @type {import('./types.d.ts').SerializedSpan[]} */
   const spans = [];
 
   for (const resourceSpan of body?.resourceSpans ?? []) {

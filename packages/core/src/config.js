@@ -76,6 +76,30 @@ import { resolveSchemaDriftConfig } from './schema-drift/config.js';
  *   `enabled: false` (or the default when this option is omitted) is a true no-op: tools/list is not
  *   wrapped at all, unlike thrashDetection/costTracking whose disabled state still wraps tools/call for
  *   other reasons and merely skips inner logic.
+ * @property {string} [instanceKey] - Host-supplied stable identifier for one logical service (ADR 012,
+ *   docs/adr/012-tracker-lifecycle-and-shared-state.md, Option C — Phase 2: this option and its wiring).
+ *   When provided, the four in-memory trackers this library keeps per instrumented server — budget
+ *   (src/cost/budget.js), Agent Thrash Detection (src/thrash/detector.js), the ToolOutcome counter
+ *   (src/observation/tool-outcome-counter.js), and schema drift (src/schema-drift/detector.js) — are looked
+ *   up from an internal, bounded, TTL-evicting registry (src/registry/instance-registry.js) keyed by this
+ *   string, instead of being constructed fresh on every instrumentMcpServer() call. Repeated calls that pass
+ *   the SAME instanceKey therefore share accumulated tracker state — fixing the gap ADR 012 documents under
+ *   a "fresh Server per request" deployment shape, where every tracker previously reset to empty before ever
+ *   accumulating anything.
+ *
+ *   Omit (the default, `undefined`) for behavior byte-identical to pre-v0.9.0: trackers are constructed
+ *   fresh on every call exactly as before, the registry is never looked up or written to, and no extra
+ *   allocation happens beyond the trackers themselves.
+ *
+ *   Also settable via the `OTEL_MCP_INSTANCE_KEY` environment variable (lower precedence than this option;
+ *   an empty or whitespace-only value from either source is treated as omitted, matching this codebase's
+ *   `serviceName` validation). Distinct instanceKey values never share state with each other or with calls
+ *   that omit the option — each is its own independent registry entry.
+ *
+ *   Passing an unstable value (e.g. a per-request id) silently defeats the whole point while looking
+ *   configured — see ADR 012's Option C "Against" for why this is a real footgun, not a hypothetical one.
+ *   Registry bounds (cap, TTL) and known limitations (single-process only — no cross-instance/serverless
+ *   sharing) are documented in ADR 012, not repeated here.
  */
 
 // Guards the "serviceName has no effect" diagnostic below so it fires once
@@ -87,6 +111,36 @@ let warnedServiceNameIgnored = false;
 // same file already triggered. Not part of the public API.
 export function __resetServiceNameWarnedForTests() {
   warnedServiceNameIgnored = false;
+}
+
+// ADR 012, Phase 2: the first env var this codebase reads for a bare
+// top-level InstrumentOptions field, not one nested inside a feature's own
+// sub-config (contrast OTEL_MCP_THRASH_*/OTEL_MCP_SCHEMA_DRIFT_*, both
+// scoped to their feature's own resolve*Config() module — thrash/config.js's
+// own docblock: "No precedent for env-var-driven config exists elsewhere in
+// this codebase [outside thrash/schema-drift]"). instanceKey has no feature
+// namespace of its own to nest under, so it takes the bare OTEL_MCP_ prefix
+// directly, the same base namespace those two already share.
+const ENV_INSTANCE_KEY = 'OTEL_MCP_INSTANCE_KEY';
+
+/**
+ * Resolves `instanceKey`: the explicit option wins if it's a non-empty
+ * (post-trim) string, else the env var if IT is, else `undefined` — no
+ * fallback default beyond that, per ADR 012 ("omit for behavior
+ * byte-identical to pre-v0.9.0"). An invalid value from either source
+ * (non-string, empty, or whitespace-only) is silently treated as absent,
+ * matching this file's own `hasServiceName` validation and this codebase's
+ * general "invalid input degrades to the next source, never throws" env-var
+ * discipline (thrash/config.js, schema-drift/config.js).
+ *
+ * @param {unknown} optionValue
+ * @param {string | undefined} envValue
+ * @returns {string | undefined}
+ */
+function resolveInstanceKey(optionValue, envValue) {
+  if (typeof optionValue === 'string' && optionValue.trim() !== '') return optionValue;
+  if (typeof envValue === 'string' && envValue.trim() !== '') return envValue;
+  return undefined;
 }
 
 /**
@@ -133,5 +187,6 @@ export function resolveOptions(options) {
     },
     thrashDetection: resolveThrashConfig(opts.thrashDetection),
     schemaDrift: resolveSchemaDriftConfig(opts.schemaDrift),
+    instanceKey: resolveInstanceKey(opts.instanceKey, process.env[ENV_INSTANCE_KEY]),
   };
 }

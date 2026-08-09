@@ -1,4 +1,4 @@
-import type { SerializedSpan } from 'opentel-mcp-contract';
+import type { SerializedSpan } from '../../src/types.d.ts';
 import type { SummaryResponse } from './types';
 
 /**

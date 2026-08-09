@@ -1,7 +1,7 @@
 /**
  * @module span-buffer
  *
- * A fixed-capacity ring buffer of {@link import('opentel-mcp-contract').SerializedSpan}
+ * A fixed-capacity ring buffer of {@link import('./types.d.ts').SerializedSpan}
  * objects. Bounded memory by construction: once `capacity` is reached, the
  * oldest entry is evicted for every new one added — the buffer never grows
  * past `capacity` entries, however many spans are ever pushed into it over
@@ -13,7 +13,7 @@
  * under sustained load; this stays O(1) per push.
  */
 
-/** @typedef {import('opentel-mcp-contract').SerializedSpan} SerializedSpan */
+/** @typedef {import('./types.d.ts').SerializedSpan} SerializedSpan */
 
 export const DEFAULT_SPAN_BUFFER_CAPACITY = 1000;
 

@@ -334,6 +334,60 @@ alongside the diagnostic attribute in v0.7.0.
 **Target:** v0.9.0 (proposed — see ADR 012)
 **Found by:** internal self-review, not an external report
 
+**Status update (v0.9.0): partially fixed, not closed.** ADR 012's
+proposed `instanceKey` option shipped — a host-supplied string that
+shares all four trackers below across `instrumentMcpServer()` calls, via
+a bounded, TTL-evicting internal registry, instead of each call
+constructing them fresh (Phase 2 wiring: `src/config.js`/
+`src/instrument.js`; Phase 3 public API: `src/index.d.ts`).
+`test/integration/thrash-stateless-http-lifecycle.test.js` is no longer
+`describe.skip`: it now proves the fix directly — a shared `instanceKey`
+across 5 separate `instrumentMcpServer()` calls, and `mcp.tool.loop.detected`
+fires by the 5th — alongside a second test confirming the pre-fix
+behavior is unchanged when `instanceKey` is omitted, which remains the
+default.
+
+**What `instanceKey` fixes:** the exact scenario this entry describes — a
+fresh `Server`/`McpServer` constructed and re-instrumented on every
+incoming request, on an otherwise long-lived process — for all four
+trackers, when `instanceKey` is set to the same stable value on every
+call.
+
+**What it does NOT fix — two real gaps, not corner cases:**
+
+1. **A composition requirement for thrash detection specifically,
+   discovered while writing the Phase 2 regression test — not anticipated
+   in ADR 012's original Decision text.** `ThrashDetector` groups episodes
+   by `(sessionId, toolName, fingerprint)`. `instanceKey` shares the
+   tracker *object*; it does nothing about the session-id half of that
+   lookup key. Without a real, transport-provided `extra.sessionId` on
+   every call, each `instrumentMcpServer()` call generates its own random
+   per-connection fallback id (README's "Session id resolution" section)
+   — so even with the same shared tracker, each of N stateless-HTTP
+   requests lands under a different, unrelated key, and nothing ever
+   accumulates past 1. Real Streamable HTTP transports provide a real
+   session id automatically, so the common case works with `instanceKey`
+   alone — but a custom `Transport`, `assumeSingleSession: true`, or
+   anything else landing on the fallback path will set `instanceKey`, see
+   nothing happen, and have every reason to conclude the fix is broken.
+   That is the identical silent-inertness shape this whole entry is
+   about, now one layer deeper, hiding behind what looks like a fix.
+   Documented as its own prominent callout in the README's new
+   "instanceKey" section, not a footnote.
+2. **Does not help across process/container boundaries — Lambda, Cloud
+   Run, or any horizontally-scaled deployment.** `instanceKey`'s registry
+   is one process's in-memory state. Concurrent instances each load their
+   own copy and only ever see the calls routed to them; passing the
+   identical `instanceKey` string everywhere does not change that. This
+   is a structural limitation of an in-process registry, investigated and
+   accepted rather than solved with an external store (ADR 012's Update
+   section explains why: this library's deliberately dependency-free
+   posture) — counters remain instance-local and best-effort by design
+   for distributed deployments, documented as such in the README, not
+   only the ADR.
+
+The body below is kept as the original report for context.
+
 ### Body
 
 Agent Thrash Detection, Cost & Token Attribution's budget tracking, Tool

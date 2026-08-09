@@ -1,5 +1,5 @@
 import type { Server as HttpServer, IncomingMessage, ServerResponse } from 'node:http';
-import type { SerializedSpan } from 'opentel-mcp-contract';
+import type { SerializedSpan } from './types.d.ts';
 
 export interface WithUIOptions {
   /** @default 4319 */

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { SerializedSpan } from 'opentel-mcp-contract';
+import type { SerializedSpan } from '../../src/types.d.ts';
 import type { MetaResponse, SummaryResponse } from './types';
 
 export interface DashboardData {

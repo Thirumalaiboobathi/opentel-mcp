@@ -1,0 +1,206 @@
+{
+  "id": null,
+  "uid": "opentel-mcp-health",
+  "title": "opentel-mcp: MCP Server Health",
+  "description": "Failure and cost visibility opentel-mcp adds on top of standard OTel: silent tool failures (isError:true inside a 200 OK), agent thrash loops, tool schema drift, and LLM cost attribution. See dashboards/README.md for setup.",
+  "tags": ["opentel-mcp", "mcp"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "version": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Datasource",
+        "current": {},
+        "refresh": 1,
+        "hide": 0
+      },
+      {
+        "name": "service_name",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "qryType": 1,
+          "query": "label_values(mcp_tool_calls_total, service_name)",
+          "refId": "StandardVariableQuery"
+        },
+        "label": "service.name",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": { "text": "All", "value": "$__all" },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Silent failure rate",
+      "description": "Share of tool calls that returned isError: true inside a successful (200-equivalent) JSON-RPC response — a CallToolResult a standard OTel setup renders as a clean, green, 'successful' span, because no exception was thrown and no error.type was set. This is the failure class opentel-mcp exists to surface. A rising line here means agents are silently getting wrong/failed results and (without this signal) nobody would know from tracing alone.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 15, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "100 * sum(rate(mcp_tool_silent_failures_total{service_name=~\"$service_name\"}[$__rate_interval])) / sum(rate(mcp_tool_calls_total{service_name=~\"$service_name\"}[$__rate_interval]))",
+          "legendFormat": "silent failure rate"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Silent failures by tool",
+      "description": "mcp.tool.silent_failures broken out by gen_ai.tool.name — which specific tool is producing isError:true responses, and how that's trending. Use this to find the one broken tool instead of just knowing 'something is failing somewhere'.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 15, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (gen_ai_tool_name) (rate(mcp_tool_silent_failures_total{service_name=~\"$service_name\"}[$__rate_interval]))",
+          "legendFormat": "{{gen_ai_tool_name}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "piechart",
+      "title": "Failure category breakdown",
+      "description": "mcp.failure.category attached to both mcp.tool.errors (thrown/protocol failures) and mcp.tool.silent_failures (isError:true), summed over the selected time range: auth, timeout, network, dependency, serialization, validation, internal, or unknown. This is opentel-mcp's fingerprinting classifier output, the only fingerprint-derived attribute safe enough (an 8-value closed enum) to put on a metric label — see METRIC_SAFE_ATTRIBUTES in src/fingerprint/attributes.js. Use it to tell 'we have an auth problem' from 'we have a flaky-dependency problem' without opening a single trace.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["sum"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (mcp_failure_category) (increase(mcp_tool_errors_total{service_name=~\"$service_name\"}[$__range]) or increase(mcp_tool_silent_failures_total{service_name=~\"$service_name\"}[$__range]))",
+          "legendFormat": "{{mcp_failure_category}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Thrash episodes and wasted cost",
+      "description": "mcp.tool.loop.detected: the same tool failing with the same failure fingerprint repeatedly (default threshold: 3 consecutive same-fingerprint failures) — an agent stuck retrying a call that will never succeed. Paired with mcp.tool.loop.wasted_cost_usd, the cumulative USD burned by each detected loop so far. A spike in episodes with a corresponding cost spike means agents are burning real money retrying a call that needed a human, not another retry.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "fillOpacity": 30 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "wasted cost (USD)" },
+            "properties": [
+              { "id": "unit", "value": "currencyUSD" },
+              { "id": "custom.drawStyle", "value": "line" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(increase(mcp_tool_loop_detected_total{service_name=~\"$service_name\"}[$__interval]))",
+          "legendFormat": "thrash episodes"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(increase(mcp_tool_loop_wasted_cost_usd_sum{service_name=~\"$service_name\"}[$__interval]))",
+          "legendFormat": "wasted cost (USD)"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "Schema drift events by tool",
+      "description": "mcp.tool.schema_drift.detected: a tool's inputSchema changed between two observed tools/list responses, broken out by tool. Schema drift silently breaks agents that cached an older schema or validated arguments against it — this has no standard-OTel equivalent at all (tools/list isn't a tool-call span). A tool showing up here means its contract changed underneath whatever's calling it.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (gen_ai_tool_name) (increase(mcp_tool_schema_drift_detected_total{service_name=~\"$service_name\"}[$__range]))",
+          "legendFormat": "{{gen_ai_tool_name}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "bargauge",
+      "title": "Cost by tool",
+      "description": "mcp.tool.cost.total: estimated USD spend attributed to each tool over the selected range, from mcp.tool.tokens.* and src/cost/calculator.js's pricing table. Only populated for tool calls whose result carries a recognizable token-usage shape (Anthropic/OpenAI/Bedrock conventions) — a tool that never reports usage will never appear here, which is expected, not a bug (see dashboards/README.md).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "min": 0 },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (gen_ai_tool_name) (increase(mcp_tool_cost_total{service_name=~\"$service_name\"}[$__range]))",
+          "legendFormat": "{{gen_ai_tool_name}}"
+        }
+      ]
+    }
+  ]
+}

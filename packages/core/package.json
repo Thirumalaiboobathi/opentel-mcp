@@ -60,8 +60,7 @@
   "dependencies": {
     "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
     "@opentelemetry/resources": "^2.9.0",
-    "@opentelemetry/sdk-trace-node": "^2.9.0",
-    "opentel-mcp-contract": "^0.1.0"
+    "@opentelemetry/sdk-trace-node": "^2.9.0"
   },
   "devDependencies": {
     "@opentelemetry/api": "^1.9.0",

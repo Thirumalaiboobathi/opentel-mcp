@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { SpanBuffer, DEFAULT_SPAN_BUFFER_CAPACITY } from '../src/span-buffer.js';
 
-/** @param {number} n @returns {import('opentel-mcp-contract').SerializedSpan} */
+/** @param {number} n @returns {import('../src/types.d.ts').SerializedSpan} */
 function fakeSpan(n) {
   return {
     id: `span-${n}`,

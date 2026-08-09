@@ -1,11 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.9.0
 
-**Fixed:** the `auth` failure classifier (`src/fingerprint/classify/auth.js`)
-missed "permission denied" and "access denied" — the standard phrasing from
-Unix, git, AWS IAM, and GCP for a permission/authorization failure. It only
-recognized HTTP-status-derived wording (`unauthorized`, `forbidden`,
+**⚠️ Fixed, with a fingerprint behavior change — read this before the
+feature below.** The `auth` failure classifier
+(`src/fingerprint/classify/auth.js`) missed "permission denied" and
+"access denied" — the standard phrasing from Unix, git, AWS IAM, and GCP
+for a permission/authorization failure. It only recognized
+HTTP-status-derived wording (`unauthorized`, `forbidden`,
 `authenticat(e|ion)`) plus 401/403 status codes and a handful of known
 auth-library error names. Messages using the OS/CLI phrasing above fell
 through every classifier and landed in the `internal` catch-all instead.
@@ -18,8 +20,8 @@ Node's own `EACCES`/`EPERM` error codes; still does not match bare
 the false-positive cases this deliberately excludes, e.g. "user denied the
 permission request").
 
-**⚠️ Behavior change: this changes fingerprints for affected messages.**
-`category` is one of the hashed inputs `computeFingerprint()` combines into
+**This changes fingerprints for affected messages.** `category` is one of
+the hashed inputs `computeFingerprint()` combines into
 `mcp.failure.fingerprint` (see ADR 006). A permission-denied failure that
 previously classified as `internal` now classifies as `auth` — the fields
 feeding the hash change, so the fingerprint itself changes for anyone whose
@@ -30,21 +32,64 @@ this is a pattern-coverage fix to when the existing category fires, not a
 new category. If you alert or dashboard on a specific `mcp.failure.fingerprint`
 value for a permission error, expect a new value after upgrading.
 
-## 0.9.0
+### Added — `instanceKey`: sharing tracker state across `instrumentMcpServer()` calls
 
-**Two-axis observation contract extracted into a standalone package,
-`opentel-mcp-contract`** (zero runtime dependencies — types and frozen
-constant objects only). Motivation: the upcoming local dashboard UI
-(`opentel-mcp-ui`) renders `ToolOutcome`/`ObservationIntegrity`, and needs
-to import the exact same definitions this package emits from, so a
-mismatch is a build-time type error instead of a UI silently rendering a
-stale value. `opentel-mcp` now depends on `opentel-mcp-contract` and
-re-exports everything it previously exported for this contract —
-`ToolOutcome`, `ToolOutcomeCounts`, `ObservationIntegrity`,
-`ObservationState` — unchanged, now marked `@deprecated` in favor of
-importing from `opentel-mcp-contract` directly. No behavior change; no
-major version bump; existing `import { ToolOutcome } from 'opentel-mcp'`
-consumers are unaffected.
+`instanceKey` (a string option on `instrumentMcpServer()`, or the
+`OTEL_MCP_INSTANCE_KEY` env var — lower precedence than the option) lets
+repeated `instrumentMcpServer()` calls that pass the same key share Agent
+Thrash Detection, budget tracking, schema drift detection, and the
+`ToolOutcome` counter's state, instead of each call constructing all four
+fresh and discarding them. Fixes the gap documented in the README's
+"In-memory tracker state is scoped to one `instrumentMcpServer()` call"
+section and `docs/known-gaps.md` entry 6, under a "stateless" Streamable
+HTTP deployment shape (a fresh `Server`/`McpServer` re-instrumented on
+every incoming request). Full design: ADR 012
+(`docs/adr/012-tracker-lifecycle-and-shared-state.md`).
+
+Backed by an internal, bounded, TTL-evicting registry (1000 distinct keys
+per process, 24h TTL renewed on every use — both ADR 012's proposed
+defaults) — fully internal, no new public type. Omit `instanceKey` (the
+default) for behavior byte-identical to every prior version: trackers are
+constructed fresh on every call, and the registry is never touched.
+
+**⚠️ Composition requirement: `instanceKey` alone does not fix Agent
+Thrash Detection.** `ThrashDetector` looks episodes up by `(sessionId,
+toolName, fingerprint)` — `instanceKey` shares the tracker object, but
+without a real, transport-provided `extra.sessionId` on every call, each
+`instrumentMcpServer()` call still generates its own random per-connection
+fallback session id, fresh, regardless of `instanceKey`. Sharing the
+tracker doesn't help if the lookup key inside it differs every call —
+each request lands as its own one-off episode instead of contributing to
+one shared loop. Real Streamable HTTP transports provide a real session id
+automatically, so the common case works with `instanceKey` alone — but a
+custom `Transport`, `assumeSingleSession: true`, or anything else on the
+generated-fallback path will set `instanceKey`, see nothing happen, and
+have every reason to think the fix is broken. Same silent-inertness shape
+as the original gap, one layer deeper. See the README's new "instanceKey"
+section for the full explanation and what to do about it — this is not a
+footnote there either.
+
+**⚠️ Does not help across process boundaries.** `instanceKey`'s registry
+is one process's in-memory state. On Lambda, Cloud Run, or any
+horizontally-scaled deployment, concurrent/recycled instances each hold
+their own independent registry — passing the identical `instanceKey`
+string everywhere does not change that. Counters remain instance-local and
+best-effort by design; this is a structural limitation, not a
+configuration gap, and this library deliberately does not add an external
+store (Redis/DynamoDB) to close it — see ADR 012's Update section for the
+full reasoning.
+
+**Documentation:** the "Metrics" section now covers wiring the Prometheus
+exporter specifically (`@opentelemetry/exporter-prometheus`), not just the
+OTLP example that was already there. Its pull-based text exposition format
+does not attach resource attributes (including `service.name`) to
+individual metric points by default — only to a separate `target_info`
+series — which is invisible with one service but means every series looks
+identical the moment you're scraping more than one instrumented server
+into the same Prometheus. Documents the fix
+(`withResourceConstantLabels: /^service\.name$/`) with a worked example.
+No code change; this behavior was always there, just undocumented. Found
+building `dashboards/grafana-mcp-health.json`'s verification harness.
 
 ## 0.8.0
 

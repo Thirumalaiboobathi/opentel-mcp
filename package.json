@@ -2,10 +2,9 @@
   "name": "opentel-mcp-monorepo",
   "version": "0.0.0",
   "private": true,
-  "description": "Workspace root for opentel-mcp: OpenTelemetry instrumentation for MCP servers, its shared observation contract, and its local dashboard UI",
+  "description": "Workspace root for opentel-mcp: OpenTelemetry instrumentation for MCP servers, and its local dashboard UI",
   "workspaces": [
     "packages/core",
-    "packages/contract",
     "packages/ui",
     "examples/hello-server",
     "examples/hello-mcpserver"

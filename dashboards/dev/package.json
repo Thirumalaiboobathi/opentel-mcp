@@ -1,0 +1,17 @@
+{
+  "name": "opentel-mcp-dashboard-dev",
+  "private": true,
+  "type": "module",
+  "description": "Standalone verification harness for dashboards/grafana-mcp-health.json — not an npm workspace member, not published. Runs real MCP traffic through instrumentMcpServer() with a Prometheus metrics exporter attached, so the dashboard can be imported against real scraped data.",
+  "scripts": {
+    "start": "node metrics-demo-server.js"
+  },
+  "dependencies": {
+    "opentel-mcp": "file:../../packages/core",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-prometheus": "^0.221.0",
+    "@opentelemetry/sdk-metrics": "^2.9.0",
+    "@opentelemetry/resources": "^2.9.0"
+  },
+  "comment": "Intentionally NOT depending on @modelcontextprotocol/sdk directly: this must resolve to the SAME copy opentel-mcp (packages/core) resolves via the monorepo's hoisted root node_modules, or instrumentMcpServer()'s `input instanceof Server` check fails against a second, distinct SDK install."
+}

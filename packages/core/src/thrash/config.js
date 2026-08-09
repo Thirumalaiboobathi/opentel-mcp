@@ -2,14 +2,20 @@
  * @module thrash/config
  * Options parsing and defaults for Agent Thrash Detection (v0.6.0).
  *
- * No precedent for env-var-driven config exists elsewhere in this
- * codebase (src/config.js's resolveOptions() only reads from its
- * `options` argument) — this module introduces the pattern for the first
- * time rather than following an established one. Precedence, highest to
- * lowest: explicit field on the `partial` argument, then the field's
- * `OTEL_MCP_THRASH_*` env var, then the hardcoded default. An invalid or
- * unparseable env value is treated exactly like an absent one — silent
- * fallback to the next source, never a throw.
+ * This module introduced env-var-driven config to this codebase first —
+ * at the time, src/config.js's resolveOptions() read only from its
+ * `options` argument, with no env var fallback anywhere. That's since
+ * changed: ADR 012 Phase 2 (docs/adr/012-tracker-lifecycle-and-shared-state.md)
+ * added `OTEL_MCP_INSTANCE_KEY`, resolved directly in src/config.js's
+ * resolveOptions() itself rather than a nested feature config module,
+ * since `instanceKey` is a bare top-level option with no feature-specific
+ * sub-config to belong to the way `thrashDetection`/`schemaDrift` do. The
+ * pattern this module established is otherwise unchanged and still the
+ * one every feature-scoped config follows: explicit field on the
+ * `partial` argument, then the field's `OTEL_MCP_THRASH_*` env var, then
+ * the hardcoded default. An invalid or unparseable env value is treated
+ * exactly like an absent one — silent fallback to the next source, never
+ * a throw.
  */
 
 /**

@@ -3,20 +3,20 @@
  *
  * Converts a real OTel `ReadableSpan` (as delivered to a `SpanProcessor`'s
  * `onEnd()`) into the small, stable, JSON-serialisable
- * {@link import('opentel-mcp-contract').SerializedSpan} shape this package
+ * {@link import('./types.d.ts').SerializedSpan} shape this package
  * ships over SSE/HTTP. Deliberately NOT a re-export of `ReadableSpan`
- * itself — see `SerializedSpan`'s own docblock in opentel-mcp-contract for
- * why.
+ * itself — see `SerializedSpan`'s own docblock in `types.d.ts` for why.
  *
  * Field provenance (verified against opentel-mcp core's actual span
  * emission, `src/instrument.js`, not assumed): `gen_ai.tool.name` ->
  * toolName; `error.type` -> errorType (exactly `'tool_error'` identifies a
- * SILENT failure -- see opentel-mcp-contract's `ERROR_TYPE_TOOL_ERROR`
- * docblock -- any other value is a thrown/protocol failure); `error.type`
- * absent entirely -> success; `mcp.failure.category` / `mcp.failure.channel`
- * -> failureCategory / failureChannel (only set when fingerprinting was
- * enabled and the call failed); `mcp.tool.argument_count` -> argumentCount.
- * Everything else opentel-mcp set lands in the `attributes` passthrough bag.
+ * SILENT failure -- see opentel-mcp core's `ERROR_TYPE_TOOL_ERROR`
+ * docblock (`src/attributes.js`) -- any other value is a thrown/protocol
+ * failure); `error.type` absent entirely -> success; `mcp.failure.category`
+ * / `mcp.failure.channel` -> failureCategory / failureChannel (only set
+ * when fingerprinting was enabled and the call failed);
+ * `mcp.tool.argument_count` -> argumentCount. Everything else opentel-mcp
+ * set lands in the `attributes` passthrough bag.
  *
  * `spanFieldsFromAttributes()` is factored out and shared with
  * `otlp-json-receiver.js` (the standalone CLI's ingestion path) so the
@@ -27,7 +27,7 @@
 import { SpanStatusCode } from '@opentelemetry/api';
 
 /** @typedef {import('@opentelemetry/sdk-trace').ReadableSpan} ReadableSpan */
-/** @typedef {import('opentel-mcp-contract').SerializedSpan} SerializedSpan */
+/** @typedef {import('./types.d.ts').SerializedSpan} SerializedSpan */
 
 const NAMED_ATTRIBUTE_KEYS = new Set([
   'gen_ai.tool.name',

@@ -7,8 +7,8 @@ npm install
 npm test
 ```
 
-This repo is an npm-workspaces monorepo (`packages/core`, `packages/contract`,
-`packages/ui`); the published `opentel-mcp` library lives in `packages/core`.
+This repo is an npm-workspaces monorepo (`packages/core`, `packages/ui`);
+the published `opentel-mcp` library lives in `packages/core`.
 Running `npm test`/`npm run typecheck`/etc. from the repo root delegates into
 each workspace's own scripts. Pure JavaScript, ES modules, Node 20+ — no
 build step in core. Edit `packages/core/src/` directly.

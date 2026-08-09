@@ -64,14 +64,8 @@ export const ATTR_GEN_AI_RESPONSE_MODEL = 'gen_ai.response.model';
  * Well-known error.type value for a JSON-RPC call that succeeded but whose
  * CallToolResult has isError: true — a tool-level failure, not a transport
  * or protocol error.
- *
- * v0.9.0: moved to opentel-mcp-contract (re-exported below, same value,
- * same identifier) — it's the per-span discriminator a consumer needs to
- * identify a "silent failure" from span data alone, part of the two-axis
- * observation contract this package's emission and opentel-mcp-ui must
- * never define two separate copies of.
  */
-export { ERROR_TYPE_TOOL_ERROR } from 'opentel-mcp-contract';
+export const ERROR_TYPE_TOOL_ERROR = 'tool_error';
 
 /** Well-known gen_ai.operation.name value for tool execution. */
 export const GEN_AI_OPERATION_NAME_EXECUTE_TOOL = 'execute_tool';
@@ -108,20 +102,17 @@ export const ATTR_MCP_SERVER_VERSION = 'mcp.server.version';
  * (isError: true) so both are visible on the same histogram without
  * requiring a join against error.type, which silent failures don't set
  * on the duration metric.
- *
- * v0.9.0: this attribute and its three well-known values moved to
- * opentel-mcp-contract (re-exported below, same values, same
- * identifiers) as part of the two-axis observation contract extraction
- * — see that package's `attributes.js` docblock for why
- * `ATTR_MCP_TOOL_OUTCOME` is a metric-only attribute, never set on a
- * span.
  */
-export {
-  ATTR_MCP_TOOL_OUTCOME,
-  MCP_TOOL_OUTCOME_SUCCESS,
-  MCP_TOOL_OUTCOME_ERROR,
-  MCP_TOOL_OUTCOME_SILENT_FAILURE,
-} from 'opentel-mcp-contract';
+export const ATTR_MCP_TOOL_OUTCOME = 'mcp.tool.outcome';
+
+/** Well-known mcp.tool.outcome value: the call succeeded. */
+export const MCP_TOOL_OUTCOME_SUCCESS = 'success';
+
+/** Well-known mcp.tool.outcome value: the handler threw or its promise rejected. */
+export const MCP_TOOL_OUTCOME_ERROR = 'error';
+
+/** Well-known mcp.tool.outcome value: isError: true (see ERROR_TYPE_TOOL_ERROR above). */
+export const MCP_TOOL_OUTCOME_SILENT_FAILURE = 'silent_failure';
 
 // --- Cost & token attribution attributes (v0.5.0, non-spec) ---
 //

@@ -5,54 +5,35 @@ import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-tr
 import { MeterProvider, MetricReader } from '@opentelemetry/sdk-metrics';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { instrumentMcpServer } from '../../src/instrument.js';
+import { instrumentMcpServer, __resetInstanceRegistryForTests } from '../../src/instrument.js';
 
 /**
- * REPRODUCTION TEST for a reported bug (against v0.7.0, still present):
+ * Originally a REPRODUCTION TEST for a reported bug (against v0.7.0):
  * Agent Thrash Detection (and, per the same investigation, budget
  * tracking, schema drift detection, and the v0.8.0 ToolOutcome counter)
  * cannot fire on a "stateless" Streamable HTTP deployment shape — one
  * fresh `Server`/`McpServer` + transport constructed per incoming HTTP
- * POST, with `instrumentMcpServer()` called fresh on each one.
+ * POST, with `instrumentMcpServer()` called fresh on each one, because
+ * every one of those four trackers was a local `const` inside
+ * `instrumentMcpServer()`'s own function body, discarded and rebuilt from
+ * empty on every call. Full investigation: ADR 012
+ * (docs/adr/012-tracker-lifecycle-and-shared-state.md).
  *
- * ROOT CAUSE, confirmed by reading src/instrument.js directly:
- * `thrashDetector` (and `budgetTracker`, `schemaDriftDetector`,
- * `toolOutcomeCounter`) are all local `const`s inside
- * `instrumentMcpServer()`'s own function body (instrument.js:194, 200,
- * 245, 275) — a brand new instance is constructed on every single call,
- * with no state shared across calls. The `kInstrumented` idempotency
- * guard (a Symbol set on the `server` object) never helps here either:
- * it only prevents re-instrumenting the *same* object twice, and this
- * deployment shape hands `instrumentMcpServer()` a genuinely different,
- * freshly-constructed object on every request.
+ * ADR 012, Phase 2 fixed this: `options.instanceKey` (`src/config.js`,
+ * `src/registry/instance-registry.js`) lets repeated `instrumentMcpServer()`
+ * calls that share a stable key share these four trackers' state instead
+ * of each resetting to empty — see `test/instrument.instance-key.test.js`
+ * for the focused, feature-level coverage of that mechanism itself. This
+ * file keeps its original role as the literal reproduction of the
+ * originally-reported shape, now split into two `it()`s: the fix,
+ * exercised end to end (opting in via `instanceKey`), and the unfixed
+ * default (opting out, i.e. omitting `instanceKey` — still today's
+ * behavior for any host who doesn't set it, by design; see ADR 012's
+ * "Default behavior with instanceKey omitted: byte-identical to today").
  *
- * This test drives 5 identical-fingerprint tool failures across 5
- * SEPARATE `instrumentMcpServer()` calls, each on its own fresh `Server`
- * — exactly the reported shape. With `threshold: 3` (the default), a
- * correctly-accumulating thrash detector would have fired
- * `mcp.tool.loop.detected` by (at latest) the 3rd of these 5 calls. It
- * does not, on any of them, because each call's `ThrashDetector` only
- * ever sees a single failure before being discarded.
- *
- * NAMING THE ASSERTION HONESTLY: the bug report described the symptom as
- * "assert no loop is detected." Taken completely literally, that
- * assertion (`expect(detected).toBeUndefined()`) currently PASSES — it
- * describes today's (broken) behavior, not a failing test. To produce an
- * actual RED test — the kind that turns green the moment a real fix
- * lands, per "write a failing test reproducing it" — this test instead
- * asserts the CORRECT, desired outcome (a loop WAS detected by the 5th
- * call), which is what genuinely fails today. Both readings describe the
- * same bug; this file asserts the one that's useful as a regression test
- * later. See the second `it()` below for the literal "nothing ever
- * fires" framing as a plain, unambiguous statement of the current state.
- *
- * This file is `describe.skip`, per this project's own established
- * discipline for a confirmed, reported gap with no fix landed yet (see
- * test/thrash/observation-liveness.test.js) — kept in the suite as a
- * living reproduction, not deleted, and not left active (which would
- * permanently redden `npm test` for every contributor until the fix
- * ships). Confirmed to actually fail before being skipped — see the
- * accompanying investigation report for the literal test-run output.
+ * No longer `describe.skip` — this is the regression test ADR 012's own
+ * "Consequences" section said this file would need once a fix landed
+ * ("at that point it needs a rewrite, not just an unskip").
  */
 function createServer(name = 'test-server') {
   return new Server({ name, version: '0.0.0' }, { capabilities: { tools: {} } });
@@ -101,6 +82,8 @@ beforeEach(() => {
   metricReader = new TestMetricReader();
   meterProvider = new MeterProvider({ readers: [metricReader] });
   metrics.setGlobalMeterProvider(meterProvider);
+
+  __resetInstanceRegistryForTests();
 });
 
 afterEach(async () => {
@@ -113,52 +96,77 @@ afterEach(async () => {
   metrics.disable();
 });
 
-describe.skip('Agent Thrash Detection — reported gap: fresh Server + instrumentMcpServer() per stateless HTTP request', () => {
-  /** Simulates one incoming HTTP POST: a brand-new Server, freshly instrumented, handling exactly one tools/call, then discarded — matching the reported deployment shape. */
-  async function simulateOneStatelessRequest() {
+describe('Agent Thrash Detection — fresh Server + instrumentMcpServer() per stateless HTTP request', () => {
+  /**
+   * Simulates one incoming HTTP POST: a brand-new Server, freshly
+   * instrumented, handling exactly one tools/call, then discarded —
+   * matching the originally-reported deployment shape. `instanceKeyOption`
+   * is merged into `instrumentMcpServer()`'s options as-is (an object like
+   * `{ instanceKey: 'svc-a' }`, or `{}` to omit it entirely) — the ONLY
+   * difference between the "fixed" and "still broken by default" tests
+   * below is whether that object carries an `instanceKey`.
+   *
+   * `extra.sessionId: 'client-1'` on every call — a REAL, transport-level
+   * session id, the same one on every request, exactly what a genuine
+   * Streamable HTTP deployment provides via `extra.sessionId` regardless of
+   * whether the SERVER OBJECT handling each request is freshly constructed
+   * (the transport tracks the client's session; the Server object doesn't
+   * have to). This matters: an earlier version of this test passed no
+   * sessionId at all and relied on `assumeSingleSession`'s fallback, which
+   * generates a NEW random id on every `instrumentMcpServer()` call by
+   * design (`resolveThrashSessionId()`, instrument.js — deliberately
+   * un-correlatable across genuinely separate Server objects, so it can
+   * never accidentally merge unrelated concurrent clients). That fallback
+   * defeats `instanceKey` sharing for thrash detection specifically:
+   * sharing the tracker OBJECT doesn't help if the (sessionId, toolName,
+   * fingerprint) key it looks entries up by is different on every call.
+   * `instanceKey` fixes thrash detection for a stateless deployment that
+   * has real session ids (the normal case for Streamable HTTP); it was
+   * never meant to, and does not, paper over the absence of any session
+   * identity at all — see this file's second `it()` for what still (and
+   * correctly) doesn't work.
+   */
+  async function simulateOneStatelessRequest(instanceKeyOption = {}) {
     const server = createServer();
-    // assumeSingleSession: true — this test never calls server.connect(),
-    // so the transport is undeterminable; opting in explicitly here keeps
-    // the test about the reported lifecycle bug, not session resolution
-    // (see test/integration/thrash-detection.test.js for the same pattern).
-    const instrumented = instrumentMcpServer(server, { serviceName: 'svc', thrashDetection: { assumeSingleSession: true } });
+    const instrumented = instrumentMcpServer(server, { serviceName: 'svc', ...instanceKeyOption });
     server.setRequestHandler(CallToolRequestSchema, async () => FAILING_RESULT);
-    await invokeToolCall(server, { name: 'validate', arguments: {} });
+    await invokeToolCall(server, { name: 'validate', arguments: {} }, { requestId: 1, sessionId: 'client-1' });
     return instrumented;
   }
 
-  it('SHOULD fire mcp.tool.loop.detected by the 5th identical-fingerprint failure, spanning 5 separate instrumentMcpServer() calls — currently does not', async () => {
+  it('with a shared instanceKey AND a real session id: fires mcp.tool.loop.detected by the 5th identical-fingerprint failure, spanning 5 separate instrumentMcpServer() calls', async () => {
     let lastInstrumented;
     for (let i = 0; i < 5; i++) {
-      lastInstrumented = await simulateOneStatelessRequest();
+      lastInstrumented = await simulateOneStatelessRequest({ instanceKey: 'stateless-http-fleet' });
     }
 
     const { resourceMetrics } = await metricReader.collect();
     const detected = findMetric(resourceMetrics, 'mcp.tool.loop.detected');
 
-    // This is the assertion that SHOULD hold if state correctly
-    // accumulated across the 5 "requests" above (default threshold: 3) —
-    // and the one that currently fails, proving the bug.
+    // This is the assertion that failed before ADR 012 Phase 2 landed, and
+    // now holds: state correctly accumulated across the 5 "requests"
+    // above (default threshold: 3), because all 5 shared one instanceKey.
     expect(detected).toBeDefined();
     expect(detected?.dataPoints?.[0]?.value).toBeGreaterThanOrEqual(1);
 
-    // Also demonstrably broken at the per-instance accessor level: the
-    // LAST instrumented server's own getThrashSummary() reflects only
-    // its own single-call ThrashDetector, never the 4 prior "requests."
+    // Also fixed at the per-instance accessor level: the LAST instrumented
+    // server's own getThrashSummary() now reflects the SHARED ThrashDetector
+    // all 5 "requests" fed into, not just its own single call.
     expect(lastInstrumented.getThrashSummary().totalLoopsDetected).toBeGreaterThan(0);
   });
 
-  it('documents the literal current symptom plainly: the metric never fires at all, across any of the 5 calls', async () => {
+  it('WITHOUT instanceKey (the default): the metric still never fires, across any of the 5 calls — unchanged, by design', async () => {
     for (let i = 0; i < 5; i++) {
-      await simulateOneStatelessRequest();
+      await simulateOneStatelessRequest(); // no instanceKey
     }
 
     const { resourceMetrics } = await metricReader.collect();
-    // This is the bug report's own "assert no loop is detected," taken
-    // completely literally — it currently PASSES, since it describes
-    // today's actual (broken) behavior rather than the desired one. Kept
-    // as its own assertion so the report is unambiguous regardless of
-    // which reading of the original instruction is intended.
+    // ADR 012's own "Default behavior with instanceKey omitted:
+    // byte-identical to today" — a host who doesn't opt in still gets
+    // exactly this (unfixed) behavior. This is not a residual bug; it's
+    // the documented, deliberate default. See
+    // test/instrument.instance-key.test.js for the direct, focused
+    // coverage of that byte-identical guarantee.
     expect(findMetric(resourceMetrics, 'mcp.tool.loop.detected')).toBeUndefined();
   });
 });

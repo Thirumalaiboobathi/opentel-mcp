@@ -227,7 +227,7 @@ export function createServer(options) {
 
 /**
  * @param {import('node:http').ServerResponse} res
- * @param {import('opentel-mcp-contract').SerializedSpan} span
+ * @param {import('./types.d.ts').SerializedSpan} span
  * @param {number} seq
  */
 function writeSseEvent(res, span, seq) {

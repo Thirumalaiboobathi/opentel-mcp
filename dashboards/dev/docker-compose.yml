@@ -1,0 +1,27 @@
+services:
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    ports:
+      - '9090:9090'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # Prometheus runs in a container but scrapes the metrics-demo-server.js
+    # process on the HOST (see prometheus.yml's target) — that script needs
+    # this repo's workspace packages and isn't containerized.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+  grafana:
+    image: grafana/grafana:13.1.3
+    ports:
+      - '3000:3000'
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../grafana-mcp-health.json:/var/lib/grafana/dashboards/grafana-mcp-health.json:ro
+    depends_on:
+      - prometheus

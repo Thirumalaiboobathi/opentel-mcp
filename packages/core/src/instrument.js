@@ -25,6 +25,7 @@ import { SchemaDriftDetector } from './schema-drift/detector.js';
 import { createSchemaDriftEmitter } from './schema-drift/emitter.js';
 import { ToolOutcomeCounter } from './observation/tool-outcome-counter.js';
 import { detectObservationIntegrity } from './observation/integrity.js';
+import { InstanceRegistry } from './registry/instance-registry.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_TOOL_NAME,
@@ -78,6 +79,82 @@ const SCHEMA_DRIFT_SCOPE = 'server';
 // Symbol.for(): must be visible across duplicate installs of this package
 // (e.g. monorepos with dedup issues), not just within one module instance.
 const kInstrumented = Symbol.for('opentel-mcp/instrumented');
+
+// ADR 012, Phase 2 (docs/adr/012-tracker-lifecycle-and-shared-state.md,
+// Option C): one registry for the whole process, constructed once here at
+// module load. This is the only architecture under which repeated
+// instrumentMcpServer() calls that share an instanceKey can actually share
+// tracker state — a per-call local variable couldn't be looked up again by
+// a later, unrelated call, and there is no other persistent scope this
+// library could reach for that doesn't require the host to hold and pass a
+// reference itself (ADR 012's Option B, rejected). Confirmed with the ADR's
+// author before implementing: the original Decision text never states this
+// explicitly (only the REJECTED Option A is described as "module-level"),
+// so this is a deliberate implementation choice filling a gap the ADR left
+// open, not a restatement of something it already said.
+//
+// Constructing this costs one empty BoundedTtlMap — negligible, and
+// unconditional regardless of whether any call ever supplies instanceKey,
+// since the registry must already exist the first time one does. This is
+// NOT the same thing as the "no allocation when instanceKey is unset"
+// guarantee instrumentMcpServer() makes below — that guarantee is about
+// PER-CALL allocation of registry entries/trackers, which getOrCreateTracker()
+// (below) skips entirely when instanceKey is undefined; a one-time,
+// process-lifetime empty Map is unrelated to and unaffected by that.
+const instanceRegistry = new InstanceRegistry();
+
+// Test-only: lets tests get a clean registry regardless of what earlier
+// tests in the same file already populated it with (the singleton above is
+// shared for the lifetime of this module instance — see its own comment).
+// Not part of the public API.
+export function __resetInstanceRegistryForTests() {
+  instanceRegistry.clear();
+}
+
+// Test-only: exposes the singleton's current size so tests can assert
+// "instanceKey omitted -> the registry is never touched" directly, rather
+// than only inferring it from tracker identity. Not part of the public API.
+export function __getInstanceRegistrySizeForTests() {
+  return instanceRegistry.size;
+}
+
+/**
+ * Looks up (or constructs) one of the four ADR-012 trackers. When
+ * `instanceKey` is `undefined`, calls `factory()` directly and never
+ * touches `registry` at all — this is what keeps the default (instanceKey
+ * omitted) path byte-identical to pre-v0.9.0 behavior: no registry lookup,
+ * no registry write, no allocation beyond the tracker itself, exactly as
+ * before this phase existed.
+ *
+ * The key is namespaced per tracker type (`${instanceKey}:${trackerSuffix}`)
+ * rather than using the raw `instanceKey` directly for all four. ADR 012's
+ * Decision text never addresses this: it describes "instrument.js looks up
+ * or creates each of the four trackers in an internal, bounded registry
+ * keyed by that string" without saying whether that means one shared entry
+ * per key (bundling all four trackers into one cached value) or one entry
+ * per (key, tracker type) pair. Left as a genuine, unaddressed gap. Chosen
+ * here: per-tracker-type namespacing, on ONE shared InstanceRegistry
+ * instance — the four tracker types can never collide on the same registry
+ * entry (a `ThrashDetector` can never be handed back where a budget tracker
+ * was expected, or vice versa), at the cost of all four trackers, across
+ * every instanceKey a process uses, sharing one bounded cap/TTL rather than
+ * each tracker type getting its own independent bound. Flagged explicitly
+ * as a choice, not a rediscovery of something the ADR already decided —
+ * four separate InstanceRegistry instances (one per tracker type) would
+ * have achieved the same non-collision guarantee structurally, without
+ * relying on string-namespace hygiene, and remains a reasonable alternative
+ * if independent per-tracker-type bounds turn out to matter in practice.
+ *
+ * @template V
+ * @param {string | undefined} instanceKey
+ * @param {string} trackerSuffix - e.g. 'thrash', 'budget', 'tool-outcome', 'schema-drift'.
+ * @param {() => V} factory
+ * @returns {V}
+ */
+function getOrCreateTracker(instanceKey, trackerSuffix, factory) {
+  if (instanceKey === undefined) return factory();
+  return instanceRegistry.getOrCreate(`${instanceKey}:${trackerSuffix}`, factory);
+}
 
 const UNSUPPORTED_INPUT_ERROR =
   'opentel-mcp: instrumentMcpServer() expects either a low-level Server ' +
@@ -191,13 +268,23 @@ export function instrumentMcpServer(input, options) {
   // One tracker per instrumented server, not per call — session/tool cost
   // must accumulate across the server's whole lifetime (see
   // src/cost/budget.js). A no-op tracker when costTracking.budget is unset.
-  const budgetTracker = createBudgetTracker(resolved.costTracking.budget);
+  //
+  // ADR 012, Phase 2: when resolved.instanceKey is set, this is looked up
+  // from (or, on first use, created in) the process-wide instanceRegistry
+  // instead of constructed fresh — see getOrCreateTracker()'s own docblock.
+  // When instanceKey is undefined (the default), this line behaves exactly
+  // as it did before this phase existed: factory() runs unconditionally,
+  // the registry is never touched.
+  const budgetTracker = getOrCreateTracker(resolved.instanceKey, 'budget', () =>
+    createBudgetTracker(resolved.costTracking.budget),
+  );
   // Same one-per-server lifetime as budgetTracker above — thrash episodes
   // accumulate across calls, not within one (see src/thrash/detector.js).
   // Constructed unconditionally, same as budgetTracker: resolved.thrashDetection.enabled
   // gates per-call work (applyThrashDetection/applyThrashSuccessClear
-  // below), not this one-time setup.
-  const thrashDetector = new ThrashDetector(resolved.thrashDetection);
+  // below), not this one-time setup. Same ADR-012/instanceKey wiring as
+  // budgetTracker above.
+  const thrashDetector = getOrCreateTracker(resolved.instanceKey, 'thrash', () => new ThrashDetector(resolved.thrashDetection));
   const thrashEmitter = resolved.enableMetrics ? createThrashEmitter(PACKAGE_VERSION) : null;
   // MCP sessions have a transport-provided id (extra.sessionId below) for
   // session-oriented transports, but stdio has none — there's exactly one
@@ -241,8 +328,9 @@ export function instrumentMcpServer(input, options) {
   // optional sub-feature. Deliberately NOT gated on fingerprinting,
   // thrashDetection, or enableMetrics — see ToolOutcomeCounter's own
   // docblock for why (Finding 3: those flags gate OTHER bookkeeping this
-  // counter must stay independent of).
-  const toolOutcomeCounter = new ToolOutcomeCounter();
+  // counter must stay independent of). Same ADR-012/instanceKey wiring as
+  // budgetTracker/thrashDetector above.
+  const toolOutcomeCounter = getOrCreateTracker(resolved.instanceKey, 'tool-outcome', () => new ToolOutcomeCounter());
   // Additive to instrumentMcpServer()'s existing return contract, same
   // pattern as getThrashSummary above: a getObservationState() method,
   // unconditional (not gated on setupNodeSdk), omitted entirely when
@@ -271,9 +359,17 @@ export function instrumentMcpServer(input, options) {
   // per-call use — is what actually delivers "no allocation when
   // disabled." schemaDriftEmitter is additionally gated on enableMetrics,
   // mirroring thrashEmitter exactly: detection/state-tracking is
-  // independent of metrics on/off, only emission is gated.
+  // independent of metrics on/off, only emission is gated. The
+  // instanceKey/registry lookup below only runs when schemaDrift.enabled —
+  // "no allocation when disabled" takes priority over the ADR-012 wiring,
+  // exactly as it already does over every other option here; there is
+  // nothing to share across calls for a feature that isn't running at all.
   const schemaDriftDetector = resolved.schemaDrift.enabled
-    ? new SchemaDriftDetector({ maxTrackedTools: resolved.schemaDrift.maxTrackedTools })
+    ? getOrCreateTracker(
+        resolved.instanceKey,
+        'schema-drift',
+        () => new SchemaDriftDetector({ maxTrackedTools: resolved.schemaDrift.maxTrackedTools }),
+      )
     : null;
   const schemaDriftEmitter =
     resolved.schemaDrift.enabled && resolved.enableMetrics ? createSchemaDriftEmitter(PACKAGE_VERSION) : null;

@@ -114,6 +114,34 @@ export interface InstrumentOptions {
    * (`src/schema-drift/types.d.ts`) for the full field list and defaults.
    */
   schemaDrift?: Partial<SchemaDriftConfig>;
+
+  /**
+   * Host-supplied stable identifier for one logical service (ADR 012,
+   * `docs/adr/012-tracker-lifecycle-and-shared-state.md`, Option C). When provided, the four in-memory
+   * trackers this library keeps per instrumented server — the budget tracker, Agent Thrash Detection, the
+   * `ToolOutcome` counter, and schema drift detection — are looked up from an internal, bounded,
+   * TTL-evicting registry keyed by this string instead of being constructed fresh on every
+   * {@link instrumentMcpServer} call. Repeated calls that pass the SAME `instanceKey` therefore share
+   * accumulated tracker state — fixing the gap ADR 012 documents under a "fresh Server per request"
+   * deployment shape, where every tracker previously reset to empty before ever accumulating anything.
+   *
+   * Omit (the default, `undefined`) for behavior byte-identical to pre-v0.9.0: trackers are constructed
+   * fresh on every call exactly as before, and the registry is never looked up or written to.
+   *
+   * Also settable via the `OTEL_MCP_INSTANCE_KEY` environment variable (lower precedence than this option;
+   * an empty or whitespace-only value from either source is treated as omitted). Distinct `instanceKey`
+   * values never share state with each other or with calls that omit the option.
+   *
+   * The registry itself (`src/registry/instance-registry.js`) stays fully internal — there is no public
+   * type for it, and none is needed: nothing in this package's public API accepts or returns a registry
+   * instance, so a consumer only ever interacts with this feature through this one string field.
+   *
+   * Passing an unstable value (e.g. a per-request id) silently defeats the whole point while looking
+   * configured — see ADR 012's Option C "Against" for why this is a real footgun, not a hypothetical one.
+   * Registry bounds (cap, TTL) and known limitations (single-process only — no cross-instance/serverless
+   * sharing) are documented in ADR 012, not repeated here.
+   */
+  instanceKey?: string;
 }
 
 /**
@@ -264,36 +292,13 @@ export type { SchemaDriftConfig, SchemaDriftKind, SchemaDriftEvent } from './sch
 
 // --- Two-axis observation contract (src/observation/) ---
 //
-// v0.9.0: these four types moved to the standalone `opentel-mcp-contract`
-// package (docs/adr — the "extract observation contract" refactor), so
-// this library's own emission and any consumer (e.g. opentel-mcp-ui)
-// share the exact same definitions and can never drift apart. Kept here,
-// re-exported and marked @deprecated (not removed — this is additive
-// from a consumer's perspective, no major version bump), so existing
-// `import { ToolOutcome } from 'opentel-mcp'` consumers keep working
-// unchanged. `src/observation/types.d.ts` (still present) is now itself
-// just a re-export of `opentel-mcp-contract` — see that file. Same
-// posture as Agent Thrash Detection and schema drift above — no runtime
-// values re-exported at the package root: ToolOutcomeCounter and
+// Re-exported here so TypeScript consumers get these types from the
+// package root instead of reaching into src/observation/* directly. See
+// src/observation/types.d.ts for the full shape documentation and ADR 008
+// (docs/adr/008-observation-liveness.md, "Update (2026-08-05): The
+// two-axis reframe"). Same posture as Agent Thrash Detection and schema
+// drift above — no runtime values re-exported: ToolOutcomeCounter and
 // detectObservationIntegrity() are internal to instrument.js's wiring,
-// not part of the public API. (opentel-mcp-contract itself DOES export
-// runtime values — TOOL_OUTCOME, OBSERVATION_INTEGRITY, the
-// mcp.tool.outcome attribute constants — import those from
-// 'opentel-mcp-contract' directly.)
+// not part of the public API.
 
-// Kept as four separate single-line re-exports (rather than one grouped
-// `export type { A, B, C, D } from ...`) so each carries its own
-// `@deprecated` JSDoc and so scripts/verify-tarball.js's plain-text export
-// parser (which does not strip comments) keeps reading each name cleanly.
-
-/** @deprecated Import from `opentel-mcp-contract` instead — this re-export exists only for pre-v0.9.0 consumers and will be removed in a future major version. */
-export type { ToolOutcome } from './observation/types.d.ts';
-
-/** @deprecated Import from `opentel-mcp-contract` instead — this re-export exists only for pre-v0.9.0 consumers and will be removed in a future major version. */
-export type { ToolOutcomeCounts } from './observation/types.d.ts';
-
-/** @deprecated Import from `opentel-mcp-contract` instead — this re-export exists only for pre-v0.9.0 consumers and will be removed in a future major version. */
-export type { ObservationIntegrity } from './observation/types.d.ts';
-
-/** @deprecated Import from `opentel-mcp-contract` instead — this re-export exists only for pre-v0.9.0 consumers and will be removed in a future major version. */
-export type { ObservationState } from './observation/types.d.ts';
+export type { ToolOutcome, ToolOutcomeCounts, ObservationIntegrity, ObservationState } from './observation/types.d.ts';

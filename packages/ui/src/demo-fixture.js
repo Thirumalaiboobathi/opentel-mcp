@@ -22,7 +22,7 @@ function nextId(prefix) {
 
 /**
  * @param {{ toolName: string, startTimeMs: number, durationMs: number, status: 'OK'|'ERROR', errorType?: string, failureCategory?: string, failureChannel?: string, attributes?: Record<string, unknown> }} spec
- * @returns {import('opentel-mcp-contract').SerializedSpan}
+ * @returns {import('./types.d.ts').SerializedSpan}
  */
 function makeSpan(spec) {
   return {
@@ -42,7 +42,7 @@ function makeSpan(spec) {
 }
 
 /**
- * @returns {import('opentel-mcp-contract').SerializedSpan[]} oldest-first.
+ * @returns {import('./types.d.ts').SerializedSpan[]} oldest-first.
  */
 export function buildDemoFixture() {
   const now = Date.now();
