@@ -66,6 +66,104 @@ describe('auth classifier', () => {
   it('matches via statusCode 403 (distinct from status)', () => {
     expect(auth.match({ statusCode: 403, message: 'nope' }, CTX)).toBe('auth');
   });
+
+  it('matches known auth-library error names', () => {
+    expect(auth.match({ name: 'UnauthorizedError', message: 'nope' }, CTX)).toBe('auth');
+    expect(auth.match({ name: 'ForbiddenError', message: 'nope' }, CTX)).toBe('auth');
+    expect(auth.match({ name: 'AuthError', message: 'nope' }, CTX)).toBe('auth');
+  });
+
+  // Pre-existing message wording -- never had a direct test before this
+  // change (only status/name were exercised). Added here specifically to
+  // confirm the broadened MESSAGE_RE didn't regress the original three
+  // phrases while extending it.
+  it('matches pre-existing message wording: unauthorized / forbidden / authenticate', () => {
+    expect(auth.match({ message: 'Request was unauthorized' }, CTX)).toBe('auth');
+    expect(auth.match({ message: 'Access to this resource is forbidden' }, CTX)).toBe('auth');
+    expect(auth.match({ message: 'Failed to authenticate the request' }, CTX)).toBe('auth');
+  });
+
+  // New coverage: OS/CLI-style permission-denial phrasing (Unix, git, AWS
+  // IAM, GCP -- see auth.js's own docblock for the researched sources).
+  it('matches "permission denied" (Node fs / Unix / git-over-HTTPS wording)', () => {
+    expect(auth.match({ message: "EACCES: permission denied, open '/etc/shadow'" }, CTX)).toBe('auth');
+  });
+
+  it('matches "Permission denied (publickey)" (git-over-SSH, OpenSSH\'s own wording)', () => {
+    expect(auth.match({ message: 'git@github.com: Permission denied (publickey).' }, CTX)).toBe('auth');
+  });
+
+  it('matches "access denied" (AWS S3-style wording)', () => {
+    expect(auth.match({ message: 'Access Denied' }, CTX)).toBe('auth');
+  });
+
+  it('matches "not authorized to perform" (AWS IAM explicit-deny wording)', () => {
+    expect(
+      auth.match(
+        { message: 'User: arn:aws:iam::123456789012:user/bob is not authorized to perform: s3:PutObject' },
+        CTX,
+      ),
+    ).toBe('auth');
+  });
+
+  it('matches "insufficient permissions"', () => {
+    expect(auth.match({ message: 'Insufficient permissions to complete this operation' }, CTX)).toBe('auth');
+  });
+
+  it('matches the EACCES error code directly, independent of message wording', () => {
+    expect(auth.match({ code: 'EACCES', message: 'some other wording entirely' }, CTX)).toBe('auth');
+  });
+
+  it('matches the EPERM error code directly, independent of message wording', () => {
+    expect(auth.match({ code: 'EPERM', message: 'operation not permitted' }, CTX)).toBe('auth');
+  });
+
+  // FALSE POSITIVE GUARDS -- auth-adjacent wording that must NOT classify
+  // as auth. All three are real, plausible application text, not just
+  // contrived non-matches.
+  it('does NOT match "user denied the permission request" -- application semantics about a permission prompt, not an auth failure', () => {
+    expect(auth.match({ message: 'user denied the permission request' }, CTX)).toBeNull();
+  });
+
+  it('does NOT match "permission granted" -- the opposite outcome', () => {
+    expect(auth.match({ message: 'permission granted' }, CTX)).toBeNull();
+  });
+
+  it('does NOT match "user is authorized to proceed" -- bare "authorized" without "not", a success statement', () => {
+    expect(auth.match({ message: 'user is authorized to proceed' }, CTX)).toBeNull();
+  });
+});
+
+describe('auth classifier: opentel-mcp-ui demo\'s real messages (packages/ui/demo/populate.js)', () => {
+  // Verifies runClassifiers()'s end-to-end category for every distinct
+  // silent-failure message the UI demo actually produces -- the same
+  // messages that motivated this broadened pattern in the first place.
+  // Only the permission-denied one is expected to change: the other four
+  // land exactly where the original investigation found them.
+
+  it('"Permission denied: cannot push to protected branch ..." now classifies as auth (was internal)', () => {
+    const message = "Permission denied: cannot push to protected branch 'main' (require pull request review)";
+    expect(runClassifiers({ name: 'MCPToolError', message }, CTX)).toBe('auth');
+  });
+
+  it('"File not found: ..." still classifies as internal -- no classifier covers "not found"', () => {
+    expect(
+      runClassifiers({ name: 'MCPToolError', message: 'File not found: src/config/missing-secrets.json' }, CTX),
+    ).toBe('internal');
+    expect(
+      runClassifiers({ name: 'MCPToolError', message: 'File not found: docs/missing-changelog.md' }, CTX),
+    ).toBe('internal');
+  });
+
+  it('"Query timeout after 30000ms: ..." still classifies as timeout, unaffected by the auth change', () => {
+    const message = 'Query timeout after 30000ms: SELECT * FROM orders WHERE status = ...';
+    expect(runClassifiers({ name: 'MCPToolError', message }, CTX)).toBe('timeout');
+  });
+
+  it('"Rate limited by Slack API ..." still classifies as internal -- no classifier covers rate limiting', () => {
+    const message = 'Rate limited by Slack API — retry after 12s';
+    expect(runClassifiers({ name: 'MCPToolError', message }, CTX)).toBe('internal');
+  });
 });
 
 describe('dependency classifier', () => {
