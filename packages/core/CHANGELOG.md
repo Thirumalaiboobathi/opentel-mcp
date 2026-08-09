@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+**Fixed:** the `auth` failure classifier (`src/fingerprint/classify/auth.js`)
+missed "permission denied" and "access denied" — the standard phrasing from
+Unix, git, AWS IAM, and GCP for a permission/authorization failure. It only
+recognized HTTP-status-derived wording (`unauthorized`, `forbidden`,
+`authenticat(e|ion)`) plus 401/403 status codes and a handful of known
+auth-library error names. Messages using the OS/CLI phrasing above fell
+through every classifier and landed in the `internal` catch-all instead.
+Found by running realistic error text through this project's own UI demo
+(`packages/ui/demo/populate.js`) and checking what `DEFAULT_CLASSIFIERS`
+actually returned for it — not assumed. Now also matches "not authorized",
+"permission(s) denied", "access denied", "insufficient permission(s)", and
+Node's own `EACCES`/`EPERM` error codes; still does not match bare
+"authorized" or "permission" alone (see the classifier's own docblock for
+the false-positive cases this deliberately excludes, e.g. "user denied the
+permission request").
+
+**⚠️ Behavior change: this changes fingerprints for affected messages.**
+`category` is one of the hashed inputs `computeFingerprint()` combines into
+`mcp.failure.fingerprint` (see ADR 006). A permission-denied failure that
+previously classified as `internal` now classifies as `auth` — the fields
+feeding the hash change, so the fingerprint itself changes for anyone whose
+tool emits this wording. This does **not** amend the closed 8-category
+taxonomy ADR 006 established (`validation | timeout | network | auth |
+dependency | serialization | internal | unknown`) — `auth` already existed;
+this is a pattern-coverage fix to when the existing category fires, not a
+new category. If you alert or dashboard on a specific `mcp.failure.fingerprint`
+value for a permission error, expect a new value after upgrading.
+
 ## 0.9.0
 
 **Two-axis observation contract extracted into a standalone package,
