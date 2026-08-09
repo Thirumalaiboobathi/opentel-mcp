@@ -28,7 +28,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "build": "vite build",
-    "dev:web": "vite"
+    "dev:web": "vite",
+    "demo": "node demo/populate.js"
   },
   "author": "Thirumalaiboobathi B",
   "license": "MIT",
@@ -46,6 +47,7 @@
   },
   "devDependencies": {
     "opentel-mcp": "^0.9.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
     "@opentelemetry/otlp-transformer": "^0.220.0",
