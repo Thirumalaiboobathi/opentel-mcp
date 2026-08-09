@@ -1,11 +1,13 @@
 /**
  * @module opentel-mcp-ui
  *
- * Scaffold only — no implementation yet. This package will become a
- * zero-infrastructure local dashboard (one command, no Docker/Prometheus/
- * Grafana/config file) that renders opentel-mcp's two-axis observation
- * contract. Declares a peer dependency RANGE on `opentel-mcp` (see
- * package.json), not a pinned version — core stays independently
- * versionable. Core itself must never gain a dependency on this package
- * or on React.
+ * Zero-infrastructure local dashboard for opentel-mcp's two-axis
+ * observation contract. `withUI()` is the in-process integration mode —
+ * see its own docblock (`with-ui.js`) for how it hooks into spans without
+ * opentel-mcp core needing any changes. The standalone mode is
+ * `npx opentel-mcp-ui` (`bin/opentel-mcp-ui.js`), not exported here.
  */
+
+export { withUI } from './with-ui.js';
+export { SpanBuffer, DEFAULT_SPAN_BUFFER_CAPACITY } from './span-buffer.js';
+export { CollectorSpanProcessor } from './collector-span-processor.js';

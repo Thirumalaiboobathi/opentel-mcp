@@ -12,15 +12,21 @@
       "default": "./src/index.js"
     }
   },
+  "bin": {
+    "opentel-mcp-ui": "./bin/opentel-mcp-ui.js"
+  },
   "files": [
-    "src"
+    "src",
+    "bin"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "build": "node -e \"console.log('opentel-mcp-ui: scaffold — nothing to build yet')\""
+    "build": "node -e \"console.log('opentel-mcp-ui: backend has no build step; frontend build lands in a later step')\""
   },
   "author": "Thirumalaiboobathi B",
   "license": "MIT",
@@ -30,8 +36,20 @@
     "directory": "packages/ui"
   },
   "peerDependencies": {
-    "opentel-mcp": ">=0.8.0 <1.0.0"
+    "opentel-mcp": ">=0.8.0 <1.0.0",
+    "@opentelemetry/api": "^1.9.0"
   },
-  "dependencies": {},
-  "devDependencies": {}
+  "dependencies": {
+    "opentel-mcp-contract": "^0.1.0"
+  },
+  "devDependencies": {
+    "opentel-mcp": "^0.9.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
+    "@opentelemetry/otlp-transformer": "^0.220.0",
+    "@opentelemetry/sdk-trace-base": "^2.9.0",
+    "@opentelemetry/sdk-trace-node": "^2.9.0",
+    "typescript": "^7.0.2",
+    "vitest": "^2.1.8"
+  }
 }

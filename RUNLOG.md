@@ -122,3 +122,182 @@ gained `"opentel-mcp-contract": "^0.1.0"` as a real `dependencies` entry
 
 Commit: `refactor: extract observation contract into standalone package`
 
+## Step 3 — UI backend (span buffer + local telemetry server)
+
+**Status: done, all acceptance criteria met — but the in-process
+integration mode ships a materially different mechanism than originally
+specified, found and corrected mid-step. Read "The architecture
+correction" below; it's the important part of this entry.**
+
+### What shipped, in packages/ui/src/
+
+- `span-buffer.js` — `SpanBuffer`, a fixed-capacity ring buffer (default
+  1000, configurable), O(1) push, oldest-evicted-first, bounded memory
+  under sustained load (tested to 10,000 pushes against capacity 10).
+- `serialize-span.js` — converts a real OTel `ReadableSpan` into
+  `SerializedSpan` (opentel-mcp-contract). `spanFieldsFromAttributes()` is
+  factored out so the OTLP JSON path (below) shares the exact same
+  attribute-to-field mapping, not a second hand-maintained copy.
+- `collector-span-processor.js` — `CollectorSpanProcessor`, a real
+  `@opentelemetry/sdk-trace` `SpanProcessor` implementation. Filters to
+  `tools/call`-shaped spans (excludes `tools/list`/schema-drift spans).
+  Exposes both `onEnd()` (the SpanProcessor interface) and
+  `ingestSerializedSpan()` (a direct path used by the OTLP receiver and by
+  tests).
+- `otlp-json-receiver.js` — decodes a REAL OTLP/HTTP JSON
+  `ExportTraceServiceRequest` body into `SerializedSpan[]`. Verified
+  against the actual wire format opentel-mcp core's own
+  `@opentelemetry/exporter-trace-otlp-http` dependency sends (read its
+  installed source directly: `JsonTraceSerializer`, hex-encoded ids,
+  decimal-string nanosecond timestamps) — not guessed.
+- `meta.js` — `describeInMemoryTrackerAvailability()` (generic over which
+  tracker; ADR 012 names all four in-memory trackers, not just thrash) and
+  `inspectTransport()` (the same structural transport-shape check core's
+  own internal `isSingleConnectionTransport()` uses). See "On the
+  transport-detection honesty boundary" below.
+- `summary.js` — `/api/summary`'s two clearly-separated buckets:
+  `observationState` (core's own cumulative bookkeeping, verbatim) and
+  `buffered` (real per-span counts from the current ring buffer window).
+  Deliberately NOT a fabricated 2x2 grid — see "On /api/summary's shape"
+  below, which foreshadows Step 5's blocker.
+- `server.js` — `node:http` only, no framework. Routes: `GET /`,
+  `GET /api/spans` (SSE, with `Last-Event-ID`/`?lastEventId=` reconnect
+  replay from the buffer), `GET /api/spans/history`, `GET /api/summary`,
+  `GET /api/meta`, `POST /v1/traces` (OTLP/HTTP JSON receiver — see the
+  architecture correction below for why this exists on EVERY server this
+  module creates, not just the standalone CLI's).
+- `with-ui.js` — `withUI(instrumentedServer, options)`.
+- `open-browser.js` — cross-platform browser opener via
+  `child_process.spawn` of the OS's own `open`/`start`/`xdg-open`, not an
+  npm dependency.
+- `bin/opentel-mcp-ui.js` — the standalone `npx opentel-mcp-ui` CLI.
+
+### The architecture correction (read this one)
+
+The original design (mine, from the brief's "ingests via the existing
+core hook") assumed `withUI()` could dynamically attach a `SpanProcessor`
+to whatever `TracerProvider` was ALREADY registered, via a
+`provider.addSpanProcessor()`-style call — the classic older OTel SDK
+pattern. **I wrote this, then wrote `withUI()`'s own test for it, and the
+test failed.** Investigating why (rather than adjusting the test to pass)
+found: verified directly against the installed `@opentelemetry/sdk-trace@2.9.0`
+(reading `TracerProvider.js`'s actual source, not assumed), `TracerProvider`
+builds one `MultiSpanProcessor` from `options.spanProcessors` at
+construction time and stores it in a private field (`_activeSpanProcessor`).
+**There is no public method to add a processor after construction in this
+SDK version.** I could have reached into that private field
+(`provider._activeSpanProcessor._spanProcessors.push(...)`) and it would
+have worked at runtime — I did not do this, because it's exactly the
+"coupling to unstable SDK internals" this project's own ADRs (001, 008)
+already reject as a pattern, and doing it quietly to make a test pass
+would have been indistinguishable from the "about to write `any` to get
+past a type error" halt condition in spirit, even though it's not
+literally that.
+
+**Corrected design:** every server this package creates (both integration
+modes) exposes `POST /v1/traces`, a real OTLP/HTTP JSON receiver. This is
+"the existing core hook" honored literally, just not the hook I first
+assumed: `instrumentMcpServer(server, { setupNodeSdk: true, exporterUrl:
+'<dashboard url>/v1/traces' })` already sends spans there TODAY, using
+opentel-mcp core's own, already-shipping `@opentelemetry/exporter-trace-otlp-http`
+dependency — zero core changes, not a new emission path, and it's the
+literal `exporterUrl` option that's been in `InstrumentOptions` since
+long before this project started. `withUI()` STILL attempts the dynamic
+`addSpanProcessor` path as a real, tested best-effort bonus (proven
+correct against a hand-built fake provider in
+`test/with-ui.test.js` — it's not dead code, it would fire for a
+host-authored custom `TracerProvider`, or a future OTel SDK version, that
+does expose it), but the dashboard's actual, tested, reliable ingestion
+path in both modes is OTLP.
+
+I'm flagging this as something you should look at, not something I'm
+fully confident reads naturally against the ORIGINAL usage example in the
+brief (`withUI(instrumentedServer, { port: 4319, open: true })` implying
+zero additional configuration). With the correction, that call alone
+starts a fully functional dashboard server, but it will not receive
+spans until the host EITHER (a) has a custom TracerProvider supporting
+dynamic attach (rare), or (b) also sets `exporterUrl` on their
+`instrumentMcpServer()` call to point at it. (b) is one extra config
+line, clearly logged via `diag.warn` the moment `withUI()` can't attach
+dynamically, but it is a real deviation from "one function call, no other
+changes" — worth deciding whether the README should lead with this as the
+primary documented flow (which I'd recommend) rather than a fallback.
+
+### On the transport-detection honesty boundary
+
+ADR 012 is explicit that the fresh-`Server`-per-request problem is about
+a *usage pattern*, not a transport *class* — a long-lived
+`StreamableHTTPServerTransport` serving many sessions has no such
+problem. `withUI()` only ever sees ONE server object at one point in
+time; it cannot observe whether other server objects are being
+constructed and discarded elsewhere in the host's process. So
+`describeInMemoryTrackerAvailability()`'s auto-detection deliberately
+returns `'unknown'` (not `'unavailable'`) for a session-oriented
+transport — correlated risk, not confirmed unavailability — and only
+returns a confident `'unavailable'`/`'live'` when the host explicitly
+passes `statelessTransport: true/false` (mirroring
+`thrashDetection.assumeSingleSession`'s own "operator assertion beats
+silent guessing" precedent). The Step 3 brief's exact banner copy
+("Thrash detection unavailable — stateless HTTP transport...") is used
+verbatim ONLY in the explicit-assertion case; the auto-detected
+session-oriented case uses different, hedged wording ("may be
+unavailable... doesn't confirm..."). I chose accuracy over matching the
+brief's copy exactly here — flagging in case you'd rather the softer
+"unknown" case still be worded to feel more like the punchier example
+copy for the dashboard banner (Step 5c can restyle the TEXT without
+changing the underlying `status` values).
+
+Also generalized past thrash detection alone: ADR 012 names all four
+in-memory trackers (thrash, cost/budget, schema drift, ToolOutcome
+counting) as sharing the identical root cause, so `/api/meta` reports on
+all four, not just thrash.
+
+### On /api/summary's shape (foreshadowing Step 5)
+
+Kept `observationState` (core's real `ToolOutcomeCounts` + single
+`ObservationIntegrity` value) and `buffered` (real per-span counts from
+the ring buffer) as two separate, honestly-labeled objects rather than
+inventing a combined 2x2 grid. This is deliberate, not an oversight: see
+the Step 2 entry above and the Step 5 entry below for why a literal
+`ToolOutcome x ObservationIntegrity` per-span crosstab can't be built
+faithfully from what core actually emits.
+
+### Other decisions worth a look
+
+- `opentel-mcp-contract` is listed as a real `dependencies` entry for
+  `opentel-mcp-ui`, even though nothing in this step's `.js` files imports
+  a runtime value from it yet (only a type-only import in `index.d.ts`).
+  Judgment call: the finished dashboard will need `TOOL_OUTCOME`/
+  `OBSERVATION_INTEGRITY` at runtime for rendering (Step 5), so declaring
+  it once now rather than re-adding it per step seemed more honest about
+  the package's actual, near-term shape.
+- Added `"./package.json": "./package.json"` to **opentel-mcp core's**
+  `exports` map (mirrors the same addition already made to
+  `opentel-mcp-contract` in Step 2) so `/api/meta` can report a REAL
+  `coreVersion` instead of a permanent `'unknown'`. This is the one touch
+  to core in this step — purely additive (a common, standard convention;
+  no existing behavior changed), needed so `/api/meta` doesn't have to
+  lie by omission about the one piece of information it's supposed to
+  report honestly. Re-verified the tarball comparison after this change;
+  still clean.
+- The `SpanBuffer.size` bug the eviction tests actually caught: `size`
+  was originally derived from the lifetime `totalPushed` counter, so
+  calling `clear()` didn't reset `size` to 0 (only `toArray()` emptied).
+  Fixed by tracking `pushedSinceClear` separately from the lifetime
+  `totalPushed` (the latter is kept, deliberately, as the stable basis
+  for SSE sequence numbers, which must never reset). Caught by the
+  acceptance criterion's own "buffer eviction" test requirement doing its
+  job.
+
+### Verification
+
+- `npm test` (root): core 642/6 (unchanged), ui 61/0 (new).
+- `npm run typecheck`: clean across all three workspaces.
+- Manual end-to-end smoke test of the standalone CLI: started it, sent it
+  a REAL OTLP/HTTP JSON payload (built via
+  `@opentelemetry/otlp-transformer`'s own `JsonTraceSerializer`, the exact
+  code opentel-mcp core's exporter uses), confirmed it landed in
+  `/api/spans/history` and `coreVersion` resolved correctly via the new
+  `exports` entry.
+- `npm run verify:tarball`: still passes after the core `exports` change.
+
