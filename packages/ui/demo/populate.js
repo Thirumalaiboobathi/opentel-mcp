@@ -228,7 +228,28 @@ async function main() {
     await client.callTool({ name: 'send_slack_message', arguments: { channel, text: 'Deploy finished' } });
   }
 
-  // Silent failures -- isError: true inside a 200, the whole point.
+  // Thrash loop: the SAME tool, the SAME arguments, therefore the SAME
+  // computeFingerprint() output, five times in a row -- past
+  // ThrashDetector's default threshold of 3, so this is a real,
+  // detected loop, not just "several failures."
+  //
+  // Placed BEFORE the other silent failures/thrown errors below, not
+  // after: the silent-failure feed (opentel-mcp-ui's default matrix-cell
+  // view) shows newest-first, so whatever runs LAST is what a viewer
+  // sees at the top. With the loop last, all 5 of its identical rows
+  // dominated the top of the feed; with it here, the loop still reads
+  // as one contiguous, recognizable episode when scrolling (its 5 calls
+  // stay consecutive), but the feed instead opens on the varied tools
+  // that follow.
+  console.log('opentel-mcp-ui demo: thrash loop -- create_pull_request against a protected branch, 5x...');
+  for (let i = 0; i < 5; i++) {
+    await client.callTool({ name: 'create_pull_request', arguments: { branch: 'main', title: 'Hotfix for prod incident' } });
+  }
+
+  // Silent failures -- isError: true inside a 200, the whole point. Kept
+  // AFTER the thrash loop (see comment above) so the feed's newest,
+  // most-visible rows are these varied tools, not the repeated
+  // permission-denied message.
   await client.callTool({ name: 'read_file', arguments: { path: 'src/config/missing-secrets.json' } });
   await client.callTool({ name: 'read_file', arguments: { path: 'docs/missing-changelog.md' } });
   await client.callTool({ name: 'query_database', arguments: { sql: 'SELECT * FROM orders WHERE status = pending' } });
@@ -240,15 +261,6 @@ async function main() {
   await callAndIgnoreThrown(client, 'run_tests', { suite: 'integration' });
   await callAndIgnoreThrown(client, 'run_tests', { suite: 'integration' });
   await callAndIgnoreThrown(client, 'query_database', { sql: 'DROP TABLE sessions' });
-
-  // Thrash loop: the SAME tool, the SAME arguments, therefore the SAME
-  // computeFingerprint() output, five times in a row -- past
-  // ThrashDetector's default threshold of 3, so this is a real,
-  // detected loop, not just "several failures."
-  console.log('opentel-mcp-ui demo: thrash loop -- create_pull_request against a protected branch, 5x...');
-  for (let i = 0; i < 5; i++) {
-    await client.callTool({ name: 'create_pull_request', arguments: { branch: 'main', title: 'Hotfix for prod incident' } });
-  }
 
   console.log('opentel-mcp-ui demo: schema drift -- tools/list again (v2 schema adds case_sensitive)...');
   searchCodebaseSchema = SEARCH_CODEBASE_SCHEMA_V2;
