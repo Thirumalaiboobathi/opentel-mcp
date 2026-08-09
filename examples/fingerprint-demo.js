@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { computeFingerprint } from '../src/fingerprint/compose.js';
+import { computeFingerprint } from '../packages/core/src/fingerprint/compose.js';
 
 // Two distinct call sites with the same *shape* of error, so the demo can
 // show that varying an id embedded in the message doesn't change the

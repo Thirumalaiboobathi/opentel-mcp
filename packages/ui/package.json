@@ -1,0 +1,37 @@
+{
+  "name": "opentel-mcp-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zero-infrastructure local dashboard for opentel-mcp's two-axis observation contract",
+  "type": "module",
+  "main": "src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node -e \"console.log('opentel-mcp-ui: scaffold — nothing to build yet')\""
+  },
+  "author": "Thirumalaiboobathi B",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Thirumalaiboobathi/opentel-mcp.git",
+    "directory": "packages/ui"
+  },
+  "peerDependencies": {
+    "opentel-mcp": ">=0.8.0 <1.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

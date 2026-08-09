@@ -7,25 +7,29 @@ npm install
 npm test
 ```
 
-Pure JavaScript, ES modules, Node 20+ — no build step. Edit `src/` directly.
+This repo is an npm-workspaces monorepo (`packages/core`, `packages/contract`,
+`packages/ui`); the published `opentel-mcp` library lives in `packages/core`.
+Running `npm test`/`npm run typecheck`/etc. from the repo root delegates into
+each workspace's own scripts. Pure JavaScript, ES modules, Node 20+ — no
+build step in core. Edit `packages/core/src/` directly.
 
 ## Adding tests
 
-Tests live in `test/` and run with [Vitest](https://vitest.dev/). Use
-`@opentelemetry/sdk-trace-base`'s `InMemorySpanExporter` to assert on
+Tests live in `packages/core/test/` and run with [Vitest](https://vitest.dev/).
+Use `@opentelemetry/sdk-trace-base`'s `InMemorySpanExporter` to assert on
 emitted spans rather than mocking OTel internals — see
-`test/instrument.test.js` for the pattern (register a test-scoped tracer
-provider in `beforeEach`, reset it in `afterEach`).
+`packages/core/test/instrument.test.js` for the pattern (register a
+test-scoped tracer provider in `beforeEach`, reset it in `afterEach`).
 
 ## Public API types
 
-`src/index.d.ts` (and the sibling `src/*/types.d.ts` files it re-exports)
-are hand-written, not compiler-generated — this project has no TypeScript
-build step, so nothing keeps them in sync with `resolveOptions()`
+`packages/core/src/index.d.ts` (and the sibling `src/*/types.d.ts` files it
+re-exports) are hand-written, not compiler-generated — this project has no
+TypeScript build step, so nothing keeps them in sync with `resolveOptions()`
 (`src/config.js`) automatically. `npm run typecheck` (`tsc --noEmit`,
-config in `tsconfig.json`) type-checks those `.d.ts` files plus any
-`test/**/*.test-d.ts` type-level tests — see
-`test/index.exports.test-d.ts` for the pattern (`expectTypeOf` /
+config in `packages/core/tsconfig.json`) type-checks those `.d.ts` files plus
+any `test/**/*.test-d.ts` type-level tests — see
+`packages/core/test/index.exports.test-d.ts` for the pattern (`expectTypeOf` /
 `@ts-expect-error`). It does not check the `.js` source itself
 (`checkJs: false`); that's out of scope for this narrow setup. When you
 add a new `instrumentMcpServer()` option in `config.js`, add it to

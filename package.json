@@ -1,76 +1,31 @@
 {
-  "name": "opentel-mcp",
-  "version": "0.8.0",
-  "description": "One-line OpenTelemetry instrumentation for Model Context Protocol (MCP) servers",
-  "type": "module",
-  "main": "src/index.js",
-  "types": "./src/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./src/index.d.ts",
-      "default": "./src/index.js"
-    }
-  },
-  "files": [
-    "src",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE"
-  ],
-  "engines": {
-    "node": ">=20"
-  },
+  "name": "opentel-mcp-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Workspace root for opentel-mcp: OpenTelemetry instrumentation for MCP servers, its shared observation contract, and its local dashboard UI",
   "workspaces": [
+    "packages/core",
+    "packages/contract",
+    "packages/ui",
     "examples/hello-server",
     "examples/hello-mcpserver"
   ],
   "scripts": {
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc --noEmit",
-    "verify:tarball": "node scripts/verify-tarball.js",
-    "bench": "vitest bench --run",
-    "prepack": "node scripts/strip-workspaces.js",
-    "postpack": "node scripts/restore-workspaces.js",
-    "prepublishOnly": "npm run verify:tarball"
+    "test": "npm run test --workspaces --if-present",
+    "test:watch": "npm run test:watch --workspace=packages/core",
+    "test:coverage": "npm run test:coverage --workspace=packages/core",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "bench": "npm run bench --workspace=packages/core",
+    "verify:tarball": "npm run verify:tarball --workspace=packages/core"
   },
-  "keywords": [
-    "mcp",
-    "model-context-protocol",
-    "opentelemetry",
-    "otel",
-    "observability",
-    "tracing",
-    "ai-agents",
-    "claude"
-  ],
+  "engines": {
+    "node": ">=20"
+  },
   "author": "Thirumalaiboobathi B",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Thirumalaiboobathi/opentel-mcp.git"
-  },
-  "bugs": {
-    "url": "https://github.com/Thirumalaiboobathi/opentel-mcp/issues"
-  },
-  "homepage": "https://github.com/Thirumalaiboobathi/opentel-mcp#readme",
-  "peerDependencies": {
-    "@modelcontextprotocol/sdk": ">=1.0.0",
-    "@opentelemetry/api": "^1.9.0"
-  },
-  "dependencies": {
-    "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
-    "@opentelemetry/resources": "^2.9.0",
-    "@opentelemetry/sdk-trace-node": "^2.9.0"
-  },
-  "devDependencies": {
-    "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/sdk-metrics": "^2.9.0",
-    "@opentelemetry/sdk-trace-base": "^2.9.0",
-    "@vitest/coverage-v8": "^2.1.9",
-    "typescript": "^7.0.2",
-    "vitest": "^2.1.8",
-    "zod": "^4.4.3"
   }
 }

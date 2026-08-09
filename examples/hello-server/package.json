@@ -10,6 +10,6 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "opentel-mcp": "file:../.."
+    "opentel-mcp": "file:../../packages/core"
   }
 }
