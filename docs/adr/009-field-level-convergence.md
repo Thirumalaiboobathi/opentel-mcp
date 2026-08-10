@@ -222,3 +222,69 @@ tested against the exact installed SDK/Zod versions the same way ADR
   for McpServer users, which are most users; a design that depended on
   it would be unreachable for the common case, the same mistake Phase 0
   of ADR 007 almost made before the McpServer reachability finding.
+
+## Addendum: SDK 1.30.0 broke the JSON-array assumption this ADR was built on
+
+An `npm audit fix` bumped `@modelcontextprotocol/sdk` from 1.29.0 to 1.30.0
+(a minor version, within `packages/ui/package.json`'s existing `^1.29.0`
+range — no `package.json` edit required to pull it in). All four tests
+covering `extractValidationPaths()` started failing: `[]` where a real
+McpServer + real Zod validation failure previously produced populated
+paths. Zod itself was unchanged (`4.4.3` before and after) — this is
+entirely an SDK-side change.
+
+**What changed.** Confirmed by pulling the 1.29.0 tarball from npm and
+diffing `server/zod-compat.js` against the installed 1.30.0 copy:
+`getParseErrorMessage()` used to check `error.message` first — which for a
+real `ZodError` is `JSON.stringify(this.issues, null, 2)`, the full JSON
+array this ADR's Q1 documented and `extractValidationPaths()` was built to
+parse. As of 1.30.0, it checks `'issues' in error` *first* and builds its
+own human-readable string instead: `` `${issue.message} at ${dotPath}` ``,
+one per issue, joined by `\n` (nested paths dotted, array indices
+bracketed, root-level issues dropping the `" at "` suffix entirely).
+`error.message` is no longer consulted at all when `.issues` is present.
+This reads as a deliberate SDK improvement for human readability (a new
+`getDotPath()` helper was added specifically to produce it), not a
+regression — but it silently invalidates the JSON-array assumption Q1 and
+Q4 of this ADR were built on, for every McpServer user on 1.30.0+.
+
+**The `"MCP error {code}: "` wrapper and the `"Input validation error:"` /
+`"Output validation error:"` prefixes this ADR's Q3 and ADR 007's channel
+classification depend on are unchanged** — confirmed against a real
+McpServer, both before and after this addendum's fix. Only the innermost
+ZodError-derived tail changed shape. `classifyFailureChannel()`
+(`fingerprint/classify/channel.js`) never inspects that tail at all, so
+ADR 007's channel dimension was, and remains, unaffected by this SDK
+change — checked directly rather than assumed, given a silent
+misclassification wouldn't fail a test the same visible way a missing
+array does.
+
+**The path data was never gone, only reshaped.** `extractValidationPaths()`
+now tries the JSON-array parse first (unchanged, for SDK <=1.29.0 and any
+low-level `Server` author who throws a raw, unrendered `ZodError`), and
+falls back to parsing the rendered `"<message> at <path>"` format — gated
+on the same `Input validation error:` / `Output validation error:` marker
+`classify/channel.js` already trusts, since unlike the JSON array this
+format is not self-validating (an arbitrary business-logic sentence ending
+in "at <word>" would otherwise look plausible). Array-index segments
+(`items[3]`) are normalized to dots (`items.3`) to match the JSON path's
+existing `path.join('.')` convention, so the two extraction paths agree on
+canonical form for the same logical field rather than producing two
+different-looking strings for the same thing depending on which SDK
+version or server API produced the failure.
+
+**Fragility, restated more sharply than the original Recommendation:**
+this feature is now coupled to *two* independent SDK message-rendering
+choices instead of one, on top of the `-32602` sub-case coupling ADR 007
+already accepted. A third rendering in some future SDK version breaks this
+again, exactly how 1.30.0 broke the JSON-only version — and the failure
+mode stays silent: `extractValidationPaths()` returns `[]`, no exception,
+no warning, nothing in CI unless a test happens to exercise the exact
+shape that changed. `test/fingerprint/classify.validation-paths.test.js`
+now pins the exact installed SDK version (`1.30.0`) this file's two
+formats were verified against — an exact-equality check, not a range
+check, specifically because 1.29.0 -> 1.30.0 was itself a minor bump that
+broke this silently with no deprecation notice. A version bump failing
+that pin test is the intended signal to re-run this ADR's empirical
+checks against the new version before moving it, not a nuisance to
+suppress.
