@@ -3,6 +3,7 @@ import { trace, context, diag, SpanStatusCode, SpanKind } from '@opentelemetry/a
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { CallToolRequestSchema, PingRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { instrumentMcpServer } from '../src/instrument.js';
 import { __resetServiceNameWarnedForTests } from '../src/config.js';
@@ -85,6 +86,30 @@ function createFakeMcpServer(name = 'test-mcpserver') {
       registeredTools[toolName] = handler;
       installDispatcherOnce();
     },
+  };
+}
+
+/**
+ * A McpServer-*shaped* object whose `.server` is deliberately NOT a real
+ * `@modelcontextprotocol/sdk` `Server` instance — the exact discriminating
+ * property an `@modelcontextprotocol/server` v2 `McpServer` has (see ADR
+ * 015 "Update 2026-08-11", `docs/known-gaps.md` entry 7): it duck-types
+ * identically to `createFakeMcpServer()` above (`.server.setRequestHandler`
+ * exists, `.registerTool` exists), but `.server` is a plain object, not
+ * derived from `@modelcontextprotocol/sdk`'s `Server` class at all. Not
+ * the real v2 package — that's a separate npm package this repo doesn't
+ * depend on even as a devDependency; this fixture targets exactly the one
+ * structural property `detectServerKind()` now checks for, the same way
+ * `createFakeMcpServer()` targets the shape the wrappable branch checks
+ * for, without requiring the real SDK.
+ */
+function createUnwrappableMcpServerLike() {
+  return {
+    server: {
+      setRequestHandler: () => {},
+      assertCanSetRequestHandler: () => {},
+    },
+    registerTool: () => {},
   };
 }
 
@@ -473,6 +498,97 @@ describe('instrumentMcpServer', () => {
       mcpServer.tool('echo', async () => ({ content: [] }));
 
       expect(() => instrumentMcpServer(mcpServer, { serviceName: 'svc' })).toThrow(/must be called BEFORE registering/i);
+    });
+  });
+
+  // ADR 015 "Update (2026-08-11)" / docs/known-gaps.md entry 7: a McpServer
+  // duck-type match alone (`.server.setRequestHandler` + `.registerTool`)
+  // is not sufficient to guarantee `.server` is a real
+  // `@modelcontextprotocol/sdk` `Server` this package can actually wrap —
+  // confirmed reachable by an `@modelcontextprotocol/server` (MCP v2)
+  // McpServer, which satisfies that shape but is NOT supported. These
+  // tests cover: a real v1 McpServer still works unchanged (the fix must
+  // not narrow legitimate v1 usage), and a McpServer-shaped object whose
+  // `.server` isn't a recognized Server instance throws loudly instead of
+  // silently instrumenting nothing.
+  describe('detectServerKind hardening — unwrappable McpServer-shaped input (ADR 015)', () => {
+    it('still instruments a real @modelcontextprotocol/sdk McpServer (not the fake fixture) unchanged', async () => {
+      const mcpServer = new McpServer({ name: 'real-mcp', version: '1.0.0' });
+      const instrumented = instrumentMcpServer(mcpServer, { serviceName: 'svc' });
+
+      instrumented.registerTool('echo', {}, async () => ({ content: [{ type: 'text', text: 'ok' }] }));
+
+      const handler = mcpServer.server._requestHandlers.get('tools/call');
+      await handler({ method: 'tools/call', params: { name: 'echo', arguments: {} } }, { requestId: 1 });
+
+      const [span] = memoryExporter.getFinishedSpans();
+      expect(span.name).toBe('tools/call echo');
+      expect(span.kind).toBe(SpanKind.SERVER);
+      expect(span.status.code).toBe(SpanStatusCode.OK);
+    });
+
+    it('throws, naming what was detected, for a McpServer-shaped object whose .server matches neither supported SDK', () => {
+      const unwrappable = createUnwrappableMcpServerLike();
+
+      expect(() => instrumentMcpServer(unwrappable, { serviceName: 'svc' })).toThrow(
+        /not a recognized Server instance from either supported MCP SDK/i,
+      );
+    });
+
+    // ADR 015 Phase 2: reworded from Phase 1's v1-only wording ("not a
+    // recognized @modelcontextprotocol/sdk Server instance... 2026-07-28
+    // is NOT supported") now that v2 IS supported — the unwrappable case
+    // is now genuinely "matches neither installed SDK's Server class",
+    // not "matches v1 but not the SDK this package understands".
+    it('the unwrappable error message names the detected shape, both supported SDKs, and all three plausible causes', () => {
+      const unwrappable = createUnwrappableMcpServerLike();
+      let thrown;
+      try {
+        instrumentMcpServer(unwrappable, { serviceName: 'svc' });
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown.message).toMatch(/\.tool\(\)\/\.registerTool\(\)/);
+      expect(thrown.message).toMatch(/@modelcontextprotocol\/sdk/);
+      expect(thrown.message).toMatch(/@modelcontextprotocol\/server/);
+      expect(thrown.message).toMatch(/duplicate or mismatched install/i);
+      expect(thrown.message).toMatch(/not resolvable from this package/i);
+      expect(thrown.message).toMatch(/does not support at all/i);
+    });
+
+    it('does not construct a tracer, tracker, or attach any methods before throwing', () => {
+      const unwrappable = createUnwrappableMcpServerLike();
+
+      expect(() => instrumentMcpServer(unwrappable, { serviceName: 'svc' })).toThrow();
+
+      expect(unwrappable.getThrashSummary).toBeUndefined();
+      expect(unwrappable.getObservationState).toBeUndefined();
+      expect(unwrappable.shutdown).toBeUndefined();
+    });
+
+    it('the plain non-Server, non-McpServer rejection (detectServerKind returns null) is unaffected', () => {
+      // Regression check: {} matches neither the low-level Server branch
+      // nor the McpServer duck-type shape at all (no `.server` property),
+      // so it must still get the generic UNSUPPORTED_INPUT_ERROR, not the
+      // more specific unwrappable-McpServer message above.
+      expect(() => instrumentMcpServer({}, { serviceName: 'svc' })).toThrow(/expects either a low-level Server/i);
+      expect(() => instrumentMcpServer({}, { serviceName: 'svc' })).not.toThrow(
+        /not a recognized @modelcontextprotocol\/sdk Server instance/i,
+      );
+    });
+
+    it('the instrument-first throw still fires before the unwrappable check would matter, and is unchanged', () => {
+      // Confirms ADR 002's existing throw (a real Server with a handler
+      // already registered) still behaves exactly as before this change —
+      // this path never reaches the new unwrappable branch at all, since
+      // a real low-level Server always satisfies `instanceof Server`
+      // directly (first branch of detectServerKind).
+      const server = createServer();
+      server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [] }));
+
+      expect(() => instrumentMcpServer(server, { serviceName: 'svc' })).toThrow(/must be called BEFORE registering/i);
     });
   });
 });

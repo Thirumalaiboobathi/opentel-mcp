@@ -13,6 +13,8 @@ import type {
   ToolOutcomeCounts,
   ObservationIntegrity,
   ObservationState,
+  DuckTypedServer,
+  DuckTypedMcpServer,
 } from '../src/index.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 
@@ -371,3 +373,36 @@ expectTypeOf<ObservationState['toolOutcome']>().toEqualTypeOf<ToolOutcomeCounts>
 // pattern as the existing getThrashSummary assertion above.
 const instrumentedForObservation = instrumentMcpServer(someServer);
 expectTypeOf(instrumentedForObservation.getObservationState).toEqualTypeOf<(() => ObservationState) | undefined>();
+
+// ADR 015 Phase 2/4: instrumentMcpServer() must accept v2-shaped objects
+// too, WITHOUT this package (or this test file) ever importing
+// @modelcontextprotocol/server's actual types — it's an optional peer
+// dependency, and referencing its types directly from index.d.ts breaks
+// type-checking for every consumer who only has @modelcontextprotocol/sdk
+// installed (confirmed empirically during Phase 4, not assumed — see
+// DuckTypedServer's own docblock in index.d.ts). These two values are
+// PURELY STRUCTURAL — no import of @modelcontextprotocol/server anywhere
+// in this file — deliberately, to prove the DuckTypedServer/DuckTypedMcpServer
+// fallback types alone are sufficient, the same way a real v1/v2 object
+// would be at runtime.
+declare const v2LowLevelShaped: { setRequestHandler(method: string, handler: (...args: unknown[]) => unknown): void };
+expectTypeOf(v2LowLevelShaped).toMatchTypeOf<DuckTypedServer>();
+const v2LowLevelInstrumented = instrumentMcpServer(v2LowLevelShaped);
+expectTypeOf(v2LowLevelInstrumented.getThrashSummary).toEqualTypeOf<
+  ((options?: { topOffendersLimit?: number }) => ThrashSummary) | undefined
+>();
+
+declare const v2McpServerShaped: {
+  server: { setRequestHandler(method: string, handler: (...args: unknown[]) => unknown): void };
+  registerTool(name: string, config: unknown, handler: (...args: unknown[]) => unknown): void;
+};
+expectTypeOf(v2McpServerShaped).toMatchTypeOf<DuckTypedMcpServer>();
+const v2McpServerInstrumented = instrumentMcpServer(v2McpServerShaped);
+expectTypeOf(v2McpServerInstrumented.getObservationState).toEqualTypeOf<(() => ObservationState) | undefined>();
+
+// Negative check: an object with neither a low-level nor a high-level
+// shape must still be rejected — DuckTypedServer/DuckTypedMcpServer widen
+// what's accepted to cover v2, but must not widen all the way to
+// accepting arbitrary objects.
+// @ts-expect-error -- {} has neither setRequestHandler nor a .server property
+instrumentMcpServer({});

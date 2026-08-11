@@ -12,9 +12,10 @@
  * the structured object is gone (see ADR 009's Q2) — only ever the
  * rendered text remains.
  *
- * TWO rendering formats are parsed, because the SDK has changed this
- * rendering once already (confirmed empirically going from
- * @modelcontextprotocol/sdk@1.29.0 to 1.30.0 — see ADR 009's addendum):
+ * THREE rendering formats are parsed, because there are now two SDKs, and
+ * one of them has already changed its own rendering once (confirmed
+ * empirically going from @modelcontextprotocol/sdk@1.29.0 to 1.30.0 — see
+ * ADR 009's addendum):
  *
  *   1. JSON issues array — `JSON.stringify(error.issues, ..., 2)`, the
  *      whole-array-with-`path`-fields shape `getParseErrorMessage()` used
@@ -23,22 +24,39 @@
  *      guarantees they've upgraded, or ever rendered it through the SDK's
  *      helper at all).
  *   2. Rendered "`<message> at <dotPath>`" lines, one per issue, joined by
- *      `\n` — what `getParseErrorMessage()` produces as of SDK 1.30.0.
+ *      `\n` — what `getParseErrorMessage()` produces as of
+ *      @modelcontextprotocol/sdk 1.30.0.
  *      Root-level issues (empty `path`) render as just `<message>`, no
  *      " at " suffix at all.
+ *   3. Rendered "`<dotPath>: <message>`" issues, comma-joined onto ONE
+ *      line — what @modelcontextprotocol/server (v2, ADR 015 Phase 3)
+ *      renders, confirmed live against the real, installed package.
+ *      Traced to `formatIssue()`/`validateStandardSchema()` in v2's own
+ *      bundle: `` `${path.join('.')}: ${message}` ``, issues joined by
+ *      `", "`. Path comes FIRST here, unlike format 2 — and this format
+ *      comes from v2's generic Standard Schema (standardschema.dev)
+ *      `~standard.validate()` handling, not Zod-specific rendering the
+ *      way formats 1 and 2 both are, so it renders identically whether a
+ *      v2 tool author's schema is Zod, Valibot, ArkType, or any other
+ *      Standard-Schema-compliant library. See `extractV2Paths()` below.
  *
  * JSON is tried first (it's self-validating — a successful, Zod-issue-
  * shaped parse is strong evidence either way — see `parseZodIssuesArray`)
- * and unconditionally preferred when it confidently matches. The rendered
- * form is tried only as a fallback, and only within a message that already
- * confirms it's SDK-validation-shaped text (see `extractRenderedPaths`) —
- * unlike the JSON path, a bare "<x> at <y>" line is not self-validating,
- * so this format leans on the same INPUT/OUTPUT_VALIDATION marker
- * `classify/channel.js` already trusts (ADR 007) rather than pattern-
- * matching arbitrary text.
+ * and unconditionally preferred when it confidently matches. The two
+ * rendered forms are tried only as fallbacks, and only within text that
+ * already confirms it's SDK-validation-shaped (see `extractRenderedPaths`/
+ * `extractV2Paths`) — unlike the JSON path, a bare rendered line is not
+ * self-validating, so both formats lean on the same INPUT/OUTPUT_VALIDATION
+ * marker `classify/channel.js` already trusts (ADR 007) rather than
+ * pattern-matching arbitrary text. Format 2 and format 3 are mutually
+ * exclusive by construction (one separates issues with `\n` and orders
+ * `message at path`; the other separates with `, ` and orders
+ * `path: message`), confirmed empirically rather than assumed — see
+ * `extractV2Paths()`'s own docblock for why trying format 2 before format
+ * 3 is still safe even so.
  *
  * This is best-effort, string-parsing extraction. Pure, synchronous, no
- * OTel, never throws: any input that doesn't confidently look like either
+ * OTel, never throws: any input that doesn't confidently look like any
  * known rendering resolves to an empty array rather than a wrong or
  * partial guess.
  *
@@ -47,13 +65,18 @@
  * ADR 009's "Where would extraction belong" — so hashing it again would
  * be redundant, not more correct) and not re-exported from src/index.js.
  *
- * FRAGILITY, stated plainly: this is now coupled to TWO independent SDK
- * rendering formats instead of one. A third format in a future SDK
- * version breaks this again, exactly the way 1.30.0 broke the
- * JSON-only version — and the failure mode is silent: `[]`, not an
- * exception, not a warning. `test/fingerprint/classify.validation-paths.test.js`'s
- * SDK-version pin exists specifically so that a future SDK bump fails a
- * test loudly instead of only degrading data quality unnoticed.
+ * FRAGILITY, stated plainly: this is now coupled to THREE independent
+ * rendering conventions instead of one. A future format change in either
+ * SDK breaks this again, exactly the way 1.30.0 broke the JSON-only
+ * version — and the failure mode is silent: `[]`, not an exception, not a
+ * warning. `test/fingerprint/classify.validation-paths.test.js`'s
+ * SDK-version pins (one per SDK) exist specifically so that a future SDK
+ * bump fails a test loudly instead of only degrading data quality
+ * unnoticed. Format 3's genericity across schema libraries (Standard
+ * Schema, not Zod-specific) should make it materially more stable than
+ * formats 1/2 across FUTURE @modelcontextprotocol/server releases — but
+ * that is an expectation, not a guarantee, and the pin discipline treats
+ * it as such.
  */
 
 /**
@@ -243,6 +266,85 @@ function extractRenderedPaths(text) {
   return paths;
 }
 
+// The two full sentence shapes @modelcontextprotocol/server (v2) prefixes
+// its rendered issues list with -- confirmed live against the installed
+// package (mcp-DXXb3Vv3.mjs): "Input validation error: Invalid arguments
+// for tool <name>: <issues>" and "Output validation error: Invalid
+// structured content for tool <name>: <issues>". (A third "Output
+// validation error: Tool <name> has an output schema but no structured
+// content was provided" shape carries no per-field issues at all --
+// this regex simply won't match it, correctly yielding no paths, same as
+// any other message it doesn't recognize.)
+//
+// Anchored with `^` deliberately: this is what disambiguates v2's BARE
+// text from v1's WRAPPED text without needing to know which SDK produced
+// it. v1's own message uses the identical "Input validation error:
+// Invalid arguments for tool <name>: " wording (confirmed against the
+// installed @modelcontextprotocol/sdk source -- both SDKs share this
+// phrasing), but v1's disguised/thrown text is always prefixed with
+// McpError's own "MCP error {code}: " wrapper first (see
+// classify/channel.js's MCP_ERROR_WRAPPER_RE), so it never starts with
+// "Input validation error: " at position 0 -- only genuine v2 text (or a
+// v1 message somehow already stripped of its wrapper before reaching
+// here, which extractRenderedPaths() above would have to have failed to
+// parse first; see extractValidationPaths()'s try-order) does.
+const V2_ISSUES_PREFIX_RE =
+  /^(?:Input validation error: Invalid arguments for tool [^:]+|Output validation error: Invalid structured content for tool [^:]+): /;
+
+// A path as v2's formatIssue() renders it: `issue.path.map(...).join('.')`
+// -- always dot-joined, confirmed live, unlike format 2's bracket-index
+// convention (`items[3]`). The `\[\d+\]` alternative is kept anyway, for
+// the same reason RENDERED_DOT_PATH_RE keeps its own: defensive tolerance
+// for a future rendering change, not because v2 emits it today -- paired
+// with normalizeRenderedDotPath() below on the (currently unreachable)
+// chance it ever does. Only matches when immediately preceded by the
+// start of the (already prefix-stripped) issues text or by ", " -- the
+// separator formatIssue()'s caller joins issues with -- so a path-shaped
+// token appearing INSIDE a message's own prose (never preceded by ", ")
+// is not mistaken for the start of a new issue.
+const V2_ISSUE_START_RE = /(?:^|, )([\w$]+(?:\.[\w$]+|\[\d+\])*): /g;
+
+/**
+ * Parses @modelcontextprotocol/server (v2)'s rendered `"<path>:
+ * <message>"` format: one issue per pair, comma-joined onto a single
+ * line, generated by v2's own `formatIssue()`/`validateStandardSchema()`
+ * over the generic Standard Schema `~standard.validate()` interface — see
+ * this module's docblock for why that makes it schema-library-agnostic
+ * (Zod, Valibot, ArkType, ...), unlike formats 1/2's Zod-specific
+ * rendering.
+ *
+ * Gated on `V2_ISSUES_PREFIX_RE` first — both a confidence check (this
+ * really is v2's own rendered issues text, not arbitrary business-logic
+ * prose that happens to contain a colon) and, critically, what makes
+ * `V2_ISSUE_START_RE`'s `^` alternative line up with the FIRST real issue:
+ * without stripping the "Invalid arguments/structured content for tool
+ * <name>: " prefix first, `^` would anchor at the tool-name prefix instead,
+ * and the first issue (not preceded by ", ", since it's not preceded by
+ * any earlier issue) would be silently missed.
+ *
+ * Best-effort like extractRenderedPaths(): a root-level issue (`formatIssue()`
+ * renders it as just the bare message, no "path: " prefix at all)
+ * contributes no path, not a guessed one — same "omit, don't guess"
+ * behavior extractRenderedPaths() already documents for its own
+ * root-level case, and for the same reason: a root-level issue is real,
+ * confirmed information (there is no field to blame), not a parsing
+ * failure to work around.
+ *
+ * @param {string} text
+ * @returns {readonly string[]}
+ */
+function extractV2Paths(text) {
+  const prefixMatch = V2_ISSUES_PREFIX_RE.exec(text);
+  if (!prefixMatch) return [];
+
+  const issuesText = text.slice(prefixMatch[0].length);
+  const paths = [];
+  for (const issueMatch of issuesText.matchAll(V2_ISSUE_START_RE)) {
+    paths.push(normalizeRenderedDotPath(issueMatch[1]));
+  }
+  return paths;
+}
+
 /**
  * Extracts which schema field(s) a validation failure named, from
  * whichever shape the caller has in hand: a CallToolResult with
@@ -251,13 +353,17 @@ function extractRenderedPaths(text) {
  * docblock), or an error-like object with a string `.message`.
  *
  * Tries the JSON issues array first (SDK <=1.29.0, and any low-level
- * `Server` author who throws a raw, unrendered `ZodError`); falls back to
- * the SDK 1.30.0+ rendered "<message> at <path>" format only when no
- * confident JSON match was found. See this module's docblock for why both
- * exist and the fragility of depending on either.
+ * `Server` author who throws a raw, unrendered `ZodError`); then the SDK
+ * 1.30.0+ rendered "<message> at <path>" format; then
+ * @modelcontextprotocol/server (v2)'s rendered "<path>: <message>" format
+ * (ADR 015 Phase 3) — each only when no confident match was found by the
+ * one(s) before it. See this module's docblock for why all three exist,
+ * why trying them in this order is safe (formats 2 and 3 are mutually
+ * exclusive by construction), and the fragility of depending on any of
+ * them.
  *
  * Never throws, never guesses: returns `[]` — not a partial or
- * best-guess result — whenever neither format confidently matches.
+ * best-guess result — whenever no format confidently matches.
  *
  * @param {unknown} failure
  * @returns {readonly string[]} One dot-joined path per failing issue
@@ -276,7 +382,10 @@ export function extractValidationPaths(failure) {
       if (jsonPaths !== null) return jsonPaths;
     }
 
-    return extractRenderedPaths(text);
+    const renderedPaths = extractRenderedPaths(text);
+    if (renderedPaths.length > 0) return renderedPaths;
+
+    return extractV2Paths(text);
   } catch {
     return [];
   }

@@ -435,6 +435,56 @@ scoped further here.
 
 The body below is kept as the original report for context.
 
+### Body
+
+Agent Thrash Detection, Cost & Token Attribution's budget tracking, Tool
+schema drift detection, and the Two-axis observation contract's
+`toolOutcome` counter all keep in-memory state across tool calls — and all
+four are constructed as local variables inside `instrumentMcpServer()`'s
+own function body, freshly, on every single call:
+
+- `budgetTracker` — `src/instrument.js:194`
+- `thrashDetector` — `src/instrument.js:200`
+- `toolOutcomeCounter` — `src/instrument.js:245`
+- `schemaDriftDetector` — `src/instrument.js:275`
+
+Under a "stateless" Streamable HTTP deployment — a fresh `Server`
+constructed, and re-instrumented, on every incoming POST — every one of
+these four trackers is discarded and rebuilt from empty before it ever
+sees a second data point. Nothing accumulates, no threshold is ever
+crossed, and nothing warns that this is happening. The existing
+`kInstrumented` idempotency guard doesn't help: it only prevents
+re-instrumenting the *same* object twice, and this deployment shape hands
+`instrumentMcpServer()` a genuinely different, freshly-constructed object
+on every request.
+
+Reproduced directly:
+`test/integration/thrash-stateless-http-lifecycle.test.js`
+(`describe.skip` — a confirmed, unfixed gap kept as a living reproduction,
+not a working fix). It drives 5 identical-fingerprint tool failures across
+5 separate `instrumentMcpServer()` calls and confirms
+`mcp.tool.loop.detected` never fires, even past the default `threshold:
+3`, purely because of this lifecycle mismatch — not because the detection
+logic itself is wrong.
+
+**This was already documented once, too narrowly.** ADR 010
+(`docs/adr/010-schema-drift.md`) accepted the identical root cause as a
+schema-drift-specific limitation without noticing `thrashDetector` and
+`budgetTracker` already shared the same construction pattern, or that
+`toolOutcomeCounter` (v0.8.0) would ship afterward with a docblock
+claiming "process-lifetime" — an assumption this gap shows is false under
+this topology.
+
+Full investigation, why tracer/meter identity isn't affected (and is what
+makes the bug observable via the metric at all), and a proposed fix —
+a host-supplied `instanceKey` resolved through an internal, bounded
+registry, argued against a module-level store and against exporting the
+trackers as injectable public objects: ADR 012
+(`docs/adr/012-tracker-lifecycle-and-shared-state.md`). Not yet
+implemented; see that ADR's "Consequences" section for the recommended
+release sequencing (a documentation-only caveat first, the
+`instanceKey` fix as a later minor release).
+
 ---
 
 ## 7. `instrumentMcpServer()` silently instruments nothing when passed an MCP v2 server
@@ -446,6 +496,29 @@ independently of whether v2 support ever ships.
 **Found by:** internal self-review, flagged during the ADR 015 Phase 0
 investigation and confirmed live in a follow-up session — not a
 code-reading hypothesis.
+
+**Status update (v0.10.0): FIXED.** `detectServerKind()` now requires
+`.server instanceof <Server>` for a REAL, resolved SDK class (either
+`@modelcontextprotocol/sdk` or, once Phase 2 landed, `@modelcontextprotocol/server`)
+before accepting a McpServer-shaped object — no longer just a duck-typed
+`.server.setRequestHandler` presence check. An object that duck-types the
+shape but matches neither installed SDK's `Server` class now throws a
+specific, actionable error (`UNWRAPPABLE_MCPSERVER_ERROR`, naming what was
+detected and the plausible causes) instead of silently instrumenting
+nothing. Confirmed live, the same way the original bug was found: a real
+`@modelcontextprotocol/server@2.0.0` `McpServer`, passed to the *fixed*
+`instrumentMcpServer()`, now either (a) gets properly wrapped end to end
+(once Phase 2's real v2 detection/wrapping also landed — same v0.10.0
+release) or (b) throws immediately if only Phase 1's hardening were
+deployed without Phase 2. Neither path silently succeeds while doing
+nothing. Regression-tested: `test/instrument.test.js`'s "detectServerKind
+hardening" describe block (a v1 McpServer still instruments unchanged; a
+McpServer-shaped-but-unwrappable object throws with a message naming both
+supported SDKs and all three plausible causes) and, for the full v2 case,
+`test/instrument.v2.test.js` (a real v2 `McpServer`/`Server` produces
+correct spans end to end). No escape hatch was added — see ADR 015's
+Update section and `detectServerKind()`'s own docblock
+(`src/instrument.js`) for the full argument against one.
 
 ### Body
 
@@ -554,6 +627,27 @@ afterthought added once someone reports the silent gap.
 **Found by:** internal self-review, ADR 015 Phase 0 investigation — not an
 external report
 
+**Status update (v0.10.0): NOT fixed — still stands, and is now a LIVE gap
+rather than a forward-looking one.** ADR 015 Phases 1–3 shipped real MCP
+v2 support (`@modelcontextprotocol/server` is now a recognized, supported
+optional peer — closing entry 7 above) without touching this heuristic at
+all. Confirmed directly against the current source, not assumed:
+`isSingleConnectionTransport()` (`src/instrument.js`) is byte-identical to
+the implementation this entry was originally written against —
+`Boolean(transport) && !('sessionId' in transport)`, no v2-awareness added.
+This was a deliberate scoping choice, not an oversight: this round of work
+(the four phases making up v0.10.0) explicitly carved this specific fix
+out as follow-up, grouped instead with entry 6's fallback-session-id gap
+under what ADR 015's own phased rollout plan calls "Phase 3 — session/
+thrash correctness," neither of which shipped in v0.10.0. **Practical
+effect: this entry's bug is exactly as reachable as described below, for
+anyone instrumenting a v2 server via `createMcpHandler` today** — the
+"Scope: not currently reachable" note further down (written when v2
+wasn't supported at all yet) is now inaccurate and superseded by this
+update; the workaround described below remains the only mitigation. See
+the README's "Known limitations" (Agent Thrash Detection section) for the
+consumer-facing version of this same status.
+
 ### Body
 
 **This entry describes behavior downstream of entry 7 above.** Entry 7
@@ -658,53 +752,3 @@ not help here — it only adds a *second* way to reach the fallback path
 away the auto-detected one this entry is about, and no configuration
 option exists today to disable transport auto-detection on its own while
 leaving real-session-id-based detection intact.
-
-### Body
-
-Agent Thrash Detection, Cost & Token Attribution's budget tracking, Tool
-schema drift detection, and the Two-axis observation contract's
-`toolOutcome` counter all keep in-memory state across tool calls — and all
-four are constructed as local variables inside `instrumentMcpServer()`'s
-own function body, freshly, on every single call:
-
-- `budgetTracker` — `src/instrument.js:194`
-- `thrashDetector` — `src/instrument.js:200`
-- `toolOutcomeCounter` — `src/instrument.js:245`
-- `schemaDriftDetector` — `src/instrument.js:275`
-
-Under a "stateless" Streamable HTTP deployment — a fresh `Server`
-constructed, and re-instrumented, on every incoming POST — every one of
-these four trackers is discarded and rebuilt from empty before it ever
-sees a second data point. Nothing accumulates, no threshold is ever
-crossed, and nothing warns that this is happening. The existing
-`kInstrumented` idempotency guard doesn't help: it only prevents
-re-instrumenting the *same* object twice, and this deployment shape hands
-`instrumentMcpServer()` a genuinely different, freshly-constructed object
-on every request.
-
-Reproduced directly:
-`test/integration/thrash-stateless-http-lifecycle.test.js`
-(`describe.skip` — a confirmed, unfixed gap kept as a living reproduction,
-not a working fix). It drives 5 identical-fingerprint tool failures across
-5 separate `instrumentMcpServer()` calls and confirms
-`mcp.tool.loop.detected` never fires, even past the default `threshold:
-3`, purely because of this lifecycle mismatch — not because the detection
-logic itself is wrong.
-
-**This was already documented once, too narrowly.** ADR 010
-(`docs/adr/010-schema-drift.md`) accepted the identical root cause as a
-schema-drift-specific limitation without noticing `thrashDetector` and
-`budgetTracker` already shared the same construction pattern, or that
-`toolOutcomeCounter` (v0.8.0) would ship afterward with a docblock
-claiming "process-lifetime" — an assumption this gap shows is false under
-this topology.
-
-Full investigation, why tracer/meter identity isn't affected (and is what
-makes the bug observable via the metric at all), and a proposed fix —
-a host-supplied `instanceKey` resolved through an internal, bounded
-registry, argued against a module-level store and against exporting the
-trackers as injectable public objects: ADR 012
-(`docs/adr/012-tracker-lifecycle-and-shared-state.md`). Not yet
-implemented; see that ADR's "Consequences" section for the recommended
-release sequencing (a documentation-only caveat first, the
-`instanceKey` fix as a later minor release).

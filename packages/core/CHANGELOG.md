@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.10.0
+
+**⚠️ Behavior change, unrelated to the feature below — read this first.**
+`instrumentMcpServer()` now throws for a server object it cannot
+confidently wrap, instead of silently instrumenting nothing.
+`detectServerKind()` (`src/instrument.js`) previously accepted any
+`McpServer`-shaped object whose `.server` merely *had* a
+`setRequestHandler` method — it now additionally requires `.server
+instanceof <Server>` for a real, recognized SDK class. An object that
+satisfies the outer shape but fails that check now throws a new,
+specific error (`UNWRAPPABLE_MCPSERVER_ERROR` — names what was detected
+and the plausible causes: a duplicate/mismatched SDK install, an SDK not
+resolvable from this package's own location, or an unsupported SDK) at
+`instrumentMcpServer()` call time, rather than succeeding and producing
+zero telemetry. This closes a confirmed gap (`docs/known-gaps.md` entry
+7, now marked fixed): an `@modelcontextprotocol/server` (MCP v2) object
+passed to a pre-0.10.0 `instrumentMcpServer()` satisfied the old, looser
+check and appeared to instrument successfully — `getThrashSummary`/
+`getObservationState` attached, no error — while producing zero spans,
+zero metrics, and zero fingerprinting for every tool call. No escape
+hatch was added; see ADR 015 (`docs/adr/015-mcp-v2-support.md`) for the
+full argument against one. **If you're seeing this new error on upgrade**
+and you believe your object genuinely is a real `Server`/`McpServer`
+instance, check for a duplicate/mismatched install of whichever SDK it
+came from (`npm dedupe`, or check for multiple installed copies) — a real
+v1 or v2 `Server`/`McpServer` from a single, consistently-resolved SDK
+install is unaffected by this change.
+
+### Added — `@modelcontextprotocol/server` (MCP v2, protocol revision 2026-07-28) support
+
+Both the original `@modelcontextprotocol/sdk` ("v1") and the new
+`@modelcontextprotocol/server` ("v2") now work with `instrumentMcpServer()`
+— two separate, OPTIONAL peer dependencies (install whichever one(s) you
+actually use; `package.json`'s `peerDependenciesMeta` marks both
+`optional: true`, verified against real, clean external installs with
+only one, the other, or neither installed — not just `package.json`
+syntax). Same `Server`/`McpServer` API shapes as v1; detection and
+wrapping happen automatically, resolved once per `instrumentMcpServer()`
+call by which SDK the object actually came from. Full design and
+Phase-by-phase implementation notes: ADR 015
+(`docs/adr/015-mcp-v2-support.md`).
+
+What works the same as v1: spans, standard attributes (including
+`jsonrpc.request.id`, now read from v2's `ctx.mcpReq.id`), deep failure
+fingerprinting, and `mcp.failure.channel`/`mcp.failure.validation_paths`
+classification (`channel.js`/`validation-paths.js` both gained a
+v2-specific code path — the "MCP error N:" wrapper v1 disguises errors
+with doesn't exist in v2, and v2's rendered validation-issue text uses a
+third, distinct format from either of v1's two).
+
+**v2's own `createMcpHandler`/`serveStdio` construct a fresh `Server`/
+`McpServer` per request by default (a factory function you provide), not
+once at process start.** `instrumentMcpServer()` needs to run *inside*
+that factory, on every invocation — see the README's new "MCP v2 support"
+section for a worked example. `instanceKey` (v0.9.0) is the existing
+mechanism for sharing tracker state across those repeated calls; nothing
+new was added for this, since ADR 012's original design already covers
+this exact deployment shape, v2 just makes it the default instead of an
+edge case.
+
+**Two gaps not closed this release, both tracked in `docs/known-gaps.md`
+with a "Status update (v0.10.0)" note:** Agent Thrash Detection's fallback
+session id still doesn't survive v2's per-request factory pattern even
+with `instanceKey` set (entry 6 — real session ids work fine either way),
+and `isSingleConnectionTransport()`'s transport-detection heuristic still
+misclassifies the transport `createMcpHandler` builds internally (entry
+8, live as of this release, not merely forward-looking). Both were
+explicitly scoped out of this round, not overlooked; workaround for
+either: `thrashDetection: { enabled: false }`.
+
 ## 0.9.0
 
 **⚠️ Fixed, with a fingerprint behavior change — read this before the

@@ -1,6 +1,34 @@
 import { describe, it, expect } from 'vitest';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
+import { McpServer as McpServerV2, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
+import { z } from 'zod';
 import { classifyFailureChannel } from '../../src/fingerprint/classify/channel.js';
+
+/** Registers a single v2 tool with the given input/output schemas on a fresh v2 McpServer. */
+function createV2ServerWithTool({ inputSchema, outputSchema } = {}) {
+  const mcpServer = new McpServerV2({ name: 'test-server', version: '0.0.0' });
+  mcpServer.registerTool('my-tool', { inputSchema, outputSchema }, async () => ({
+    content: [{ type: 'text', text: 'ok' }],
+  }));
+  return mcpServer;
+}
+
+/** Invokes 'my-tool' with the given arguments on a real v2 server, bypassing the need for a live transport. */
+function callV2Tool(mcpServer, args, toolName = 'my-tool') {
+  const handler = mcpServer.server._requestHandlers.get('tools/call');
+  const ctx = {
+    sessionId: undefined,
+    mcpReq: {
+      id: 1,
+      method: 'tools/call',
+      signal: new AbortController().signal,
+      requestState: () => undefined,
+      send: async () => {},
+      notify: async () => {},
+    },
+  };
+  return handler({ method: 'tools/call', params: { name: toolName, arguments: args } }, ctx);
+}
 
 describe('classifyFailureChannel — execution channel', () => {
   it('classifies isError: true CallToolResult as execution', () => {
@@ -94,6 +122,120 @@ describe('classifyFailureChannel — disguised protocol failure recovery (McpSer
       expect(() => classifyFailureChannel(hostile)).not.toThrow();
       expect(classifyFailureChannel(hostile)).toBe('unknown');
     });
+  });
+});
+
+// ADR 015 Phase 3: @modelcontextprotocol/server (v2) disguises differently
+// from v1 -- no "MCP error N: " wrapper at all, and only input/output
+// validation failures are disguised (not-found/disabled throw as real,
+// undisguised ProtocolErrors instead). See channel.js's
+// recoverV2DisguisedValidationFailure() docblock for the full mechanism.
+describe('classifyFailureChannel — v2 (@modelcontextprotocol/server) disguised validation-failure recovery', () => {
+  it('recovers protocol.input from a real v2 disguised input-validation failure', async () => {
+    const server = createV2ServerWithTool({ inputSchema: z.object({ n: z.number() }) });
+    const result = await callV2Tool(server, { n: 'not-a-number' });
+
+    expect(result.isError).toBe(true);
+    expect(classifyFailureChannel(result)).toBe('protocol.input');
+  });
+
+  it('recovers protocol.output from a real v2 disguised output-validation failure (missing structured content)', async () => {
+    const server = createV2ServerWithTool({ outputSchema: z.object({ v: z.string() }) });
+    const result = await callV2Tool(server, {});
+
+    expect(result.isError).toBe(true);
+    expect(classifyFailureChannel(result)).toBe('protocol.output');
+  });
+
+  it('a real v2 not-found failure throws (is not disguised at all) — the disguise-recovery path is never reached for it', async () => {
+    const server = createV2ServerWithTool({});
+    await expect(callV2Tool(server, {}, 'nonexistent-tool')).rejects.toBeInstanceOf(ProtocolError);
+
+    // Confirms the thrown error still classifies correctly via the OTHER
+    // top-level branch of classifyFailureChannel() (real .code/.message,
+    // no wrapper involved at all) -- see the next describe block below.
+    try {
+      await callV2Tool(server, {}, 'nonexistent-tool');
+    } catch (err) {
+      expect(classifyFailureChannel(err)).toBe('protocol.not_found');
+    }
+  });
+
+  describe('marker-only recovery, no wrapper: defensive degradation', () => {
+    it('recovers protocol.input from bare (unwrapped) marker text, with no numeric code anywhere', () => {
+      const result = { isError: true, content: [{ type: 'text', text: 'Input validation error: Invalid arguments for tool foo: n: Invalid input' }] };
+      expect(classifyFailureChannel(result)).toBe('protocol.input');
+    });
+
+    it('recovers protocol.output from bare (unwrapped) marker text', () => {
+      const result = {
+        isError: true,
+        content: [{ type: 'text', text: 'Output validation error: Tool foo has an output schema but no structured content was provided' }],
+      };
+      expect(classifyFailureChannel(result)).toBe('protocol.output');
+    });
+
+    it('does NOT recover protocol.not_found/disabled from bare "not found"/"disabled" text — v2 never disguises those, so there is no branch for it', () => {
+      // Unlike v1's recoverDisguisedProtocolFailure(), which does recognize
+      // disguised not-found/disabled text, the v2 marker-only recovery has
+      // no such branch at all (ADR 015 Finding 4: v2 never produces this
+      // shape). Bare "not found"/"disabled" prose with no validation
+      // marker at all falls through to 'execution' -- correctly, since a
+      // genuine v2 not-found failure would have thrown, never reaching
+      // isError:true in the first place (see the real-server test above).
+      expect(classifyFailureChannel({ isError: true, content: [{ type: 'text', text: 'Tool foo not found' }] })).toBe('execution');
+      expect(classifyFailureChannel({ isError: true, content: [{ type: 'text', text: 'Tool foo disabled' }] })).toBe('execution');
+    });
+
+    it('degrades to execution for ordinary business-logic text with no marker at all', () => {
+      const result = { isError: true, content: [{ type: 'text', text: 'upstream service unavailable' }] };
+      expect(classifyFailureChannel(result)).toBe('execution');
+    });
+  });
+
+  describe('ordering: v1-wrapped text is recovered by the v1 path, never falls through to the v2 marker-only path incorrectly', () => {
+    it('a v1-wrapped input-validation message still recovers via the WRAPPED path (code-derived), not accidentally re-recovered by the marker-only path', () => {
+      // Both paths would agree on the *channel* here (protocol.input
+      // either way, since INPUT_VALIDATION_MARKER is a substring of the
+      // wrapped text too) -- this test exists to document that the v1
+      // path runs first and short-circuits, per recoverV2DisguisedValidationFailure()'s
+      // own docblock, not to prove a different answer would result if it
+      // didn't (there wouldn't be one, for this specific case).
+      const result = {
+        isError: true,
+        content: [{ type: 'text', text: 'MCP error -32602: Input validation error: Invalid arguments for tool foo: x' }],
+      };
+      expect(classifyFailureChannel(result)).toBe('protocol.input');
+    });
+
+    it('a v1-wrapped not-found message recovers via the WRAPPED path only — the v2 marker-only path has no not-found branch to (correctly or incorrectly) contribute here', () => {
+      const result = { isError: true, content: [{ type: 'text', text: 'MCP error -32602: Tool foo not found' }] };
+      expect(classifyFailureChannel(result)).toBe('protocol.not_found');
+    });
+  });
+});
+
+describe('classifyFailureChannel — v2 (@modelcontextprotocol/server) thrown ProtocolError: .code/.message read directly, no string-parsing needed', () => {
+  it('classifies a real thrown v2 ProtocolError (-32602, not-found wording) as protocol.not_found', () => {
+    const err = new ProtocolError(ProtocolErrorCode.InvalidParams, 'Tool foo not found');
+    expect(err.code).toBe(-32602);
+    expect(err.message).toBe('Tool foo not found'); // raw, no "MCP error N: " wrapper at all
+    expect(classifyFailureChannel(err)).toBe('protocol.not_found');
+  });
+
+  it('classifies a real thrown v2 ProtocolError (-32601, MethodNotFound) as protocol.not_found', () => {
+    const err = new ProtocolError(ProtocolErrorCode.MethodNotFound, 'Method not found');
+    expect(classifyFailureChannel(err)).toBe('protocol.not_found');
+  });
+
+  it('classifies a real thrown v2 ProtocolError (-32602, input validation wording) as protocol.input', () => {
+    const err = new ProtocolError(ProtocolErrorCode.InvalidParams, 'Input validation error: Invalid arguments for tool foo: x');
+    expect(classifyFailureChannel(err)).toBe('protocol.input');
+  });
+
+  it('classifies a real thrown v2 ProtocolError (a non-protocol code, e.g. InternalError) as protocol.other', () => {
+    const err = new ProtocolError(ProtocolErrorCode.InternalError, 'Internal error');
+    expect(classifyFailureChannel(err)).toBe('protocol.other');
   });
 });
 

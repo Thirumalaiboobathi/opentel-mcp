@@ -1,14 +1,27 @@
 # ADR 015: MCP v2 (stateless spec) support — design
 
-**Status:** Proposed — design only, no implementation. This is the Phase 0
-investigation for v0.10.0+, written against `@modelcontextprotocol/server@2.0.0`
-and `@modelcontextprotocol/client@2.0.0` (protocol revision 2026-07-28)
+**Status:** Implemented in v0.10.0 — Findings 1, 2, 4, 5, 6, 7 and the
+Update section's hardening are shipped; Findings 3 and 8 (the session/
+thrash-correctness work the Phased rollout plan below calls "Phase 3")
+were deliberately deferred, not forgotten — see the "Update (2026-08-11,
+continued): implementation status" section at the end of this document for
+the full accounting, including three places the shipped implementation
+diverged from what this Decision originally proposed (one of them found
+by `npm run verify:tarball` itself, after the other two fixes were
+already in place).
+
+This document was originally written as the Phase 0 investigation for
+v0.10.0, against `@modelcontextprotocol/server@2.0.0` and
+`@modelcontextprotocol/client@2.0.0` (protocol revision 2026-07-28)
 installed in a scratch directory, never added as a dependency of
 `packages/core`. Findings below are marked **[verified live]** where they
 were confirmed by constructing real instances and running real code against
 the installed v2 package, not just reading `.d.mts` type declarations —
 that distinction matters for a couple of the findings below, which read one
-way from the types and a different way once actually run.
+way from the types and a different way once actually run. The Decision and
+Findings sections are left as originally written (a historical record of
+the design as proposed); the implementation-status update at the end is
+where this ADR's outcome is recorded.
 
 ## Context
 
@@ -596,3 +609,200 @@ Full write-up, including the exact reproduction steps and why this is
 worse than every other tracked gap in this package: `docs/known-gaps.md`
 entry 7. The README's "Compatibility" section now states this prominently
 rather than leaving it to be discovered.
+
+## Update (2026-08-11, continued): implementation status
+
+Implemented across four sequential rounds, each reviewed and merged before
+the next started, all shipping together as v0.10.0. The round numbering
+below does **not** match this document's own "Phased rollout plan"
+section's numbering one-to-one — noted explicitly where it diverges, so a
+future reader comparing the two doesn't assume a mismatch is an error.
+
+**Round 1 — `detectServerKind()` hardening only, no v2 support yet.**
+Exactly the Update section above's point 2 (loud failure for unwrappable
+server kinds), deliberately shipped *before* any real v2 detection
+existed, so the safety net landed independent of and ahead of the feature
+it protects. `detectServerKind()` now requires `.server instanceof
+<Server>` for the McpServer branch (previously just a duck-typed
+`.server.setRequestHandler` presence check); an object that duck-types the
+shape but matches no recognized `Server` class throws
+`UNWRAPPABLE_MCPSERVER_ERROR` — naming what was detected and the
+plausible causes — instead of silently instrumenting nothing. No escape
+hatch was added; argued against explicitly (an escape hatch that lets a
+caller override the check is, by construction, exactly what would let a
+v2 object slip through silently again — the one thing this round exists
+to prevent). Closes `docs/known-gaps.md` entry 7 (now marked FIXED there).
+This is this Decision's Update section's point 2, done as its own
+reviewable slice rather than bundled with the wrapping work in point 1 —
+a scope split this document's original "Phased rollout plan" didn't
+anticipate (it framed both points as one Phase 1).
+
+**Round 2 — real v2 detection and wrapping** (this Decision's Finding 1,
+Finding 6, and the Update section's point 1; together with Round 1, the
+full scope this document's "Phased rollout plan" originally called "Phase
+1"). `detectServerKind()` extended (not weakened — Round 1's check still
+applies, now checked against both SDKs) to recognize v2's `Server`/
+`McpServer` alongside v1's, returning which SDK the object came from so
+`instrumentMcpServer()`'s `setRequestHandler` patch can dispatch on it:
+`schema === CallToolRequestSchema` for v1 (unchanged), `method ===
+'tools/call'` (a plain string, per Finding 1) for v2 — confirmed NOT
+importing `CallToolRequestSchema` from `@modelcontextprotocol/core/internal`,
+per Finding 1's explicit rejection of that path. `sessionId`/`requestId`
+extraction (Finding 3's correction, Finding 7) reads `ctx.sessionId`/
+`ctx.mcpReq.id` for v2, `extra.sessionId`/`extra.requestId` for v1, via one
+small shared helper — the only place `wrapToolCallHandler`/
+`wrapToolsListHandler` branch on which SDK produced the call at all,
+confirming Finding 6's prediction that the divergence would stay
+contained rather than requiring a second `wrapToolCallHandler`.
+`@modelcontextprotocol/server` added to `peerDependencies`, both SDKs
+marked `optional: true` in `peerDependenciesMeta` — confirmed against
+real, clean external installs (a packed tarball into three separate
+throwaway projects: v1-only, v2-only, neither), not just `package.json`
+syntax, per Finding 6's open question.
+
+**Divergence #1 — the lazy-SDK-detection mechanism.** Finding 6 left the
+exact lazy-import mechanism as an open question ("this ADR does not
+commit to a specific lazy-import mechanism"). The first implementation
+attempt used `createRequire()` + synchronous `require()`, reasoning that
+`instrumentMcpServer()`'s fully synchronous public contract ruled out
+async detection. **That was wrong, caught empirically, not by review:**
+`require()` resolves a package's `require` (CJS) condition, while a real
+ESM consumer's own `import` resolves the `import` (ESM) condition — two
+different files, two different classes. `input.server instanceof
+requiredCopy.Server` was `false` for every real McpServer a real consumer
+constructed, even though the same check against a statically-imported
+copy was `true`. 32 of 35 tests failed on the first run against this
+design, which is what surfaced it. **Fixed** by switching to top-level
+`await` + dynamic `import()` in `src/sdk/detect.js`: any module that
+imports it (transitively, up through `instrument.js` → `index.js`)
+automatically waits for its top-level await to settle before its own
+evaluation completes — ordinary ESM behavior, not something a caller
+opts into — so `instrumentMcpServer()` stays synchronous once defined,
+while detection uses genuine `import()` and therefore resolves to the
+exact module instance a real consumer's own `import` would get (confirmed
+directly: `staticImport.Server === dynamicImport.Server`). This package
+already has no CommonJS entry point (confirmed in Phase 0), so top-level
+await added no new consumer-facing constraint beyond what already
+existed.
+
+**Round 3 — `channel.js`/`validation-paths.js`** (this Decision's
+Findings 4 and 5; this document's "Phased rollout plan" called this
+"Phase 2"). `recoverV2DisguisedValidationFailure()` added to `channel.js`,
+tried after v1's wrapper-anchored recovery (order is load-bearing —
+v2's bare marker substring is *also* present inside v1's wrapped text, so
+the more specific, anchored v1 check has to run first) — no not-found/
+disabled branch, confirmed unreachable for v2's disguise shape.
+`extractV2Paths()` added to `validation-paths.js` as a third format
+branch; both existing branches kept unchanged, confirmed still needed (v1
+hasn't changed its own rendering). SDK-version pin added for
+`@modelcontextprotocol/server` (`2.0.0`), mirroring the existing v1 pin
+exactly. Every new branch confirmed to degrade to an empty/`'execution'`
+result on an unrecognized shape — never throws, never guesses, matching
+this Decision's stated discipline.
+
+**Divergence #2 (minor, a design elaboration more than a reversal) — the
+v2 path-extraction regex.** Finding 5 described the format
+(`"<path>: <message>"`, comma-joined) and asserted the extraction was
+feasible, but didn't work out that the format is genuinely ambiguous to
+split naively: both a path and a message can independently contain colons
+and commas. Solved with a `^`-anchored prefix strip (stripping the
+"Invalid arguments/structured content for tool `<name>`: " prefix so the
+issues list starts at position 0) plus a boundary regex that only
+recognizes a new issue at `", "` or start-of-string immediately followed
+by an identifier-shaped token and `": "` — verified against the exact
+confirmed-live Phase 0 example string before being written into the
+module, and confirmed not to cross-match v1's format 2 text (which uses
+`" at "` as its separator, never `": "`, so the two remain mutually
+exclusive in practice, not just by construction).
+
+**Round 4 — public API and docs** (this document's "Phased rollout plan"
+Phase 4, done last as originally planned). Two runtime-reachable-but-
+undeclared gaps found by auditing `src/index.d.ts` before touching it, per
+this package's established practice for public-API changes:
+
+- `instrumentMcpServer()`'s generic constraint (`T extends Server |
+  McpServer | DuckTypedMcpServer`) only covered v1's classes. **The
+  naive fix — adding `import('@modelcontextprotocol/server').Server` to
+  the constraint — was tested and rejected empirically**, the same
+  "verify against a real external project" discipline Round 2 used for
+  `peerDependenciesMeta`: referencing v2's types anywhere in the public
+  `.d.ts` surface breaks type-checking for every consumer who has only
+  `@modelcontextprotocol/sdk` installed — confirmed with a throwaway
+  external project, both for a bare reference to the function and for an
+  actual call with a real v1 `Server`. Fixed with a new, purely structural
+  `DuckTypedServer` type (the low-level counterpart of the existing
+  `DuckTypedMcpServer`) — no import of v2's classes at all, confirmed
+  empirically to accept real v1 and (structurally) v2-shaped objects
+  without `@modelcontextprotocol/server` being resolvable anywhere in the
+  type-checking project.
+- `DuckTypedMcpServer`'s own docblock, written before Round 1 existed,
+  claimed a dual-package-hazard McpServer instance "works fine at
+  runtime" — true when written, no longer true after Round 1's
+  `instanceof` hardening (a genuine dual-copy `.server` is now rejected at
+  runtime too, deliberately, per this Decision's "no escape hatch"
+  argument). Corrected in place rather than left stale, since the type's
+  own docblock is the place a future reader would look for exactly this
+  guarantee.
+
+**Divergence #3 — found by `npm run verify:tarball` itself, after the
+`DuckTypedServer` fix above, not anticipated by any review.** Adding
+`DuckTypedServer` and re-running the full verification suite (`npm test`,
+`npm run typecheck`, `npm run verify:tarball` — the exact sequence this
+document's own Round 4 work was supposed to end with) surfaced a second,
+symmetric instance of the *identical* class of bug the first fix (above)
+had just closed: `index.d.ts`'s TOP-LEVEL `import type { Server } from
+'@modelcontextprotocol/sdk/server/index.js'` / `import type { McpServer }
+from '@modelcontextprotocol/sdk/server/mcp.js'` — present in this file
+since long before this ADR, never previously a problem — broke
+`verify:tarball`'s packed-tarball check the moment it ran against a
+project with *neither* SDK installed. Root cause: those two imports were
+never conditional on anything; they had simply never been *tested*
+against a v1-less environment before, because until Round 2 of this same
+implementation marked `@modelcontextprotocol/sdk` `optional: true` in
+`peerDependenciesMeta`, npm's peer-dependency auto-install behavior
+transparently installed it for every consumer (including `verify-tarball.js`'s
+own throwaway project) — masking the exact bug class this ADR's `DuckTypedServer`
+fix had just addressed for v2. Making v1 optional too (a direct, necessary
+consequence of Finding 6's "both peers optional simultaneously" design,
+not an oversight) removed that safety net, and the pre-existing nominal
+v1 imports turned out to depend on it.
+
+**Fixed the same way as the v2 case, applied symmetrically:** removed
+both top-level `import type` statements entirely; `DuckTypedServer`/
+`DuckTypedMcpServer` are now the *only* description of either SDK's shape
+anywhere in `index.d.ts`, not a fallback alongside a nominal import for
+v1 specifically. Confirmed by `npm run verify:tarball` passing afterward
+— a real packed tarball, installed into a clean external project with
+neither SDK present, type-checking successfully under `--strict`. This is
+the strongest evidence in this entire implementation that the "verify
+against a real external install, not just package.json/type syntax"
+discipline this ADR keeps invoking (Finding 6, the `DuckTypedServer` fix
+above) is load-bearing and not ceremony: this specific bug was invisible
+to `npm run typecheck` (which only checks this repo's own tree, where
+both SDKs are always installed as devDependencies) and would have shipped
+undetected without `verify:tarball`'s external-project check specifically.
+
+README updated: a new "MCP v2 (`@modelcontextprotocol/server`) support"
+section (the factory-pattern example this Decision's Finding 2
+anticipated needing), and every place the README described v2 as
+unsupported or described entry 6/8's gaps as "forward-looking" corrected
+to reflect that v2 support has shipped and those two specific gaps remain
+open within it — including a substantial rewrite of the "MCP spec
+2026-07-28 removes session ids entirely" section, whose title and central
+claim were themselves inaccurate (`ctx.sessionId` is a real, optional v2
+field this library reads, not an absent one — see Finding 3, which this
+README section had drifted from).
+
+**Deliberately not done — Finding 3 and Finding 8, this document's
+"Phase 3" ("session/thrash correctness").** `isSingleConnectionTransport()`
+is confirmed byte-identical to its pre-v0.10.0 implementation; Finding 3's
+fallback-session-id-under-`instanceKey` gap is likewise untouched. Both
+remain open, tracked in `docs/known-gaps.md` entries 6 and 8 (both updated
+with a "Status update (v0.10.0)" note making the deferral explicit, not
+silent), and in the README's "Known limitations" and "MCP v2 support"
+sections. This was a deliberate scope cut for this release, not an
+oversight — v2 support (spans, attributes, fingerprinting, channel/
+validation-path classification) ships fully functional without it; only
+Agent Thrash Detection's fallback-session-id path and the transport
+auto-detection heuristic it depends on are affected, and both already have
+a documented workaround (`thrashDetection: { enabled: false }`).

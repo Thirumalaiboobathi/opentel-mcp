@@ -35,6 +35,20 @@
  * when it doesn't match that shape (i.e. it's a genuine, tool-authored
  * business-logic message).
  *
+ * ADR 015 Phase 3 (`docs/adr/015-mcp-v2-support.md`): a v2
+ * (`@modelcontextprotocol/server`) McpServer disguises failures
+ * differently, confirmed live against the real package — see
+ * recoverV2DisguisedValidationFailure() below for the details and why it
+ * needs neither the "MCP error N: " wrapper nor a numeric code at all.
+ * `classifyByCodeAndMessage()`/`classifyInvalidParams()` needed NO v2
+ * change: v2's `ProtocolError` exposes `.code` as a real, directly-
+ * readable property and `.message` as the raw, unwrapped text (confirmed
+ * live), so the genuine-JSON-RPC-error path at the bottom of
+ * `classifyFailureChannel()` — which already read `.code`/`.message`
+ * directly, never by parsing a code out of a string — works against v2
+ * unmodified. Only the isError:true disguise-recovery path needed a v2
+ * counterpart.
+ *
  * Named "channel", not "origin": `origin` already names a different field
  * on FingerprintInputs (`fingerprint/types.d.ts`), with a different,
  * longer-lived value set ('tool_error' | 'thrown' | 'transport') that has
@@ -177,18 +191,78 @@ function recoverDisguisedProtocolFailure(result) {
 }
 
 /**
+ * Recovers channel classification for a v2 (`@modelcontextprotocol/server`)
+ * disguised protocol failure. Structurally simpler than
+ * recoverDisguisedProtocolFailure() above, for two confirmed-live reasons
+ * (ADR 015 Finding 4):
+ *
+ *   1. There is no "MCP error N: " wrapper to unwrap at all — v2's
+ *      `ProtocolError` constructor sets `.message` to the raw text
+ *      directly, and that raw text is exactly what ends up in a disguised
+ *      `isError: true` result's `content[0].text` too. There is no code
+ *      embedded anywhere in that text to recover, so — unlike
+ *      `recoverDisguisedProtocolFailure()`, which exists specifically to
+ *      extract a code and hand it to `classifyByCodeAndMessage()` — this
+ *      function never needs `classifyByCodeAndMessage()`/`classifyInvalidParams()`
+ *      at all. It only ever needs to know whether one of the two
+ *      validation markers is present.
+ *   2. v2's own McpServer only disguises input/output validation failures
+ *      this way. Tool-not-found and tool-disabled now throw as real,
+ *      undisguised `ProtocolError`s instead (confirmed by directly
+ *      invoking a real v2 McpServer's captured `tools/call` handler: a
+ *      nonexistent-tool call threw, uncaught by McpServer's own try/catch;
+ *      a bad-argument call was caught and disguised). That condition
+ *      cannot occur in the disguised shape for v2 at all, so — unlike
+ *      `classifyInvalidParams()`, which still checks `NOT_FOUND_RE`/
+ *      `DISABLED_RE` because v1 genuinely can disguise those — this
+ *      function deliberately carries no not-found/disabled branch. Dead
+ *      code for a case that can't happen would be worse than no code at
+ *      all: a future reader would have no way to tell "unreachable, by
+ *      design" from "reachable, just never observed yet."
+ *
+ * The marker strings themselves (`INPUT_VALIDATION_MARKER` /
+ * `OUTPUT_VALIDATION_MARKER`, above) are confirmed byte-identical to v1's —
+ * v2 kept the exact same wording — so no new constants were needed here.
+ *
+ * Ordering note (see classifyFailureChannel() below): this is only ever
+ * tried AFTER recoverDisguisedProtocolFailure() has already returned
+ * `null`. That ordering is load-bearing, not incidental — a v1-disguised
+ * message's WRAPPED text (`"MCP error -32602: Input validation error: ..."`)
+ * still *contains* `INPUT_VALIDATION_MARKER` as a substring, so if this
+ * function ran first (or alone) it would also match v1 text — just less
+ * precisely, without recovering the wrapper's code. Trying the more
+ * specific, anchored v1 check first and falling through to this looser,
+ * unanchored one only on a miss is what keeps the two from stepping on
+ * each other, without needing to know in advance which SDK produced the
+ * failure.
+ *
+ * @param {Record<string, unknown>} result
+ * @returns {FailureChannel | null}
+ */
+function recoverV2DisguisedValidationFailure(result) {
+  const text = firstContentText(result);
+  if (text === undefined) return null;
+
+  if (text.includes(INPUT_VALIDATION_MARKER)) return 'protocol.input';
+  if (text.includes(OUTPUT_VALIDATION_MARKER)) return 'protocol.output';
+  return null;
+}
+
+/**
  * Determines which channel an MCP tools/call failure arrived on. Accepts
  * either shape a caller might have in hand:
  *
  *   - A CallToolResult-like object with `isError: true`. Its
- *     `content[0].text` is checked first for a disguised protocol failure
- *     (see recoverDisguisedProtocolFailure() and this module's docblock);
- *     if that doesn't match, this is the execution channel — a genuine
+ *     `content[0].text` is checked first for a v1-shaped disguised
+ *     protocol failure (see recoverDisguisedProtocolFailure() and this
+ *     module's docblock), then a v2-shaped one
+ *     (recoverV2DisguisedValidationFailure() — ADR 015 Phase 3); if
+ *     neither matches, this is the execution channel — a genuine
  *     business-logic tool failure. Any property other than `isError`/
  *     `content` (e.g. a stray top-level `code`) is irrelevant here: only
- *     the recovery step reads into the result for a protocol code, and it
- *     only ever does so via the message-wrapper convention, never a
- *     top-level `code` field a CallToolResult was never meant to carry.
+ *     the recovery steps read into the result for a protocol code/marker,
+ *     never a top-level `code` field a CallToolResult was never meant to
+ *     carry.
  *   - A JSON-RPC-error-like object (an McpError instance, or a plain
  *     `{ code, message }` shape read off the wire) — the protocol
  *     channel, sub-classified by `code` and, for -32602, by `message`.
@@ -208,7 +282,9 @@ export function classifyFailureChannel(failure) {
     }
 
     if (failure.isError === true) {
-      return recoverDisguisedProtocolFailure(failure) ?? 'execution';
+      // v1 tried first, deliberately — see recoverV2DisguisedValidationFailure()'s
+      // own docblock for why the order is load-bearing.
+      return recoverDisguisedProtocolFailure(failure) ?? recoverV2DisguisedValidationFailure(failure) ?? 'execution';
     }
 
     const code = failure.code;

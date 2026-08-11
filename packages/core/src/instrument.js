@@ -5,8 +5,7 @@
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { trace, diag, SpanStatusCode, SpanKind } from '@opentelemetry/api';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { getV1Sdk, getV2Sdk } from './sdk/detect.js';
 import { NodeTracerProvider, SimpleSpanProcessor, BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
@@ -158,35 +157,121 @@ function getOrCreateTracker(instanceKey, trackerSuffix, factory) {
 
 const UNSUPPORTED_INPUT_ERROR =
   'opentel-mcp: instrumentMcpServer() expects either a low-level Server ' +
-  'instance (from @modelcontextprotocol/sdk/server/index.js) or a ' +
-  'high-level McpServer instance (from @modelcontextprotocol/sdk/server/mcp.js).';
+  'instance or a high-level McpServer instance, from a supported MCP SDK: ' +
+  '@modelcontextprotocol/sdk (v1, protocol revisions through 2025-11-25) ' +
+  'or @modelcontextprotocol/server (v2, protocol revision 2026-07-28). ' +
+  'Neither SDK appears to be installed and resolvable from this package, ' +
+  'or the object passed does not come from either one — see ' +
+  'docs/adr/015-mcp-v2-support.md.';
+
+// ADR 015 Phase 2: the McpServer branch's duck-type check alone is not
+// sufficient to guarantee the object is actually wrappable — see
+// detectServerKind()'s docblock for the confirmed failure this closes (a
+// v2 McpServer duck-types identically to a v1 one, but before Phase 2,
+// this package's setRequestHandler patch never matched its dispatch, so
+// wrapping silently no-op'd — ADR 015 "Update 2026-08-11"). This message
+// is deliberately more specific than UNSUPPORTED_INPUT_ERROR above: it
+// names the shape that WAS recognized and the plausible reasons `.server`
+// still isn't trusted, rather than repeating the generic "expects Server
+// or McpServer" text for a case that already got further than that. Now
+// that both SDKs are supported (Phase 2), this branch only fires when
+// `.server` matches NEITHER installed SDK's Server class — a duplicate/
+// mismatched SDK install, a hoisting issue that makes an installed SDK
+// unresolvable from this package's own location, or a genuinely
+// unsupported third SDK.
+const UNWRAPPABLE_MCPSERVER_ERROR =
+  'opentel-mcp: instrumentMcpServer() detected an object shaped like a ' +
+  'high-level McpServer (it has .tool()/.registerTool() and a ' +
+  '.server.setRequestHandler() method), but its `.server` property is ' +
+  'not a recognized Server instance from either supported MCP SDK ' +
+  '(@modelcontextprotocol/sdk or @modelcontextprotocol/server), so it ' +
+  'cannot be confidently wrapped. This usually means one of: (1) a ' +
+  'duplicate or mismatched install of whichever SDK this server actually ' +
+  'came from — try `npm dedupe` or check for multiple installed ' +
+  'versions; (2) that SDK is installed, but not resolvable from this ' +
+  'package\'s own location (e.g. a monorepo/hoisting issue) — confirm it ' +
+  'is reachable via normal node_modules resolution from wherever ' +
+  'opentel-mcp itself is installed; or (3) an MCP SDK this package does ' +
+  'not support at all. See docs/adr/015-mcp-v2-support.md. Refusing to ' +
+  'instrument rather than risk producing no telemetry.';
 
 const INSTRUMENT_FIRST_ERROR =
   'opentel-mcp: instrumentMcpServer() must be called BEFORE registering ' +
   'tool handlers. Move instrumentMcpServer(server, options) to immediately ' +
-  'after `new Server(...)`, before any ' +
-  'server.setRequestHandler(CallToolRequestSchema, ...) calls (low-level ' +
-  'Server) or .tool()/.registerTool() calls (McpServer).';
+  'after `new Server(...)`, before any server.setRequestHandler(...) calls ' +
+  '(low-level Server, either SDK) or .tool()/.registerTool() calls ' +
+  '(McpServer, either SDK).';
 
 /**
- * Detects whether `input` is a low-level Server or a high-level McpServer,
- * without importing McpServer directly. Importing it would risk the same
+ * Detects whether `input` is a low-level Server, a high-level McpServer, or
+ * a McpServer-*shaped* object that this package cannot confidently wrap —
+ * from EITHER supported SDK, `@modelcontextprotocol/sdk` (v1) or
+ * `@modelcontextprotocol/server` (v2, ADR 015) — without importing
+ * McpServer directly from either. Importing it would risk the same
  * dual-package-hazard class of bug the hello-server example hit (two
- * independently-installed copies of @modelcontextprotocol/sdk producing
- * two distinct classes, so `instanceof` silently fails) — duck-typing
- * sidesteps that and stays tolerant of SDK versions that shuffle McpServer's
- * internals, since only its public, documented shape is checked: a `.server`
- * object that itself looks like a low-level Server (has a `setRequestHandler`
- * function), plus a `.tool` or `.registerTool` function on the outer object.
- * The low-level Server case still uses `instanceof` since Server is already
- * imported directly for other purposes (ADR 001).
+ * independently-installed copies of the same SDK producing two distinct
+ * classes, so `instanceof` silently fails) — duck-typing the *outer*
+ * object sidesteps that and stays tolerant of SDK versions that shuffle
+ * McpServer's internals, since only its public, documented shape is
+ * checked: a `.server` object, plus a `.tool` or `.registerTool` function.
+ *
+ * That duck-type check alone answers "does this look like a wrapper around
+ * *some* Server?" — not "is the thing it wraps actually a `Server` from a
+ * supported SDK, whose `setRequestHandler` this package's patch in
+ * `instrumentMcpServer()` can actually intercept?" Those are different
+ * questions, and conflating them was a confirmed bug before Phase 2 (ADR
+ * 015 "Update 2026-08-11", `docs/known-gaps.md` entry 7): a v2 `McpServer`
+ * satisfied the outer duck-type shape exactly but dispatched `tools/call`
+ * by a method-name *string*, never by reference-equality against the v1
+ * `CallToolRequestSchema` object the pre-Phase-2 patch compared against
+ * (ADR 001) — the patch installed without error, but its wrapping branch
+ * never fired, and every real tool call ran completely uninstrumented. No
+ * exception, no warning, a success return value: exactly the silent-no-op
+ * shape this package's own conventions treat as worse than a thrown error
+ * (see ADR 002's precedent below).
+ *
+ * The fix (ADR 015 Phase 1, extended by Phase 2): additionally require
+ * `input.server instanceof <Server>` for the McpServer branch, checked
+ * against EACH installed SDK's `Server` class in turn (`getV1Sdk()`/
+ * `getV2Sdk()`, `./sdk/detect.js` — `null` when that SDK isn't installed,
+ * skipping its check entirely rather than crashing) — reusing the exact
+ * `instanceof` check the low-level branch below already performs and
+ * already accepts the (small, and — no test or report has ever exercised
+ * it — purely theoretical) dual-package-hazard risk for, rather than
+ * tolerating a *laxer* standard for the wrapped `.server` than this file
+ * already applies to a bare `Server` passed directly. Phase 1 established
+ * this check for v1 only, deliberately rejecting v2 (no way to wrap it
+ * yet); Phase 2 does not weaken that rejection, it extends the same check
+ * to a second candidate class — an object whose `.server` matches neither
+ * installed SDK's `Server` still falls through to `unwrappable` exactly as
+ * before.
+ *
+ * A real v1 McpServer's `.server` is always `instanceof` v1's `Server`:
+ * v1's own `server/mcp.js` constructs it via `this.server = new
+ * Server(...)`, imported from the exact same `server/index.js` module
+ * `getV1Sdk()` resolves — confirmed by construction, not assumed. A real
+ * v2 McpServer's `.server` is, symmetrically, always `instanceof` v2's
+ * `Server` — also confirmed by construction (ADR 015). No escape hatch is
+ * offered for the case where this rejects a duck-type-matching object
+ * whose `.server` isn't `instanceof` either installed SDK's `Server` (see
+ * `instrumentMcpServer()`'s docblock and ADR 015's Update for the full
+ * argument): any bypass a caller could reach for is, by construction,
+ * exactly what would let an unsupported object slip through again,
+ * defeating this fix for the one caller least likely to know they're
+ * hitting it.
  *
  * @param {unknown} input
- * @returns {{ server: object, outer?: object } | null}
+ * @returns {{ server: object, outer?: object, kind: 'v1' | 'v2' } | { unwrappable: true, outer: object } | null}
  */
 function detectServerKind(input) {
-  if (input instanceof Server) {
-    return { server: input };
+  const v1 = getV1Sdk();
+  const v2 = getV2Sdk();
+
+  if (v1 && input instanceof v1.Server) {
+    return { server: input, kind: 'v1' };
+  }
+  if (v2 && input instanceof v2.Server) {
+    return { server: input, kind: 'v2' };
   }
   if (
     input &&
@@ -195,7 +280,13 @@ function detectServerKind(input) {
     typeof input.server.setRequestHandler === 'function' &&
     (typeof input.tool === 'function' || typeof input.registerTool === 'function')
   ) {
-    return { server: input.server, outer: input };
+    if (v1 && input.server instanceof v1.Server) {
+      return { server: input.server, outer: input, kind: 'v1' };
+    }
+    if (v2 && input.server instanceof v2.Server) {
+      return { server: input.server, outer: input, kind: 'v2' };
+    }
+    return { unwrappable: true, outer: input };
   }
   return null;
 }
@@ -211,6 +302,20 @@ function detectServerKind(input) {
  * and ADR 002 in docs/adr/ for why). Idempotent: calling this more than
  * once — on the same object, or on the outer McpServer and its inner
  * Server interchangeably — is a no-op after the first call.
+ *
+ * Throws synchronously, at call time, rather than silently no-op'ing, in
+ * three cases — all setup-time validation, not the runtime never-throw
+ * discipline `wrapToolCallHandler` below follows for the instrumented tool
+ * call path itself (which must never let this package's own bugs break a
+ * host's tool call): `input` doesn't look like a Server or McpServer at all
+ * (`UNSUPPORTED_INPUT_ERROR`); `input` duck-types as a McpServer but its
+ * `.server` isn't a recognized `@modelcontextprotocol/sdk` `Server` —
+ * confirmed reachable by an `@modelcontextprotocol/server` (MCP v2) object,
+ * which is NOT supported by this package (`UNWRAPPABLE_MCPSERVER_ERROR`,
+ * see detectServerKind() above and ADR 015); or a `tools/call`/`tools/list`
+ * handler is already registered before this call (`INSTRUMENT_FIRST_ERROR`,
+ * `assertInstrumentFirst` below, ADR 002 — the original precedent this
+ * function's other two throws now follow).
  *
  * @param {import('@modelcontextprotocol/sdk/server/index.js').Server | import('@modelcontextprotocol/sdk/server/mcp.js').McpServer} server
  * @param {import('./config.js').InstrumentOptions} options
@@ -241,8 +346,21 @@ export function instrumentMcpServer(input, options) {
   if (!detected) {
     throw new Error(UNSUPPORTED_INPUT_ERROR);
   }
+  if (detected.unwrappable) {
+    // ADR 015 "Update (2026-08-11)": duck-type matched a McpServer shape,
+    // but `.server` isn't a recognized Server instance — see
+    // detectServerKind()'s docblock for why this can't be confidently
+    // wrapped and why no escape hatch is offered here. Throwing here,
+    // before any tracker/tracer setup, is the same "fail loudly at setup
+    // time, never at runtime" precedent ADR 002's instrument-first check
+    // already establishes below (assertInstrumentFirst) — this package's
+    // never-throw discipline applies to the instrumented tool-call path,
+    // not to instrumentMcpServer() itself deciding whether it can even
+    // proceed.
+    throw new Error(UNWRAPPABLE_MCPSERVER_ERROR);
+  }
 
-  const { server, outer } = detected;
+  const { server, outer, kind } = detected;
 
   if ((outer && outer[kInstrumented]) || server[kInstrumented]) {
     // Sync the guard onto both objects in case only one was marked so far
@@ -375,28 +493,86 @@ export function instrumentMcpServer(input, options) {
     resolved.schemaDrift.enabled && resolved.enableMetrics ? createSchemaDriftEmitter(PACKAGE_VERSION) : null;
 
   const originalSetRequestHandler = server.setRequestHandler.bind(server);
-  server.setRequestHandler = (schema, handler) => {
-    if (schema === CallToolRequestSchema) {
-      handler = wrapToolCallHandler(
-        handler,
-        tracer,
-        metricsRecorder,
-        resolved.fingerprinting,
-        resolved.costTracking,
-        budgetTracker,
-        resolved.thrashDetection,
-        thrashDetector,
-        thrashEmitter,
-        thrashConnectionFallbackSessionId,
-        thrashSessionState,
-        toolOutcomeCounter,
-        server,
-      );
-    } else if (schema === ListToolsRequestSchema && schemaDriftDetector) {
-      handler = wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftEmitter, SCHEMA_DRIFT_SCOPE);
-    }
-    return originalSetRequestHandler(schema, handler);
-  };
+  // ADR 015 Phase 2: the two SDKs dispatch spec methods differently (ADR
+  // 015 Finding 1) — v1's setRequestHandler takes a schema OBJECT as its
+  // second argument for a 2-arg call (`CallToolRequestSchema`, reference-
+  // equality anchored, ADR 001); v2's takes the method name as a STRING
+  // directly. `kind` (from detectServerKind() above) was already resolved
+  // once, at detection time — not re-detected per call — so each branch
+  // below only ever runs the comparison relevant to the SDK this `server`
+  // actually came from. `CallToolRequestSchema`/`ListToolsRequestSchema`
+  // come from `getV1Sdk()` (`./sdk/detect.js`), not a static top-level
+  // import, since v1 is now an optional peer (ADR 015 Finding 6's Update).
+  if (kind === 'v1') {
+    const v1 = getV1Sdk();
+    server.setRequestHandler = (schema, handler) => {
+      if (schema === v1.CallToolRequestSchema) {
+        handler = wrapToolCallHandler(
+          handler,
+          tracer,
+          metricsRecorder,
+          resolved.fingerprinting,
+          resolved.costTracking,
+          budgetTracker,
+          resolved.thrashDetection,
+          thrashDetector,
+          thrashEmitter,
+          thrashConnectionFallbackSessionId,
+          thrashSessionState,
+          toolOutcomeCounter,
+          server,
+          kind,
+        );
+      } else if (schema === v1.ListToolsRequestSchema && schemaDriftDetector) {
+        handler = wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftEmitter, SCHEMA_DRIFT_SCOPE, kind);
+      }
+      return originalSetRequestHandler(schema, handler);
+    };
+  } else {
+    // v2: dispatch by method-name STRING (ADR 015 Finding 1), not schema
+    // identity — TOOLS_CALL_METHOD/TOOLS_LIST_METHOD are already the plain
+    // strings 'tools/call'/'tools/list' (see their definitions above),
+    // reused unchanged from the v1 path. Deliberately does NOT import
+    // CallToolRequestSchema from @modelcontextprotocol/core/internal — ADR
+    // 015 Finding 1 rejected that path explicitly: that subpath's own name
+    // says it isn't for third-party consumption, and the string comparison
+    // needs no schema object at all.
+    //
+    // v2's setRequestHandler also has a 3-arg overload for CUSTOM
+    // (non-spec) methods — `setRequestHandler(method, schemas, handler)`.
+    // `tools/call`/`tools/list` are spec methods and McpServer's own
+    // internal registration always uses the 2-arg form (confirmed live,
+    // ADR 015 Finding 1), so `maybeHandler === undefined` reliably
+    // distinguishes "this is the 2-arg spec-method call we might need to
+    // wrap" from "this is some other, unrelated 3-arg custom-method
+    // registration" — the latter is passed through completely unchanged,
+    // never inspected.
+    server.setRequestHandler = (method, handlerOrSchemas, maybeHandler) => {
+      if (maybeHandler === undefined && method === TOOLS_CALL_METHOD) {
+        handlerOrSchemas = wrapToolCallHandler(
+          handlerOrSchemas,
+          tracer,
+          metricsRecorder,
+          resolved.fingerprinting,
+          resolved.costTracking,
+          budgetTracker,
+          resolved.thrashDetection,
+          thrashDetector,
+          thrashEmitter,
+          thrashConnectionFallbackSessionId,
+          thrashSessionState,
+          toolOutcomeCounter,
+          server,
+          kind,
+        );
+      } else if (maybeHandler === undefined && method === TOOLS_LIST_METHOD && schemaDriftDetector) {
+        handlerOrSchemas = wrapToolsListHandler(handlerOrSchemas, tracer, schemaDriftDetector, schemaDriftEmitter, SCHEMA_DRIFT_SCOPE, kind);
+      }
+      return maybeHandler === undefined
+        ? originalSetRequestHandler(method, handlerOrSchemas)
+        : originalSetRequestHandler(method, handlerOrSchemas, maybeHandler);
+    };
+  }
 
   server[kInstrumented] = true;
   if (outer) outer[kInstrumented] = true;
@@ -486,6 +662,40 @@ function setupTracer(server, resolved) {
  */
 function isToolResultError(result) {
   return result?.isError === true;
+}
+
+/**
+ * ADR 015 Phase 2: reads `sessionId`/`requestId` off a wrapped handler's
+ * second argument — `extra` for v1, `ctx` for v2 (ADR 015 Finding 1) — the
+ * one place `wrapToolCallHandler`/`wrapToolsListHandler` need to branch on
+ * `kind` at all; everything downstream of this call (span attributes,
+ * fingerprinting, cost/thrash bookkeeping) consumes the same two plain
+ * values regardless of which SDK produced them.
+ *
+ * v1: `extra.sessionId` / `extra.requestId`, both already optional/
+ * possibly-absent (stdio has neither).
+ *
+ * v2: `ctx.sessionId` — the direct equivalent of v1's `extra.sessionId`,
+ * still optional (ADR 015 Finding 3: NOT removed from the SDK, just
+ * usually undefined under the new stateless-HTTP deployment shape — the
+ * same "no session" case stdio already represents for v1, not a new one)
+ * — and `ctx.mcpReq.id`, the request identity v2 nests one level deeper
+ * than v1's flat `extra.requestId` (ADR 015 Finding 7). `ctx.mcpReq.id` is
+ * typed non-optional in v2 (always present), but this function still reads
+ * it via optional chaining and lets the caller's own presence guard apply
+ * uniformly to both kinds — a non-optional field trivially passes an
+ * `undefined`/`null` check, so special-casing it away would only remove a
+ * harmless guard, not add real capability.
+ *
+ * @param {'v1' | 'v2'} kind
+ * @param {*} extraOrCtx - The handler's second argument: v1's `extra`, or v2's `ctx`.
+ * @returns {{ sessionId: string | undefined, requestId: * }}
+ */
+function extractSessionAndRequestId(kind, extraOrCtx) {
+  if (kind === 'v2') {
+    return { sessionId: extraOrCtx?.sessionId, requestId: extraOrCtx?.mcpReq?.id };
+  }
+  return { sessionId: extraOrCtx?.sessionId, requestId: extraOrCtx?.requestId };
 }
 
 /**
@@ -896,6 +1106,9 @@ function applyToolOutcomeThrown(toolOutcomeCounter) {
  * @param {{ hasSeenRealSessionId: boolean, hasWarnedFallbackUsed: boolean }} thrashSessionState
  * @param {ToolOutcomeCounter} toolOutcomeCounter
  * @param {*} server - Passed through only for isSingleConnectionTransport()'s server.transport check.
+ * @param {'v1' | 'v2'} kind - ADR 015 Phase 2: which SDK `server` came from, resolved once by
+ *   detectServerKind() at instrument time — determines how `sessionId`/`requestId` are read off
+ *   the handler's second argument (`extra` for v1, `ctx` for v2 — see extractSessionAndRequestId()).
  */
 function wrapToolCallHandler(
   handler,
@@ -911,6 +1124,7 @@ function wrapToolCallHandler(
   thrashSessionState,
   toolOutcomeCounter,
   server,
+  kind,
 ) {
   return (request, extra) => {
     const toolName = request?.params?.name;
@@ -918,12 +1132,18 @@ function wrapToolCallHandler(
 
     return tracer.startActiveSpan(spanName, { kind: SpanKind.SERVER }, async (span) => {
       const argumentCount = Object.keys(request?.params?.arguments ?? {}).length;
-      // Transport-provided session id (undefined for stdio, which has no
-      // notion of a session) — see the sessionId param on the SDK's
-      // RequestHandlerExtra type. Only consumed by applyCostAttribution's
-      // per-session budget tracking (src/cost/budget.js); everything else
-      // in this function already worked without it.
-      const sessionId = extra?.sessionId;
+      // ADR 015 Finding 3/7: v2's ctx.sessionId is the direct equivalent of
+      // v1's extra.sessionId — still optional, still undefined for
+      // transports with no session concept (stdio in v1; the
+      // PerRequestHTTPServerTransport createMcpHandler builds internally
+      // for v2's default stateless HTTP deployment — the SAME "no session"
+      // case this package's fallback logic below already handles, not a
+      // new one). requestId comes from extra.requestId (v1) or
+      // ctx.mcpReq.id (v2, ADR 015 Finding 7 — always present in v2, but
+      // the presence guard below is kept unconditionally for both kinds
+      // rather than special-cased away, since a defensive guard costs
+      // nothing and a non-optional field trivially passes it anyway).
+      const { sessionId, requestId } = extractSessionAndRequestId(kind, extra);
       // Thrash detection needs a session-shaped key even on transports
       // with no real session (stdio) — but unlike budget tracking above,
       // it must NOT silently merge concurrent, unidentified HTTP/SSE
@@ -942,8 +1162,8 @@ function wrapToolCallHandler(
       span.setAttribute(ATTR_GEN_AI_OPERATION_NAME, GEN_AI_OPERATION_NAME_EXECUTE_TOOL);
       span.setAttribute(ATTR_GEN_AI_TOOL_NAME, toolName);
       span.setAttribute(ATTR_MCP_TOOL_ARGUMENT_COUNT, argumentCount);
-      if (extra?.requestId !== undefined && extra?.requestId !== null) {
-        span.setAttribute(ATTR_JSONRPC_REQUEST_ID, String(extra.requestId));
+      if (requestId !== undefined && requestId !== null) {
+        span.setAttribute(ATTR_JSONRPC_REQUEST_ID, String(requestId));
       }
 
       metricsRecorder?.recordCall(toolName);
@@ -1100,8 +1320,10 @@ function wrapToolCallHandler(
  * schemaDriftEmitter.emit() (src/schema-drift/emitter.js, Phase 3). No
  * detection or emission logic lives here — this function is purely the
  * wiring ADR 010's Q2 identified as a direct, unmodified extension of ADR
- * 001's patching strategy, the same conclusion this file's own
- * `if (schema === CallToolRequestSchema)` branch already applies.
+ * 001's patching strategy, the same conclusion this file's own tools/call
+ * wrapping branch (`instrumentMcpServer()`'s `setRequestHandler` patch,
+ * split by `kind` since ADR 015 Phase 2 — v1's schema-identity check or
+ * v2's method-string check, same idea either way) already applies.
  *
  * The capture/detect/emit block is its own try/catch, entirely separate
  * from the outer try/catch guarding the underlying handler's own success/
@@ -1116,13 +1338,16 @@ function wrapToolCallHandler(
  * @param {SchemaDriftDetector} schemaDriftDetector
  * @param {ReturnType<typeof createSchemaDriftEmitter> | null} schemaDriftEmitter
  * @param {string} schemaDriftScope - Fixed per instrumented server instance — see instrumentMcpServer().
+ * @param {'v1' | 'v2'} kind - ADR 015 Phase 2: see wrapToolCallHandler's own `kind` param and
+ *   extractSessionAndRequestId() — same requestId-only extraction, no sessionId use here.
  */
-function wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftEmitter, schemaDriftScope) {
+function wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftEmitter, schemaDriftScope, kind) {
   return (request, extra) => {
     return tracer.startActiveSpan(TOOLS_LIST_METHOD, { kind: SpanKind.SERVER }, async (span) => {
       span.setAttribute(ATTR_MCP_METHOD_NAME, TOOLS_LIST_METHOD);
-      if (extra?.requestId !== undefined && extra?.requestId !== null) {
-        span.setAttribute(ATTR_JSONRPC_REQUEST_ID, String(extra.requestId));
+      const { requestId } = extractSessionAndRequestId(kind, extra);
+      if (requestId !== undefined && requestId !== null) {
+        span.setAttribute(ATTR_JSONRPC_REQUEST_ID, String(requestId));
       }
 
       try {

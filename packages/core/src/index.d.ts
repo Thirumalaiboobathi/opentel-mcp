@@ -1,5 +1,3 @@
-import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CostTrackingOptions } from './cost/types.d.ts';
 import type { ThrashConfig, ThrashSummary } from './thrash/types.d.ts';
 import type { SchemaDriftConfig } from './schema-drift/types.d.ts';
@@ -145,19 +143,80 @@ export interface InstrumentOptions {
 }
 
 /**
+ * A low-level Server-like object, matched structurally the same way
+ * {@link instrumentMcpServer} itself matches it at runtime (see ADR 001,
+ * ADR 015): an object exposing `setRequestHandler`.
+ *
+ * **Neither supported SDK's real `Server` class is imported anywhere in
+ * this file — deliberately, for both, not just v2.** Earlier revisions of
+ * this type existed only for v2 (whose `@modelcontextprotocol/server` was
+ * always an optional peer dependency, so its class could never be
+ * imported here without breaking type-checking for v1-only consumers —
+ * confirmed empirically: an `import('@modelcontextprotocol/server').Server`
+ * reference anywhere in this file's public surface fails `Cannot find
+ * module '@modelcontextprotocol/server'` even for code that never touches
+ * v2 at all, the moment the package isn't resolvable; a plain top-level
+ * `import type` has the exact same failure mode). ADR 015 Phase 2 made
+ * `@modelcontextprotocol/sdk` (v1) an OPTIONAL peer dependency too — and
+ * the identical failure mode applies symmetrically: a top-level `import
+ * type { Server } from '@modelcontextprotocol/sdk/server/index.js'`
+ * breaks type-checking for a v2-only (or SDK-less) consumer the exact
+ * same way, confirmed the same way — caught by `npm run verify:tarball`
+ * against a real packed tarball installed into a clean external project
+ * with neither SDK present, not predicted in advance. **Both SDKs'
+ * classes are therefore handled identically now: never imported, only
+ * described structurally.** A purely structural type has no such
+ * dependency on either — it never needs to resolve either package to
+ * describe either SDK's shape.
+ *
+ * **Satisfying this type is necessary, but not sufficient, for runtime
+ * acceptance** — see {@link DuckTypedMcpServer}'s docblock for the full
+ * accounting of why, which applies identically here: only a real
+ * `instanceof` match against an actually-installed SDK's `Server` class is
+ * accepted at runtime (`detectServerKind()`, `src/instrument.js`); a value
+ * that merely has a `setRequestHandler` method but isn't really a v1 or v2
+ * `Server` instance will type-check here and still throw
+ * `UNSUPPORTED_INPUT_ERROR` at runtime.
+ */
+export type DuckTypedServer = {
+  setRequestHandler: (...args: any[]) => any;
+};
+
+/**
  * A high-level McpServer-like object, matched structurally the same way
  * {@link instrumentMcpServer} itself matches it at runtime (see ADR 001):
  * an object exposing a `.server` that looks like a low-level `Server` (has
  * `setRequestHandler`), plus a `.tool` or `.registerTool` method.
  *
- * This structural fallback exists because the imported `McpServer` class
- * has private fields, which makes TypeScript treat assignability to it as
- * effectively nominal — an `McpServer` instance created by a *different*
- * resolved copy of `@modelcontextprotocol/sdk` (e.g. a hoisting mismatch in
- * a monorepo) would otherwise fail the type check even though it works
- * fine at runtime, since the runtime never uses `instanceof McpServer` in
- * the first place. This type mirrors the duck-typing the runtime already
- * performs instead of relying on class identity.
+ * **Neither SDK's real `McpServer` class is imported here** — see
+ * {@link DuckTypedServer}'s docblock for the full history of why (v2's
+ * class never could be, without breaking v1-only consumers; v1's class
+ * stopped being importable here too once ADR 015 Phase 2 made it an
+ * optional peer dependency as well, confirmed by `npm run verify:tarball`
+ * failing against a real packed tarball with neither SDK installed). This
+ * type is the *only* thing describing an McpServer's shape to
+ * TypeScript now, for either SDK, not a fallback alongside a nominal
+ * import — a real v1 or v2 `McpServer` instance is accepted purely
+ * because it structurally satisfies this shape.
+ *
+ * One consequence worth stating plainly: **satisfying this type is
+ * necessary, but not sufficient, for runtime acceptance.** Before ADR 015
+ * Phase 1, an object satisfying this shape reliably worked at runtime too
+ * (the runtime's own detection was equally loose). That stopped being true
+ * once `detectServerKind()` was hardened to additionally require `.server
+ * instanceof <Server>` for a REAL, resolved SDK class
+ * (`docs/known-gaps.md` entry 7) — closing a confirmed silent-no-op bug,
+ * but as a direct, deliberate consequence, an object that merely has the
+ * right shape (e.g. a dual-package-hazard `.server` from a *different*
+ * resolved copy of the SDK than this process itself resolves, or a
+ * hand-rolled mock not actually built on either SDK) is now REJECTED at
+ * runtime (`UNWRAPPABLE_MCPSERVER_ERROR`), not silently accepted. Phase 1
+ * considered and explicitly rejected adding an escape hatch for this case
+ * — see ADR 015's Update section for the full argument. This type mirrors
+ * the duck-typing the runtime's *detection* step performs; it cannot also
+ * encode the *nominal* `instanceof` check runtime acceptance ultimately
+ * requires, since that would mean importing a class this file cannot
+ * safely import for either SDK.
  */
 export type DuckTypedMcpServer = {
   server: { setRequestHandler: (...args: any[]) => any };
@@ -168,14 +227,33 @@ export type DuckTypedMcpServer = {
 /**
  * Instruments an MCP server so every tool call emits an OpenTelemetry span.
  *
- * Accepts either a low-level `Server` (from
- * `@modelcontextprotocol/sdk/server/index.js`) or a high-level `McpServer`
- * (from `@modelcontextprotocol/sdk/server/mcp.js`). Must be called before any
- * `tools/call` handler is registered — i.e. before any
- * `server.setRequestHandler(CallToolRequestSchema, ...)` (low-level) or
- * `.tool()`/`.registerTool()` (McpServer) calls. Idempotent: calling this
- * more than once — on the same object, or on the outer `McpServer` and its
- * inner `Server` interchangeably — is a no-op after the first call.
+ * Accepts either a low-level `Server` or a high-level `McpServer`, from
+ * either of two SDKs (ADR 015, `docs/adr/015-mcp-v2-support.md`):
+ * `@modelcontextprotocol/sdk` (v1, protocol revisions through 2025-11-25)
+ * or `@modelcontextprotocol/server` (v2, protocol revision 2026-07-28).
+ * Both are OPTIONAL peer dependencies — install whichever one(s) you
+ * actually use; neither is required just to depend on this package. Must
+ * be called before any `tools/call` handler is registered — i.e. before
+ * any `server.setRequestHandler(CallToolRequestSchema, ...)` (v1
+ * low-level) / `server.setRequestHandler('tools/call', ...)` (v2
+ * low-level) or `.tool()`/`.registerTool()` (either SDK's `McpServer`)
+ * calls. Idempotent: calling this more than once — on the same object, or
+ * on the outer `McpServer` and its inner `Server` interchangeably — is a
+ * no-op after the first call.
+ *
+ * **Throws synchronously, at call time**, for a `server` this cannot
+ * confidently wrap, rather than silently instrumenting nothing — this is
+ * setup-time validation, not the runtime never-throw discipline the
+ * actual tool-call path follows. Two of the three cases this can throw for
+ * are new as of ADR 015 Phase 1/2, closing a confirmed silent-no-op gap: a
+ * `server` whose shape doesn't resemble either SDK at all, and a
+ * `McpServer`-shaped object whose `.server` isn't a recognized `Server`
+ * instance from either installed SDK (most often a v2 object when this
+ * package's v2 support didn't exist yet, or a duplicate/mismatched SDK
+ * install) — see `docs/known-gaps.md` entries 7 and the module-level
+ * docblock in `src/instrument.js` for the full detection contract. The
+ * third, pre-existing case is the instrument-first ordering violation
+ * described below.
  *
  * **v0.8.0 behavior change:** since `schemaDrift.enabled` defaults to
  * `true`, this same before-registration requirement now ALSO applies to
@@ -187,6 +265,16 @@ export type DuckTypedMcpServer = {
  * this throw where it previously didn't — either reorder that
  * registration, or pass `schemaDrift: { enabled: false }` to opt out. See
  * the README's "Known limitations" and the CHANGELOG's v0.8.0 entry.
+ *
+ * **v2 (`@modelcontextprotocol/server`) support is newer and narrower than
+ * v1's** (ADR 015 Phases 1–3, `v0.10.0`): spans, standard attributes,
+ * failure fingerprinting, and `mcp.failure.channel`/`validation_paths`
+ * classification all work the same as v1. Two things do not yet: Agent
+ * Thrash Detection's fallback session id under v2's default per-request
+ * `createMcpHandler` deployment shape (see `instanceKey` below and the
+ * README's "instanceKey" section), and `isSingleConnectionTransport()`'s
+ * transport-detection heuristic, which is still confirmed to misclassify
+ * v2's `PerRequestHTTPServerTransport` — see `docs/known-gaps.md` entry 8.
  *
  * @param server - The server instance to instrument.
  * @param options - Instrumentation options.
@@ -219,7 +307,7 @@ export type DuckTypedMcpServer = {
  *   as `getThrashSummary`; also never attached when `options.enabled` is
  *   `false`.
  */
-export function instrumentMcpServer<T extends Server | McpServer | DuckTypedMcpServer>(
+export function instrumentMcpServer<T extends DuckTypedServer | DuckTypedMcpServer>(
   server: T,
   options?: InstrumentOptions,
 ): T & {
