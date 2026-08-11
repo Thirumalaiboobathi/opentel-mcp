@@ -523,3 +523,76 @@ releases once each is independently reviewed.
   same `ProtocolError` types re-exported) during Phase 0 — this package
   instruments MCP *servers*, and client-side instrumentation (if ever in
   scope) is a separate, unscoped question.
+
+## Update (2026-08-11): today's shipped code silently no-ops on v2 input — confirmed live, not predicted
+
+A finding flagged at the end of a follow-up documentation pass, verified
+before being written up here: **`instrumentMcpServer()`, as currently
+shipped (before any of this ADR's phases land), silently instruments
+nothing when passed an `@modelcontextprotocol/server@2.0.0` `McpServer`.**
+This precedes, and is more urgent than, the Finding 8 misclassification
+above — Finding 8 only matters once `wrapToolCallHandler` actually runs
+for a v2 request; this finding is why it currently never does, for any v2
+request, through any code path.
+
+**Mechanism:** `detectServerKind()` (`src/instrument.js`) recognizes a
+high-level `McpServer` by duck-typing — an object with a `.server`
+property exposing `setRequestHandler`, plus a `.tool` or `.registerTool`
+function — deliberately not `instanceof McpServer`, to avoid importing the
+class at all (ADR 001). A v2 `McpServer` satisfies this shape exactly
+(Finding 1: `.server` is a real `Server` with `setRequestHandler`,
+`.registerTool` exists), so it passes detection today even though this
+package has never supported or tested against it. Detection succeeding
+lets `instrumentMcpServer()` proceed through `assertInstrumentFirst()`
+(which also passes — v2's `assertCanSetRequestHandler` behaves
+identically per Finding 2) and patch `server.setRequestHandler`. That
+patch is where it silently stops working: it compares `schema ===
+CallToolRequestSchema` (the v1 Zod object), but v2 dispatches by the
+method name string `'tools/call'` (Finding 1) — the comparison is `false`
+for every call, so the handler is never wrapped, and registration falls
+through to the original, unmodified `setRequestHandler` call.
+
+**Confirmed live**, not inferred from the code reading above: constructed
+a real `@modelcontextprotocol/server@2.0.0` `McpServer`, passed it to this
+package's actual, shipped `instrumentMcpServer()`, registered a tool via
+`registerTool`, and invoked the captured `tools/call` handler directly,
+with an `InMemorySpanExporter` wired up as the global tracer provider.
+Result: `instrumentMcpServer()` returned without throwing (`returned ===
+input`, `getThrashSummary`/`getObservationState` both attached as
+functions — every outward signal says "instrumented"); the tool call
+itself executed correctly and returned the right result; **zero spans
+were recorded.** No error, no warning, no degraded-but-present telemetry —
+total, silent loss, with a success return value.
+
+**Why this changes Phase 1's scope, not just its priority.** The Phased
+rollout plan above frames Phase 1 as "get `instrumentMcpServer()` wrapping
+a v2 `tools/call` handler with a correct span." That framing implicitly
+assumes the starting state is "v2 input does nothing detectable" (a
+reasonably safe default to build on top of). It is not — the actual
+starting state is "v2 input reports success and produces nothing,"
+which is a strictly worse failure mode than an error would be, and one
+Phase 1 must actively close, not merely supersede by adding real wrapping
+on top of it. **Phase 1's scope is therefore two things, not one:**
+
+1. Real v2 detection and wrapping (as already planned).
+2. **A loud failure or explicit rejection for server kinds
+   `instrumentMcpServer()` does not fully support** — so that a v1-only
+   build the day before Phase 1 ships, and a partially-migrated or
+   misdetected object the day after, both fail obviously instead of
+   succeeding silently. This is a general hardening of
+   `detectServerKind()`'s contract ("recognized and fully wrapped, or
+   rejected — never recognized and silently partially wrapped"), not a
+   v2-specific patch; it should hold for whatever comes after v2 as well.
+
+Concretely, this means Phase 1 cannot ship "v2 detection added, v1
+detection unchanged" as sufficient — it must also close the gap where an
+object satisfies the duck-typed shape but doesn't match either SDK's
+actual dispatch mechanism the wrapping code checks for. The exact
+shape of that check (e.g., resolving which SDK produced the object before
+trusting the duck-type match, per Finding 6's package-presence detection
+design) is Phase 1 implementation work, not decided further here.
+
+Full write-up, including the exact reproduction steps and why this is
+worse than every other tracked gap in this package: `docs/known-gaps.md`
+entry 7. The README's "Compatibility" section now states this prominently
+rather than leaving it to be discovered.
