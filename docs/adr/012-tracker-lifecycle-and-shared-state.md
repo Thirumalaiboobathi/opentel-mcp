@@ -812,3 +812,187 @@ four registries remains a reasonable, low-risk follow-up: it changes
 `instrument.js`'s internal wiring only, not `options.instanceKey`'s public
 contract, so it would not be a breaking change for any host already using
 the option.
+
+## Update (2026-08-11): Cross-call detection without session identity — investigation, documentation-only outcome
+
+**Filed here, not as a new ADR.** This is a direct continuation of the
+first Update's "Reframe considered" section above — same question (should
+threshold evaluation live downstream instead of in-process?), now asked
+specifically for the case that section's per-tracker table already
+flagged as hardest: thrash detection with no session identity available
+at all, not merely across process boundaries. A new ADR would have had to
+restate that table's reasoning to stand on its own; appending keeps the
+two askings of the same question next to each other, where a reader
+auditing either can see both. Investigation only — nothing in this update
+changes code. The one artifact this update produces is documentation,
+already shipped: `packages/core/README.md`'s new "Fleet-wide fingerprint
+frequency (a Tempo recipe, not a library feature)" section, plus updated
+caveats in the Agent Thrash Detection and Cost & Token Attribution
+"Known limitations"/"Extending it" sections pointing at it.
+
+### This is not ADR 011's shape, despite looking like it
+
+ADR 011 already established the precedent this ADR's first Update reused
+for per-tool cost: "Collector recipe, not a library feature." It's worth
+being precise about why that precedent does *not* transfer to thrash
+correlation, rather than assuming the posture is interchangeable because
+both say "push it downstream."
+
+ADR 011's Collector recipe (`tailsamplingprocessor`) makes a keep/drop
+decision **per trace**, once, using only data already inside that one
+trace's buffered span set. Thrash correlation under no-session-identity
+needs the opposite shape: aggregate **across many separate traces** —
+each stateless call is plausibly its own trace, with no shared parent —
+over a time window, grouped by a value that recurs across them. A
+Collector sampling processor has no operation that expresses "have I seen
+this fingerprint N times across other, unrelated traces in the last 5
+minutes" — that's not what a per-trace tail-sampling policy is for. The
+correct-shaped mechanism turns out to be a backend aggregation/alerting
+query (Tempo TraceQL metrics, or an equivalent), not a Collector
+processor config — same *posture* as ADR 011 ("don't build it in-process,
+document it as external"), different *artifact family* entirely. Treating
+the two as the same shape would have led to documenting the wrong kind of
+recipe.
+
+### Backend capability, checked directly, extending ADR 013 rather than redoing it
+
+ADR 013 already investigated SigNoz/Tempo/Jaeger for attribute and event
+*filtering* — is a given attribute or event queryable at all. This
+question is narrower but different: does the backend support
+*aggregating* (counting occurrences, grouped by an attribute's value)
+across traces, which ADR 013 didn't need and didn't check.
+
+- **Tempo**: confirmed directly against Grafana's own docs. TraceQL
+  metrics queries support `by(<attribute>)` grouping over arbitrary span
+  attributes at query time, including high-cardinality ones — grouping
+  happens over the trace/span store itself, not a pre-aggregated metrics
+  time series, so it does not run into the cardinality constraint that
+  keeps `mcp.failure.fingerprint` off `METRIC_SAFE_ATTRIBUTES`
+  (`fingerprint/attributes.js`) in the first place. Real, pasteable query:
+  `{ span.mcp.failure.fingerprint != "" && status = error } |
+  count_over_time() by (span.mcp.failure.fingerprint)`.
+- **SigNoz**: per ADR 013, raw ClickHouse querying (which is what an
+  equivalent grouped count would need) is documented as Dashboard-only,
+  not available from the ad-hoc query API. Achievable, but as a Dashboard
+  SQL panel, not a live ad-hoc query — a materially heavier ask than
+  Tempo's.
+- **Jaeger**: per ADR 013, the documented `api_v3.QueryService`
+  (`FindTraces`) has no aggregation or grouping parameter in the proto at
+  all. Not achievable against the documented API, full stop.
+
+This is the same ranking ADR 013 already reached for different reasons
+(event queryability) — Tempo first, SigNoz second with a real cost,
+Jaeger not viable — now confirmed to hold for aggregation capability too,
+not just filtering.
+
+### Fingerprint-only grouping answers a different question than thrash detection
+
+`mcp.failure.fingerprint` is already unconditionally on every failed-call
+span (`instrument.js`, whenever fingerprinting is enabled) independent of
+session id or any in-process accumulation — so the Tempo query above works
+today, with zero new emission. But `resolveThrashSessionId()`
+(`instrument.js`) exists specifically to stop unrelated callers merging
+into one shared count, the same failure mode Option A of this ADR's
+original Decision was rejected for, one level down. A query grouped by
+fingerprint alone has no way to make that distinction: one agent retrying
+the same broken call 3 times, and three unrelated callers each hitting the
+same bug once, are indistinguishable — both produce a count of 3 for that
+fingerprint. That is a legitimate, useful signal (fleet-wide bug-frequency
+monitoring) but it is not agent-thrash detection, and the README's new
+section states this in bold rather than letting it be inferred — presenting
+one as the other would be dishonest in exactly the way this project's own
+documentation discipline (`docs/known-gaps.md`'s existence) exists to
+prevent.
+
+### The only path to real per-agent correlation, and why it's a separate future decision
+
+Confirmed directly against the MCP spec: 2026-07-28's changelog states
+plainly that "servers that need cross-call state use explicit,
+server-minted handles passed as ordinary tool arguments" (SEP-2567) —
+the application-level replacement for protocol-level sessions. Mechanically,
+this library could read such a handle: `wrapToolCallHandler`
+(`instrument.js`) already reads `request?.params?.arguments` (today only
+to compute `mcp.tool.argument_count`). Reading a named argument's value
+and setting it as a span attribute — the identity dimension the query
+above is missing — is a small change in isolation, and it is the *only*
+mechanism identified in this investigation that would make downstream
+per-agent correlation actually correct, by giving a query something to
+group by beyond fingerprint alone (`by (span.mcp.failure.fingerprint,
+span.<new-attribute>)`).
+
+**Deliberately not proposed as an addition here.** Every span attribute
+this library emits today is library-computed metadata — a hash, a
+category, a count, a boolean the library itself decided. A handle read out
+of `request.params.arguments` would be the first attribute carrying a
+value the *application* chose to put in a tool argument, which could be
+anything: an opaque token, as the spec's own pattern intends, or — nothing
+stops a host from putting something else there — a customer id, an email
+address, a raw credential. That is a different category of risk than
+anything `ATTRIBUTE_KEYS` (`fingerprint/attributes.js`) or
+`thrash/attributes.js` currently names, and it deserves its own scoped
+decision: what to name it, whether it's opt-in-only (almost certainly:
+this cannot default to reading an arbitrary argument), how loudly to warn
+about putting sensitive data in whatever argument a host designates, and
+whether span-only placement (matching `fingerprint`'s own cardinality
+reasoning) is sufficient protection or whether more is needed given the
+value is unbounded *and* application-chosen rather than library-derived.
+None of that is decided here — this update's scope is confirming it's the
+only path, and naming why it doesn't get folded in casually.
+
+### Other identity sources checked, and rejected or deferred
+
+Three more candidates, checked directly against the installed
+`@modelcontextprotocol/server`/`sdk` packages so the record shows they
+were investigated, not overlooked.
+
+- **`ctx.http?.authInfo` (v2) / `extra.authInfo` (v1).** Available in both
+  SDKs, but never auto-populated — both are documented as strictly
+  pass-through, populated only when the host's own bearer-token
+  verification middleware supplies it, so this requires an
+  already-authenticating deployment, not a zero-precondition read.
+  `clientId` identifies the OAuth *client application*, not the end user —
+  under a static client id (common, and this library can't detect which
+  case a deployment is in) the merge blast radius is an entire product's
+  userbase, invisible to this library. The token itself is narrower but
+  still commonly spans multiple, unrelated agent runs within its lifetime,
+  and is a secret — using it would require hashing before it ever touches
+  a span, a new failure mode (hash it wrong, leak a credential fragment)
+  none of the other candidates carry. **Rejected as a default.**
+- **A gateway-set request header (`ctx.http?.req` / v1's
+  `extra.requestInfo.headers`).** The least-bad candidate found, and the
+  only one worth a future ADR. Viable only as one fixed, library-declared
+  header name — a host-configurable "tell us which header" reinstates the
+  exact "could be anything" problem that made the tool-argument idea
+  ADR-sized in the first place. Its real cost is organizational rather
+  than technical: the team owning the gateway is often not the team
+  shipping the MCP server, so wiring it isn't free even where it's
+  possible. Recorded alongside the argument-handle idea above as a future
+  ADR candidate, not designed further here.
+- **Trace id.** Dead end. The v2 SDK defines `traceparent`/`tracestate`/
+  `baggage` `_meta` keys (SEP-414) as a documented convention, but nothing
+  in the compiled client or server implementation reads or writes them —
+  and this library extracts nothing from incoming context today either.
+  Two independent gaps, neither closable by fixing only one side.
+
+### Consequences of this update
+
+- No code changes. The recommendation stands as already documented: do
+  not build in-process cross-call detection for the no-session-identity
+  case — `instanceKey` already covers what an in-process fix can cover,
+  and this update finds nothing that changes that ceiling.
+- The Tempo recipe and its caveat are live in
+  `packages/core/README.md` ("Fleet-wide fingerprint frequency"), cross-
+  linked from the Agent Thrash Detection and Cost & Token Attribution
+  sections' existing "Known limitations"/"Extending it" text.
+  `perSessionUsd` budget tracking gets the same "unsupported under
+  stateless MCP, no substitute exists" statement — it has no
+  fingerprint-equivalent attribute for even the degraded downstream query
+  to key on, so it doesn't get the recipe pointer, only the caveat.
+- The host-designated-argument-as-span-attribute idea is recorded here as
+  a candidate for a future ADR, not scheduled. It would need its own
+  design pass before any code is written, specifically on the sensitivity
+  and opt-in questions above — a different kind of decision than anything
+  else this ADR settles.
+- The fixed-name gateway-header idea joins it as a second future-ADR
+  candidate (see "Other identity sources checked" above); `authInfo` and
+  trace id do not — both are rejected outright, not deferred.

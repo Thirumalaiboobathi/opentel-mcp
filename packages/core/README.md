@@ -198,30 +198,41 @@ this pattern, same as they always have for any fresh-instance-per-request
 deployment — v2 doesn't change that mechanism, it just makes hitting it
 the default instead of an edge case.
 
-**What works today, what doesn't yet:** spans, standard attributes
-(`mcp.method.name`, `gen_ai.tool.name`, `jsonrpc.request.id` — read from
-v2's `ctx.mcpReq.id`), deep failure fingerprinting, and
-`mcp.failure.channel`/`mcp.failure.validation_paths` classification all
-work the same as v1 (ADR 015 Phases 1–3). Two things don't yet, both
-tracked in `docs/known-gaps.md`:
+**What works today:** spans, standard attributes (`mcp.method.name`,
+`gen_ai.tool.name`, `jsonrpc.request.id` — read from v2's `ctx.mcpReq.id`),
+deep failure fingerprinting, `mcp.failure.channel`/`mcp.failure.validation_paths`
+classification, and — as of this release — Agent Thrash Detection's
+fallback-session path and transport auto-detection all work the same as
+v1 (ADR 015 Phases 1–3, plus a follow-up round documented in ADR 015's
+Update section):
 
-- **Agent Thrash Detection's fallback session id doesn't survive the
-  per-request factory pattern, even with `instanceKey` set** — the same
-  gap "instanceKey alone does not fix thrash detection" below describes
-  for v1's stateless deployment shape, unresolved for v2 specifically
-  (`docs/known-gaps.md` entry 6). Thrash detection using a **real**
-  session id (`ctx.sessionId` — still a real, optional field in v2, see
-  the note in "MCP spec 2026-07-28..." below) works correctly either way.
-- **`isSingleConnectionTransport()`'s auto-detection heuristic still
-  misclassifies the transport `createMcpHandler` builds internally**
-  (`PerRequestHTTPServerTransport`), the wrong direction from the gap
-  above — it *over*-fires instead of under-firing, merging different
-  clients' failures into one fabricated loop. See "Known limitations"
-  below and `docs/known-gaps.md` entry 8 for the full mechanism and the
-  one available workaround (`thrashDetection: { enabled: false }`).
+- `isSingleConnectionTransport()` requires positive confirmation
+  (`transport.constructor.name === 'StdioServerTransport'`) for v2
+  specifically, instead of inferring single-connection from an absent
+  `sessionId` property — closing a confirmed false positive against the
+  transport `createMcpHandler` builds internally
+  (`PerRequestHTTPServerTransport`), which also has no `sessionId`, for
+  the opposite reason stdio doesn't. v1 is completely unaffected by this
+  change. See `docs/known-gaps.md` entry 8 for the full history.
+- The generated fallback session id is now shared across repeated
+  `instrumentMcpServer()` calls when `instanceKey` is set (the same
+  registry the four ADR-012 trackers already use), fixing the gap
+  "instanceKey alone does not fix thrash detection" below originally
+  described for v1's stateless deployment shape, for the v2 factory
+  pattern specifically. See `docs/known-gaps.md` entry 6.
 
-Runnable end-to-end coverage lives in `test/instrument.v2.test.js`, not a
-dedicated `examples/` directory yet.
+**One narrower thing still open**, tracked in `docs/known-gaps.md` entry
+6's own update: `thrashSessionState` (the internal flag tracking "has
+this server ever proven itself session-aware") is not registry-backed the
+way the fallback id now is, so that specific memory still resets on every
+v2 per-request call. This only matters for a deployment that mixes
+real-session-id calls with occasional no-session-id ones under a shared
+`instanceKey` — thrash detection using a **real** session id on every
+call (`ctx.sessionId`) is unaffected either way.
+
+Runnable end-to-end coverage lives in `test/instrument.v2.test.js` and
+`test/integration/thrash-v2-transport-detection.test.js`, not a dedicated
+`examples/` directory yet.
 
 ## What gets emitted
 
@@ -578,7 +589,13 @@ convenience default, not a maintained price list.
   one instrumentMcpServer() call" below for what that means under a
   fresh-`Server`-per-request deployment. Session-scoped limits are also
   skipped gracefully (not enforced against a fallback key) for transports
-  with no session id, like stdio.
+  with no session id, like stdio. **`perSessionUsd` is unsupported under
+  stateless MCP (no real session id available at all) — unchanged from
+  ADR 012's conclusion, and there is no fix pending.** Unlike thrash
+  detection, this budget tracker has no fingerprint-equivalent attribute
+  on the span today, so "Fleet-wide fingerprint frequency" below has
+  nothing to substitute with for this scope specifically. `perToolUsd` is
+  unaffected — it never depended on session id.
 
 ## Agent Thrash Detection (v0.6.0+)
 
@@ -829,18 +846,21 @@ in order:
    `assumeSingleSession` left at its default `false` — detection is
    **skipped silently** for that call rather than guessing.
 
-**Known, live gap for `@modelcontextprotocol/server` (v2) users:** this
-structural check — "no `sessionId` property on the transport" — is
-confirmed to misclassify the transport `createMcpHandler` builds
-internally (`PerRequestHTTPServerTransport`) as single-connection. It
-declares no `sessionId` property, but for the opposite reason stdio
-doesn't: the 2026-07-28 protocol revision has no session concept at the
-transport level at all, not because each instance is genuinely 1:1 with
-one client. v2 support shipped in v0.10.0 (ADR 015, Phases 1–3) — this
-specific heuristic was NOT part of that work and remains unfixed, so it's
-a real, live gap for any v2 deployment via `createMcpHandler`, not a
-forward-looking one. See "Known limitations" below and `docs/known-gaps.md`
-entry 8 for the full write-up and the one available workaround.
+**For `@modelcontextprotocol/server` (v2) users:** this structural check —
+"no `sessionId` property on the transport" — is v1-specific. v2's
+transport `createMcpHandler` builds internally
+(`PerRequestHTTPServerTransport`) *also* declares no `sessionId`
+property, but for the opposite reason stdio doesn't: the 2026-07-28
+protocol revision has no session concept at the transport level at all,
+not because each instance is genuinely 1:1 with one client — so for v2
+specifically, this function requires POSITIVE confirmation
+(`transport.constructor.name === 'StdioServerTransport'`) instead of
+inferring single-connection from the absent property. `PerRequestHTTPServerTransport`
+correctly falls through to "undetermined" rather than being misclassified.
+v1's own check is completely unaffected by this. See `docs/known-gaps.md`
+entry 8 for the full history (including the period where this was a
+confirmed, live false positive) and ADR 015's Update section for the
+design argument.
 
 **The risk of getting this wrong:** if you set `assumeSingleSession: true`
 on a transport that's actually serving multiple concurrent clients (a
@@ -905,36 +925,13 @@ Streamable HTTP), consecutive-failure tracking never accumulates past a
 single call, and `mcp.tool.loop.detected` never fires — silently. Confirmed
 gap, ADR 012.
 
-**`isSingleConnectionTransport()`'s auto-detection misclassifies MCP v2's
-`createMcpHandler` deployments — the opposite failure mode from the gap
-above, and a LIVE one as of v0.10.0's v2 support (ADR 015 Phases 1–3),
-not a forward-looking one.** Where the gap above makes detection
-under-fire (silently misses real loops), this one makes it over-fire: the
-transport `createMcpHandler` (`@modelcontextprotocol/server`, protocol
-revision 2026-07-28) builds internally for every request
-(`PerRequestHTTPServerTransport`) declares no `sessionId` property — not
-because it's genuinely single-connection like stdio, but because the
-2026-07-28 revision has no session concept at the transport level at all.
-`isSingleConnectionTransport()`'s check (`!('sessionId' in transport)`)
-reads that absence as "safe to assume single connection" and every call
-falls into the fallback-session-id path — merging different, unrelated
-clients' failures into one fabricated `mcp.loop.detected` loop. Confirmed
-against the real `@modelcontextprotocol/server` package by constructing
-instances directly and testing `'sessionId' in transport` — not inferred
-from type declarations. **This heuristic was explicitly out of scope for
-the v0.10.0 v2-support work** (`isSingleConnectionTransport()` itself is
-unmodified — see `docs/known-gaps.md` entry 8) and remains unfixed;
-anyone instrumenting a v2 server through `createMcpHandler` today can hit
-it. **Workaround:** `thrashDetection: { enabled: false }` fully suppresses
-the consequence — every code path that reads the misclassified session id
-(`applyThrashDetection`/`applyThrashSuccessClear` in `src/instrument.js`)
-checks `thrashDetection.enabled` first and no-ops immediately, so no
-fabricated loop event can be emitted — but it forfeits genuine thrash
-detection for that server entirely. There is no narrower fix available:
-`assumeSingleSession` only adds another way to reach the same fallback
-path, it does not gate away the auto-detected one, and no option exists
-today to disable transport auto-detection on its own. Confirmed gap,
-`docs/known-gaps.md` entry 8.
+**For deployments with no real session id at all** (see "instanceKey"
+above, specifically the "MCP spec 2026-07-28" subsection, for exactly
+when this applies) — **thrash detection is unsupported, unchanged from
+ADR 012's conclusion.** There is a partial, downstream substitute: "Fleet-
+wide fingerprint frequency" below. Read its caveat before treating it as a
+fix for this gap — it detects how often a bug occurs across every caller,
+not whether one agent is looping.
 
 **A malformed `tools/call` request produces zero telemetry — no span, no
 fingerprint, nothing.** If a request fails `CallToolRequestSchema`
@@ -1719,14 +1716,12 @@ sufficient for both. Budget tracking's `perToolUsd` scope is also
 session-independent; its `perSessionUsd` scope inherits the identical
 requirement, for the identical reason.
 
-### MCP spec 2026-07-28 / `@modelcontextprotocol/server` (v2) — `instanceKey`'s remaining gap
+### MCP spec 2026-07-28 / `@modelcontextprotocol/server` (v2) — session identity and `instanceKey`
 
 **Correcting an earlier version of this section:** MCP spec 2026-07-28
 does NOT remove session identity from this library's reach entirely —
 `@modelcontextprotocol/server` (v2)'s `ctx.sessionId` is still a real,
-optional field this library reads (ADR 015 Finding 3, shipped in
-v0.10.0). What actually happened, and what's actually still unresolved,
-is narrower than that.
+optional field this library reads (ADR 015 Finding 3).
 
 [MCP spec 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
 removes protocol-level sessions and the `Mcp-Session-Id` header from the
@@ -1743,42 +1738,47 @@ requirement. A v2 deployment that does provide a real session id (a
 custom transport, or a future v2 transport with its own session concept)
 gets ordinary, working thrash detection, no different from v1.
 
-**The gap that IS real and still unresolved:** for the common case where
-v2 genuinely provides no real session id (the `createMcpHandler` stateless
-default), `resolveThrashSessionId()` falls back to its generated
-per-connection id — the same fallback path a custom `Transport` with no
-`sessionId` already takes for v1. Per "instanceKey alone does not fix
-thrash detection" above, that fallback id is regenerated fresh on every
-`instrumentMcpServer()` call regardless of `instanceKey` — and v2's
-factory pattern (a fresh instance, and a fresh `instrumentMcpServer()`
-call, per request — see the "MCP v2 support" section above) makes this
-the default case, not an edge one. **The result: Agent Thrash Detection's
-fallback path cannot accumulate across requests for a v2 deployment with
-no real session id, with or without `instanceKey` set, and no
-configuration of this library changes that today.** This was verified
-directly against `test/integration/thrash-stateless-http-lifecycle.test.js`
-for the underlying v1 mechanism — its own docblock states the scoping
-plainly: `instanceKey` "fixes thrash detection for a stateless deployment
-that has real session ids... it was never meant to, and does not, paper
-over the absence of any session identity at all." ADR 015 Finding 3 (and
-its Update) confirms the identical mechanism applies to v2's fallback
-path, unresolved as of v0.10.0.
+**For the common case where v2 genuinely provides no real session id**
+(the `createMcpHandler` stateless default): as of this release, two
+fixes together make thrash detection work correctly here, the same way
+it does for v1's equivalent stdio case.
 
-Fixing this needs a different design, not a configuration option — most
-plausibly either making the fallback id itself resolvable through the
-same `instanceKey`-keyed registry the trackers already use (one stable id
-per `instanceKey`, not one random id per call), or leaning on trace
-correlation (`mcp.failure.fingerprint` is present on every failed-call
-span regardless of session id, so grouping by fingerprint over a time
-window at the trace layer doesn't need a session id at all) rather than
-in-process, session-keyed counting. Not built here. Tracked in
-`docs/known-gaps.md` entry 6.
+1. `isSingleConnectionTransport()` no longer auto-detects
+   `PerRequestHTTPServerTransport` (the transport `createMcpHandler`
+   builds internally) as single-connection at all — see "Known
+   limitations" above and `docs/known-gaps.md` entry 8. So the fallback
+   path below is no longer reached automatically for a typical v2 HTTP
+   deployment; it requires an explicit, informed `assumeSingleSession: true`
+   opt-in (or a genuinely single-connection v2 `serveStdio` deployment,
+   which is positively confirmed the same way stdio always has been).
+2. **For whichever deployments do legitimately reach the fallback path**
+   (that explicit opt-in, or v2 stdio): the generated fallback session id
+   is now shared across repeated `instrumentMcpServer()` calls when
+   `instanceKey` is set — the same registry the four ADR-012 trackers
+   already use, one more namespaced entry, no new bound/eviction policy.
+   Previously this id was regenerated fresh on every call regardless of
+   `instanceKey` (per "instanceKey alone does not fix thrash detection"
+   above), so v2's factory pattern (a fresh instance, and a fresh
+   `instrumentMcpServer()` call, per request) meant nothing ever
+   accumulated even for an intentional, correctly-configured
+   single-connection deployment. Fixed: `test/integration/thrash-v2-transport-detection.test.js`
+   drives 5 separate `instrumentMcpServer()` calls sharing one
+   `instanceKey`, each a fresh v2 `Server` with no real session id, and
+   confirms `mcp.tool.loop.detected` now fires by the 5th.
+
+**One narrower thing still open**, tracked in `docs/known-gaps.md` entry
+6's own update: `thrashSessionState` — the flag tracking "has this server
+ever proven itself session-aware" (used by `resolveThrashSessionId()`'s
+rule 2, which skips a later no-session call rather than merging it, once
+a server has shown it hands out real ids) — is still a plain per-call
+object, not registry-backed. This only matters for a deployment mixing
+real-session-id calls with occasional no-session-id ones under a shared
+`instanceKey`; rule 1 (a real session id always wins) is unaffected
+either way.
 
 **This package's actual v2 support status:** `@modelcontextprotocol/server`
-is a supported, optional peer dependency as of v0.10.0 (ADR 015 Phases
-1–3) — see the "MCP v2 support" section above. This is no longer a
-forward-looking gap against an unsupported SDK; it's a specific, scoped
-limitation within SDK support that does exist.
+is a supported, optional peer dependency as of v0.10.0 (ADR 015) — see
+the "MCP v2 support" section above.
 
 ### Registry bounds, and what eviction means
 
@@ -1826,6 +1826,79 @@ elsewhere — is in ADR 012's Update section.
 via the `OTEL_MCP_INSTANCE_KEY` environment variable (lower precedence
 than the option itself). An empty or whitespace-only value from either
 source is treated the same as omitting it entirely.
+
+## Fleet-wide fingerprint frequency (a Tempo recipe, not a library feature)
+
+Under stateless MCP — no real session id at all, the exact gap the
+`instanceKey` section above documents in full — Agent Thrash Detection's
+in-process tracker has nothing to key episodes on, and stays silently
+inert. That doesn't mean there's nothing to query downstream:
+`mcp.failure.fingerprint` (see "Failure Fingerprinting" above) is already
+a plain span attribute on every failed `tools/call` span whenever
+fingerprinting is enabled, unconditional on session id or any in-process
+accumulation. A trace backend that can aggregate by an arbitrary span
+attribute can group by it directly, today, with zero new opentel-mcp
+emission. Full investigation: ADR 012's third update
+(`docs/adr/012-tracker-lifecycle-and-shared-state.md`).
+
+**⚠️ Read this before treating the query below as "thrash detection for
+stateless deployments" — it is not that.** Agent Thrash Detection's whole
+premise is *one agent* retrying *one broken call*. Grouping by
+`mcp.failure.fingerprint` alone has no dimension to separate callers by —
+it counts occurrences of a bug, full stop. **One agent hitting the same
+bug 3 times in a row, and three unrelated users each hitting it once, are
+indistinguishable by this query — both produce a count of 3 for the same
+fingerprint.** That's a real, useful signal (fleet-wide bug-frequency
+monitoring) but it is a different question from "is this agent stuck in a
+loop," and presenting it as the latter would be dishonest. There is
+currently no supported way to add a caller-identity dimension to this
+query — see ADR 012's third update for why that would require the library
+to read an application-chosen tool argument (the MCP spec's own answer
+for session continuity under 2026-07-28 is a server-minted handle passed
+back as an ordinary tool argument) and put it on the span, which is a new
+kind of attribute this library doesn't emit today and a separate design
+decision, not a small addition.
+
+### Why Tempo, and not the other two backends ADR 013 investigated
+
+ADR 013 investigated attribute/event queryability across SigNoz, Tempo,
+and Jaeger, but for a different need (rendering panels over single spans
+or traces). This recipe needs a capability that investigation didn't
+cover: aggregating — counting, grouping — across many separate traces by
+an attribute value, not just filtering by one.
+
+- **Tempo** — TraceQL metrics queries support `by(<attribute>)` grouping
+  over arbitrary span attributes at query time, including high-cardinality
+  ones like `mcp.failure.fingerprint`. The query below is real, pasteable
+  TraceQL, not pseudo-syntax.
+- **SigNoz** — can express the equivalent, but only as a ClickHouse SQL
+  panel inside a Dashboard, per ADR 013's finding that raw ClickHouse
+  querying is Dashboard-only, not reachable from the ad-hoc query API a
+  live "what's failing right now" view would use.
+- **Jaeger** — cannot. Its documented `api_v3.QueryService` (`FindTraces`)
+  has no aggregation or grouping parameter of any kind — confirmed
+  against the proto directly, per ADR 013.
+
+### A working Tempo query
+
+```traceql
+{ span.mcp.failure.fingerprint != "" && status = error }
+  | count_over_time() by (span.mcp.failure.fingerprint)
+```
+
+Run this as a TraceQL metrics query (Grafana Explore, Tempo data source)
+over your evaluation window. To alert on it, wrap it in a Grafana alert
+rule with a threshold condition — e.g. fire when any series' value is
+`>= 3` over a 5-minute window. Tune the threshold and window to your own
+traffic; `3` matches this library's own default thrash
+`thrashDetection.threshold` purely for familiarity, not because it's
+derived for fleet-wide monitoring.
+
+**Narrow this to one tool or one deployment by adding more attributes to
+the filter** — e.g. `&& span.gen_ai.tool.name = "lookup_customer"` — the
+same way you'd narrow any other TraceQL query. This doesn't change the
+identity-dimension caveat above: narrowing by tool name still can't tell
+one looping agent apart from several unrelated callers of that same tool.
 
 ## Two modes
 
@@ -1944,18 +2017,17 @@ pragmatic choice rather than a spec-pure one.
   a normal probabilistic sample for everything else.
 - v0.10.0: `@modelcontextprotocol/server` (MCP v2, protocol revision
   2026-07-28) support ✓ — see "MCP v2 support" above and ADR 015
-  (`docs/adr/015-mcp-v2-support.md`, Phases 1–3). Spans, standard
-  attributes, failure fingerprinting, and `mcp.failure.channel`/
-  `validation_paths` classification all work the same as v1. Also
-  hardened `detectServerKind()` to fail loudly instead of silently
-  instrumenting nothing for an unrecognized/unwrappable server object —
-  a behavior change (an object that previously silently no-op'd now
-  throws), separate from v2 support itself; see the CHANGELOG. Two gaps
-  not closed this release, both tracked in `docs/known-gaps.md`: Agent
-  Thrash Detection's fallback session id doesn't survive v2's per-request
-  factory pattern even with `instanceKey` set (entry 6), and
-  `isSingleConnectionTransport()` still misclassifies the transport
-  `createMcpHandler` builds internally (entry 8).
+  (`docs/adr/015-mcp-v2-support.md`). Spans, standard attributes, failure
+  fingerprinting, `mcp.failure.channel`/`validation_paths` classification,
+  and Agent Thrash Detection (including the transport auto-detection
+  heuristic and the fallback session id under `instanceKey`) all work the
+  same as v1. Also hardened `detectServerKind()` to fail loudly instead of
+  silently instrumenting nothing for an unrecognized/unwrappable server
+  object — a behavior change (an object that previously silently no-op'd
+  now throws), separate from v2 support itself; see the CHANGELOG. One
+  narrower thing still open, tracked in `docs/known-gaps.md` entry 6:
+  `thrashSessionState`'s session-awareness memory isn't shared across v2's
+  per-request calls yet, only the fallback id itself.
 - Future: failure clustering + regression detection; recovery hints;
   root-cause chaining across parent spans; alignment with the OTel GenAI
   SIG's MCP semantic conventions when published

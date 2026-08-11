@@ -415,7 +415,41 @@ export function instrumentMcpServer(input, options) {
   // already has its own, different, already-shipped behavior of silently
   // skipping session-scoped tracking with no session id, which this must
   // not change.
-  const thrashConnectionFallbackSessionId = randomUUID();
+  //
+  // ADR 015 Finding 3 / known-gaps entry 6: registry-backed via the same
+  // getOrCreateTracker()/instanceRegistry machinery the four trackers
+  // above already use — same namespacing pattern (a fifth trackerSuffix,
+  // 'thrash-fallback-session'), same shared bound/TTL, no new policy
+  // introduced. This is what actually fixes the gap: before this, the
+  // fallback id was a plain `randomUUID()` local to this function body,
+  // regenerated fresh on EVERY instrumentMcpServer() call regardless of
+  // instanceKey — so even with the four trackers correctly shared via
+  // instanceKey, a v2 per-request factory deployment (or any
+  // fresh-Server-per-request deployment) landing on the fallback path
+  // still had every request contribute its own unrelated one-off "session"
+  // to the shared ThrashDetector, and nothing ever accumulated past 1.
+  // Sharing this value the same way the trackers are shared closes that:
+  // repeated instrumentMcpServer() calls under the same instanceKey now
+  // reuse the SAME generated id, so consecutive failures on what the
+  // caller has told us (via assumeSingleSession, or a positively-confirmed
+  // single-connection transport — see isSingleConnectionTransport() below)
+  // is one logical connection actually accumulate.
+  //
+  // When instanceKey is undefined (the default), getOrCreateTracker()
+  // calls factory() directly without touching the registry at all — this
+  // line is then byte-identical to the pre-fix `randomUUID()` call, same
+  // as every other getOrCreateTracker() call site above. Fresh per call,
+  // exactly as before.
+  //
+  // Deliberately NOT extended to thrashSessionState (the
+  // hasSeenRealSessionId/hasWarnedFallbackUsed flags below) in this same
+  // change — that's a narrower, separate gap (a v2 per-request deployment
+  // "forgets" it has already proven itself session-aware on each new
+  // call), scoped out on purpose. Tracked in docs/known-gaps.md entry 6,
+  // not silently dropped.
+  const thrashConnectionFallbackSessionId = getOrCreateTracker(resolved.instanceKey, 'thrash-fallback-session', () =>
+    randomUUID(),
+  );
   // Mutable per-server flag, not a `let` closed over directly: wrapToolCallHandler
   // is a top-level function taking all its state as parameters (see its
   // existing params), not a closure over instrumentMcpServer()'s locals —
@@ -779,34 +813,105 @@ function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result
   }
 }
 
+// v1 and v2 both name their stdio transport class identically — confirmed
+// live against both installed packages (@modelcontextprotocol/sdk's
+// server/stdio.js and @modelcontextprotocol/server's stdio.js both export
+// a class whose `.name` is exactly this string). Used only for the v2
+// branch of isSingleConnectionTransport() below — v1's existing check
+// needs no name at all, see that function's docblock for why.
+const STDIO_TRANSPORT_CLASS_NAME = 'StdioServerTransport';
+
 /**
- * True only when `server.transport` is connected and its shape reliably
- * indicates a single-connection transport — i.e. it has no `sessionId`
- * property at all. Both session-oriented transports the SDK ships,
- * StreamableHTTPServerTransport and SSEServerTransport, expose a public
- * `sessionId` getter (see @modelcontextprotocol/sdk's
- * server/{streamableHttp,sse}.d.ts); StdioServerTransport does not (see
- * server/stdio.d.ts). Checked structurally rather than `instanceof
- * StdioServerTransport` for the same dual-package-hazard reason
- * detectServerKind() above avoids importing McpServer directly (ADR 001).
+ * True only when `server.transport` is connected and reliably indicates a
+ * single-connection transport. The exact test differs by `kind`
+ * (ADR 015 "Update 2026-08-11, continued", known-gaps entry 8 — see below
+ * for why one check no longer works for both SDKs).
  *
- * Returns false — "not reliably single-connection" — whenever
- * `server.transport` is undefined too. That's the common case here: the
- * SDK only populates it after `server.connect(transport)` runs, which
- * happens *after* `instrumentMcpServer()` in normal startup order (see
- * the README's "Ordering constraint"), and this repo's own test harness
- * (`invokeToolCall()` in the test files) never calls `.connect()` at all —
- * it always invokes the registered handler directly. A transport that
- * can't be determined is never assumed to be single-connection; see
- * `thrashDetection.assumeSingleSession` (config.js) for the explicit
- * opt-in that covers this case.
+ * **v1** (`kind === 'v1'`, or `kind` omitted for a caller that hasn't been
+ * updated to pass it): unchanged from before this fix — no `sessionId`
+ * property on the transport at all. Both session-oriented transports v1
+ * ships, `StreamableHTTPServerTransport` and `SSEServerTransport`, expose
+ * a public `sessionId` getter (see @modelcontextprotocol/sdk's
+ * server/{streamableHttp,sse}.d.ts); `StdioServerTransport` does not (see
+ * server/stdio.d.ts). This inference has never been shown wrong for any
+ * v1 transport, including a custom `Transport` implementation with no
+ * `sessionId` property — left exactly as it was, byte-for-byte, since
+ * there is no confirmed v1 bug motivating a change and changing it would
+ * be a real behavior change for that population (see ADR 015's Update for
+ * the "why not flip this globally" argument).
+ *
+ * **v2** (`kind === 'v2'`): the same "no `sessionId` property" inference
+ * is no longer sufficient evidence, and using it produces a confirmed,
+ * live false positive — closing `docs/known-gaps.md` entry 8. v2's
+ * `PerRequestHTTPServerTransport` (the transport `createMcpHandler`
+ * builds internally, i.e. v2's recommended deployment path) *also* has no
+ * `sessionId` property, for the opposite reason stdio doesn't: it's
+ * request-scoped, not connection-scoped, and legitimately serves many
+ * distinct, unrelated clients across separate requests — confirmed live
+ * by constructing one and inspecting its own properties directly (no
+ * session/client-identity concept anywhere, not even privately). There is
+ * no positive signal on the object itself that distinguishes it from
+ * stdio; both simply lack a `sessionId` property, for unrelated reasons.
+ *
+ * So for v2, this checks `transport.constructor.name === 'StdioServerTransport'`
+ * instead — POSITIVE confirmation of "this is stdio," rather than
+ * inferring single-connection from the mere absence of a property.
+ * Everything else (specifically `PerRequestHTTPServerTransport`, and
+ * `WebStandardStreamableHTTPServerTransport` — confirmed still correctly
+ * excluded by its own `sessionId` property in both stateless and stateful
+ * construction, unaffected by this change) falls through to `false` —
+ * "undetermined" — the exact same safe branch this function already had
+ * for any transport it couldn't determine, not a new code path.
+ *
+ * **Why `.constructor.name`, when ADR 001/015 elsewhere reject
+ * name/`instanceof`-based checks:** those rejections are specifically
+ * about importing a class to check `instanceof` against it, which (a)
+ * requires resolving an optional peer dependency that might not be
+ * installed, and (b) fails across two independently-resolved copies of
+ * the same package (the dual-package-hazard class of bug this file's own
+ * `detectServerKind()` docblock describes) — two different problems,
+ * neither of which applies to `.constructor.name`. A class's `.name` is
+ * fixed by its declaration (`class StdioServerTransport { ... }`) and
+ * identical across every resolved copy of the package; reading it
+ * requires no import of either SDK at all. ADR 015 Finding 8's original
+ * "not by name/instanceof" phrasing conflated these two risks — this is
+ * the correction, made deliberately, not an oversight.
+ *
+ * **Honest accounting of what `.constructor.name` does NOT protect
+ * against:** a bundler or minifier that renames classes (uncommon for
+ * server-side Node deployments, not impossible) would make this check
+ * fail to recognize a genuine stdio transport. The failure mode if that
+ * happens is the SAFE direction — `isSingleConnectionTransport()` returns
+ * `false`, thrash detection falls back to "undetermined" and is skipped
+ * unless `assumeSingleSession: true` is set, exactly like any other
+ * transport this function can't confirm. It does not fabricate loops; it
+ * loses detection. This asymmetry (fail toward under-detection, never
+ * toward over-detection) is the same principle the pre-existing "return
+ * false when `server.transport` is undefined" branch below already
+ * embodies.
+ *
+ * Returns false whenever `server.transport` is undefined too — the SDK
+ * only populates it after `server.connect(transport)` runs, which happens
+ * *after* `instrumentMcpServer()` in normal startup order (see the
+ * README's "Ordering constraint"), and this repo's own test harness
+ * (`invokeToolCall()` in the test files) never calls `.connect()` at all.
+ * A transport that can't be determined is never assumed to be
+ * single-connection; see `thrashDetection.assumeSingleSession`
+ * (config.js) for the explicit opt-in that covers this case.
  *
  * @param {*} server
+ * @param {'v1' | 'v2' | undefined} kind
  * @returns {boolean}
  */
-function isSingleConnectionTransport(server) {
+function isSingleConnectionTransport(server, kind) {
   const transport = server?.transport;
-  return Boolean(transport) && !('sessionId' in transport);
+  if (!transport) return false;
+
+  if (kind === 'v2') {
+    return transport?.constructor?.name === STDIO_TRANSPORT_CLASS_NAME;
+  }
+
+  return !('sessionId' in transport);
 }
 
 /**
@@ -817,8 +922,10 @@ function isSingleConnectionTransport(server) {
  * different amount of risk if the single-connection assumption turns out
  * to be wrong:
  *
- *   - Transport structurally detected as single-connection (no `sessionId`
- *     property — e.g. stdio): the safest case, backed by evidence.
+ *   - Transport structurally detected as single-connection (v1: no
+ *     `sessionId` property; v2: positively confirmed as
+ *     `StdioServerTransport` — see isSingleConnectionTransport() above):
+ *     the safest case, backed by evidence.
  *   - `assumeSingleSession: true` overriding a transport that IS connected
  *      and DOES expose its own `sessionId` (i.e. isSingleConnectionTransport()
  *      returned false because the transport looks session-oriented): the
@@ -827,10 +934,11 @@ function isSingleConnectionTransport(server) {
  *     connected/undeterminable: no contradicting evidence, just unproven.
  *
  * @param {*} server
+ * @param {'v1' | 'v2' | undefined} kind
  * @returns {'single-connection transport detected' | 'assumeSingleSession: true' | 'transport undeterminable, opted in via assumeSingleSession: true'}
  */
-function describeFallbackReason(server) {
-  if (isSingleConnectionTransport(server)) {
+function describeFallbackReason(server, kind) {
+  if (isSingleConnectionTransport(server, kind)) {
     return 'single-connection transport detected';
   }
   if (server?.transport) {
@@ -871,9 +979,10 @@ function describeFallbackReason(server) {
  * @param {{ hasSeenRealSessionId: boolean, hasWarnedFallbackUsed: boolean }} thrashSessionState - Mutated in place; see instrumentMcpServer().
  * @param {string} thrashConnectionFallbackSessionId
  * @param {import('./thrash/config.js').ThrashConfig} thrashConfig
+ * @param {'v1' | 'v2' | undefined} kind - Threaded through to isSingleConnectionTransport()/describeFallbackReason() — see their docblocks (ADR 015).
  * @returns {string | null}
  */
-function resolveThrashSessionId(server, sessionId, thrashSessionState, thrashConnectionFallbackSessionId, thrashConfig) {
+function resolveThrashSessionId(server, sessionId, thrashSessionState, thrashConnectionFallbackSessionId, thrashConfig, kind) {
   if (sessionId !== undefined) {
     thrashSessionState.hasSeenRealSessionId = true;
     return sessionId;
@@ -883,12 +992,12 @@ function resolveThrashSessionId(server, sessionId, thrashSessionState, thrashCon
     return null;
   }
 
-  if (thrashConfig.assumeSingleSession || isSingleConnectionTransport(server)) {
+  if (thrashConfig.assumeSingleSession || isSingleConnectionTransport(server, kind)) {
     if (!thrashSessionState.hasWarnedFallbackUsed) {
       thrashSessionState.hasWarnedFallbackUsed = true;
       diag.warn(
         'opentel-mcp: Agent Thrash Detection is using a generated fallback session id ' +
-          `(reason: ${describeFallbackReason(server)}). If this transport is in fact serving multiple ` +
+          `(reason: ${describeFallbackReason(server, kind)}). If this transport is in fact serving multiple ` +
           'concurrent clients, loop detection will merge unrelated clients into false-positive loops. ' +
           'This warning fires once per instrumentMcpServer() call.',
       );
@@ -1156,6 +1265,7 @@ function wrapToolCallHandler(
         thrashSessionState,
         thrashConnectionFallbackSessionId,
         thrashConfig,
+        kind,
       );
 
       span.setAttribute(ATTR_MCP_METHOD_NAME, TOOLS_CALL_METHOD);

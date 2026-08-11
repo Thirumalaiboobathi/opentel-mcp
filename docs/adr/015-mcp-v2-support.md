@@ -1,14 +1,19 @@
 # ADR 015: MCP v2 (stateless spec) support — design
 
-**Status:** Implemented in v0.10.0 — Findings 1, 2, 4, 5, 6, 7 and the
-Update section's hardening are shipped; Findings 3 and 8 (the session/
-thrash-correctness work the Phased rollout plan below calls "Phase 3")
-were deliberately deferred, not forgotten — see the "Update (2026-08-11,
-continued): implementation status" section at the end of this document for
-the full accounting, including three places the shipped implementation
-diverged from what this Decision originally proposed (one of them found
-by `npm run verify:tarball` itself, after the other two fixes were
-already in place).
+**Status:** Implemented in v0.10.0 — all of Findings 1–8 and the Update
+section's hardening are shipped. Findings 3 and 8 (the session/thrash-
+correctness work the Phased rollout plan below calls "Phase 3") were
+initially scoped out of the same round that shipped the rest, then
+investigated and folded back in before release rather than left open
+across the v0.10.0 boundary — see the "Update (2026-08-11, continued):
+implementation status" section for the original four-round account, and
+the further "Update ... : Findings 3/8 landed here too" section
+immediately after it for that fifth round, including the ordering
+constraint between its two fixes and a correction to this document's own
+"not by name/instanceof" reasoning. Four places total where the shipped
+implementation diverged from what this Decision originally proposed —
+one found by `npm run verify:tarball` itself, one a deliberate,
+argued revision of this document's own prior conclusion.
 
 This document was originally written as the Phase 0 investigation for
 v0.10.0, against `@modelcontextprotocol/server@2.0.0` and
@@ -794,15 +799,130 @@ field this library reads, not an absent one — see Finding 3, which this
 README section had drifted from).
 
 **Deliberately not done — Finding 3 and Finding 8, this document's
-"Phase 3" ("session/thrash correctness").** `isSingleConnectionTransport()`
-is confirmed byte-identical to its pre-v0.10.0 implementation; Finding 3's
-fallback-session-id-under-`instanceKey` gap is likewise untouched. Both
-remain open, tracked in `docs/known-gaps.md` entries 6 and 8 (both updated
-with a "Status update (v0.10.0)" note making the deferral explicit, not
-silent), and in the README's "Known limitations" and "MCP v2 support"
-sections. This was a deliberate scope cut for this release, not an
-oversight — v2 support (spans, attributes, fingerprinting, channel/
-validation-path classification) ships fully functional without it; only
-Agent Thrash Detection's fallback-session-id path and the transport
-auto-detection heuristic it depends on are affected, and both already have
-a documented workaround (`thrashDetection: { enabled: false }`).
+"Phase 3" ("session/thrash correctness"). [Superseded — see the next
+Update section below: both landed before v0.10.0 shipped after all.]**
+`isSingleConnectionTransport()` is confirmed byte-identical to its
+pre-v0.10.0 implementation; Finding 3's fallback-session-id-under-
+`instanceKey` gap is likewise untouched. Both remain open, tracked in
+`docs/known-gaps.md` entries 6 and 8 (both updated with a "Status update
+(v0.10.0)" note making the deferral explicit, not silent), and in the
+README's "Known limitations" and "MCP v2 support" sections. This was a
+deliberate scope cut for this release, not an oversight — v2 support
+(spans, attributes, fingerprinting, channel/validation-path
+classification) ships fully functional without it; only Agent Thrash
+Detection's fallback-session-id path and the transport auto-detection
+heuristic it depends on are affected, and both already have a documented
+workaround (`thrashDetection: { enabled: false }`).
+
+## Update (2026-08-11, continued further): Findings 3 and 8 landed here too — the "deferred" paragraph above did not hold across the release boundary
+
+The round above ended with Findings 3 and 8 deliberately scoped out,
+tracked as open gaps. Requested and investigated as a follow-up before
+v0.10.0 actually shipped — this section records that fifth round.
+
+**Investigation first, as requested, before any code changed.**
+Reconstructed the exact transport objects `docs/known-gaps.md` entry 8
+already described and inspected their *entire* own-property lists, not
+just `sessionId` — confirmed `PerRequestHTTPServerTransport` carries
+nothing session/client-identity-shaped anywhere on the object, public or
+private. There is no positive signal recoverable from the transport
+itself; the absence of `sessionId` is genuinely, structurally ambiguous
+between "stdio, genuinely 1:1" and "request-scoped, serves arbitrary
+distinct clients." Re-confirmed `WebStandardStreamableHTTPServerTransport`
+unaffected in both stateless and stateful construction, and v1's own
+`StreamableHTTPServerTransport`/`StdioServerTransport` behave exactly as
+this document's original Finding 8 table already recorded — nothing
+there had drifted.
+
+**The fix, and the argument for its shape, decided before writing any
+code:**
+
+1. **`isSingleConnectionTransport()` now takes `kind` and branches.** v1
+   (`kind === 'v1'`) is untouched, byte-for-byte — no confirmed v1 bug
+   ever motivated a change, and a *global* flip (requiring positive
+   confirmation for v1 too) would have been a real behavior change for any
+   v1 caller using a custom `Transport` implementation with no `sessionId`
+   property, currently auto-detected as single-connection. Scoping to
+   `kind === 'v2'` avoids that population entirely — confirmed by this
+   round's own test suite asserting v1's behavior explicitly, not just by
+   omission. v2 now requires *positive* confirmation —
+   `transport.constructor.name === 'StdioServerTransport'` — rather than
+   inferring from an absent property. `PerRequestHTTPServerTransport`
+   fails that check and falls to the same "undetermined" branch the
+   function already had for any transport it couldn't confirm; nothing
+   new there either.
+
+2. **A genuine correction to this document's own Finding 8, stated
+   plainly rather than quietly overridden:** Finding 8 originally said
+   the safe direction was "not by name/instanceof (same dual-package-
+   hazard reasoning as `detectServerKind()` — avoid importing a v2 class
+   just to exclude it)." That conflated two different risks under one
+   phrase. `instanceof` requires *importing* a class — which fails across
+   independently-resolved copies of the same package (the actual
+   dual-package-hazard risk `detectServerKind()` guards against) and, for
+   an optional peer dependency, might not resolve at all. `.constructor.name`
+   requires no import of either SDK and is immune to the dual-package-hazard
+   problem specifically: a class's `.name` is fixed by its declaration and
+   identical across every resolved copy of the package, unlike class
+   *identity*, which is what `instanceof` actually depends on. Revising
+   Finding 8's conclusion here, deliberately, not silently — the
+   "not by name" half of that phrase was broader than the reasoning
+   underneath it actually supported.
+
+   Stated with equal honesty: this is not risk-free. A bundler or
+   minifier that renames classes (uncommon for server-side Node
+   deployments, not impossible) would make this check fail to recognize a
+   genuine stdio transport. The failure mode if that happens is the SAME
+   safe direction this function has always defaulted to —
+   `isSingleConnectionTransport()` returns `false`, thrash detection falls
+   back to "undetermined" and is skipped unless `assumeSingleSession: true`
+   is set. It loses detection; it does not fabricate loops. That asymmetry
+   — fail toward under-detection, never toward over-detection — is the
+   basis for accepting the fragility, not a reason to dismiss it.
+
+3. **`thrashConnectionFallbackSessionId` is now registry-backed**, via
+   the exact same `getOrCreateTracker()`/`instanceRegistry` machinery the
+   four ADR-012 trackers already share — one more namespaced entry
+   (`'thrash-fallback-session'`) on the same bounded registry, reusing its
+   existing cap/TTL rather than inventing a new policy (the investigation
+   phase's own question 4 asked this explicitly; the answer is the
+   registry ADR 012 already built answers it without new design work).
+   When `instanceKey` is omitted, this is a complete no-op — same
+   `factory()`-called-directly path every other `getOrCreateTracker()`
+   call site already takes.
+
+**The ordering constraint, honored exactly as the investigation
+specified.** Both changes shipped in the same commit, with fix 1 (above)
+landing conceptually *before* fix 3 takes effect: registry-sharing the
+fallback id across calls would have made entry 8's false positive worse,
+not better, had detection not been fixed first — a stable id shared
+across a misclassified transport persists the fabricated merge instead of
+it resetting every call. The code reflects this directly: `isSingleConnectionTransport()`'s
+`kind`-aware check is what determines whether the (now-shared) fallback
+id is ever reached for a `PerRequestHTTPServerTransport` call at all —
+with the fix, it isn't, except via an explicit `assumeSingleSession: true`
+opt-in, for which sharing the id across calls is exactly the intended,
+correct behavior.
+
+**Deliberately still not folded in:** `thrashSessionState` (the
+`hasSeenRealSessionId`/`hasWarnedFallbackUsed` flags) stays a plain
+per-call object, not registry-backed. Investigation question 4 didn't ask
+about it, and the investigation report scoped it out explicitly as a
+narrower, separate consequence (rule 1 of `resolveThrashSessionId()`'s
+priority order — a real session id always wins — is unaffected regardless
+of this gap). Recorded in `docs/known-gaps.md` entry 6's own update so it
+isn't lost to a future reader who only checks this ADR.
+
+Regression coverage: `test/integration/thrash-v2-transport-detection.test.js`
+— real `PerRequestHTTPServerTransport`/`WebStandardStreamableHTTPServerTransport`/
+`StdioServerTransport` instances (both SDKs' stdio classes), `.connect()`ed
+for real and confirmed safe to do so in a test process (no lingering
+open handle after `.close()`) — including a test explicitly named as the
+regression test for entry 8's live false positive, a dedicated "v1
+unaffected" block, and coverage of the registry-backed fallback id
+(shared across calls with `instanceKey` set, fresh per call without it,
+and isolated between two distinct `instanceKey` values).
+
+`docs/known-gaps.md` entries 6 and 8 both carry their own "Status update
+(v0.10.0...)" sections recording this fix in the consumer-facing gap
+tracker, not only here.

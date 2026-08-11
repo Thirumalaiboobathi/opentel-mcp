@@ -433,6 +433,71 @@ already applies to the *distributed* (multi-process) version of this
 problem — worth revisiting together rather than solving twice. Not
 scoped further here.
 
+**Status update (v0.10.0, continued): the fallback-id half of gap 1 is
+now fixed; the "v2 provides no real session id by default" reality above
+is not, and cannot be, by this fix.** `thrashConnectionFallbackSessionId`
+(`src/instrument.js`) is now registry-backed via the same
+`getOrCreateTracker()`/`instanceRegistry` machinery the four trackers
+already use — a fifth namespaced entry (`'thrash-fallback-session'`) on
+the same shared, bounded registry, no new bound/eviction policy
+introduced. Concretely: gap 1's own wording above — "each
+`instrumentMcpServer()` call generates its own random per-connection
+fallback id... so even with the same shared tracker, each of N
+stateless-HTTP requests lands under a different, unrelated key" — is no
+longer true when `instanceKey` is set. Repeated calls sharing an
+`instanceKey` now reuse the same generated fallback id, so the fallback
+path can accumulate across calls the way real-session-id calls always
+could. Confirmed by test, not just reasoned about:
+`test/integration/thrash-v2-transport-detection.test.js`'s "registry-backed
+via instanceKey" describe block drives 5 separate `instrumentMcpServer()`
+calls, each a fresh v2 `Server` connected to a real stdio transport with
+no real session id, sharing one `instanceKey`, and confirms
+`mcp.tool.loop.detected` now fires by the 5th — the exact assertion that
+would have failed before this fix, for the exact reason gap 1 describes.
+When `instanceKey` is omitted (the default), this is a complete no-op —
+`getOrCreateTracker()` calls its factory directly without touching the
+registry, so the fallback id is fresh on every call, byte-identical to
+before.
+
+**What this does NOT fix, and cannot:** the 2026-07-28-native "no real
+session id available at all" reality the 2026-08-10 update above
+describes is a fact about what the deployment provides, not about what
+this library does with what it's given — no amount of registry-backing
+changes that a v2 deployment under `createMcpHandler`'s default posture
+never populates `ctx.sessionId` in the first place. What actually changed
+is *which* deployments even reach the fallback path at all: entry 8's fix
+(landing in this same v0.10.0 release) means `isSingleConnectionTransport()`
+no longer auto-detects `PerRequestHTTPServerTransport` as single-connection,
+so the fallback path is no longer reached automatically by every v2 HTTP
+deployment by default — only by an operator's explicit, informed
+`assumeSingleSession: true` opt-in (or a positively-confirmed v2 stdio
+deployment, which was never ambiguous to begin with). **For exactly that
+narrower, explicit-opt-in population, this fix is what makes thrash
+detection actually work** — before it, even a fully correct, intentional
+`assumeSingleSession: true` v2 deployment using `instanceKey` would have
+seen thrash detection stay silently inert, for the reason gap 1 describes.
+See ADR 015's Update section (the "Finding 3/8 landed together" entry) for
+why these two fixes had to ship together, and specifically in this order
+— registry-backing the fallback id *before* fixing detection would have
+made the entry-8 false positive worse (a stable id shared across
+misclassified calls, instead of a fresh one resetting every call).
+
+**Deliberately not folded into this fix — a narrower, separate, still-open
+gap:** `thrashSessionState` (`{ hasSeenRealSessionId, hasWarnedFallbackUsed }`)
+is still a plain object constructed fresh inside `instrumentMcpServer()`
+on every call, not registry-backed the way the fallback id now is. Under
+the v2 per-request factory model, this means "has this server ever proven
+itself session-aware" also forgets on every call — rule 2 of
+`resolveThrashSessionId()`'s priority order (a later call with no
+sessionId, after a real one was already observed, is skipped rather than
+falling back) can never actually engage across separate per-request calls,
+even if earlier requests in the same logical deployment did carry a real
+session id. Narrower consequence than the fallback-id gap this update
+fixes: rule 1 (a real sessionId always wins) is unaffected regardless, so
+this only matters for a deployment that mixes real-session-id calls with
+occasional no-session-id ones under a shared `instanceKey`. Not scoped
+into this change; tracked here so it isn't lost.
+
 The body below is kept as the original report for context.
 
 ### Body
@@ -627,26 +692,73 @@ afterthought added once someone reports the silent gap.
 **Found by:** internal self-review, ADR 015 Phase 0 investigation — not an
 external report
 
-**Status update (v0.10.0): NOT fixed — still stands, and is now a LIVE gap
-rather than a forward-looking one.** ADR 015 Phases 1–3 shipped real MCP
-v2 support (`@modelcontextprotocol/server` is now a recognized, supported
-optional peer — closing entry 7 above) without touching this heuristic at
-all. Confirmed directly against the current source, not assumed:
-`isSingleConnectionTransport()` (`src/instrument.js`) is byte-identical to
-the implementation this entry was originally written against —
-`Boolean(transport) && !('sessionId' in transport)`, no v2-awareness added.
-This was a deliberate scoping choice, not an oversight: this round of work
-(the four phases making up v0.10.0) explicitly carved this specific fix
-out as follow-up, grouped instead with entry 6's fallback-session-id gap
-under what ADR 015's own phased rollout plan calls "Phase 3 — session/
-thrash correctness," neither of which shipped in v0.10.0. **Practical
-effect: this entry's bug is exactly as reachable as described below, for
-anyone instrumenting a v2 server via `createMcpHandler` today** — the
-"Scope: not currently reachable" note further down (written when v2
-wasn't supported at all yet) is now inaccurate and superseded by this
-update; the workaround described below remains the only mitigation. See
-the README's "Known limitations" (Agent Thrash Detection section) for the
-consumer-facing version of this same status.
+**Status update (v0.10.0): FIXED.** Initially scoped out of the same
+v0.10.0 work that shipped real MCP v2 support (see the superseded
+paragraph below, kept for the record) and grouped instead with entry 6's
+fallback-session-id gap as follow-up work — then investigated properly
+and folded back into v0.10.0 before release, rather than shipping the
+confirmed live false positive this entry describes. `isSingleConnectionTransport()`
+(`src/instrument.js`) now takes a second parameter, `kind` (`'v1' | 'v2'`,
+already resolved once per `instrumentMcpServer()` call by
+`detectServerKind()` — no new detection work needed to get it), and
+branches:
+
+- **v1 (`kind === 'v1'`): completely unchanged**, byte-for-byte — still
+  `!('sessionId' in transport)`. No confirmed bug ever motivated touching
+  v1, and the investigation that preceded this fix explicitly argued
+  against a global flip for exactly that reason (see ADR 015's Update).
+- **v2 (`kind === 'v2'`): requires POSITIVE confirmation instead of
+  inferring from an absent property.** `transport.constructor.name ===
+  'StdioServerTransport'` (confirmed live: both SDKs' stdio transport
+  classes report this exact name) is now what's checked for the "safe to
+  treat as single-connection" case. `PerRequestHTTPServerTransport` — this
+  entry's whole subject — has no such name and therefore falls to
+  `false`, the same "undetermined" branch this function already had for
+  any transport it couldn't confirm; `WebStandardStreamableHTTPServerTransport`
+  remains correctly excluded via its own `sessionId` property, in both
+  stateless and stateful construction, confirmed unaffected by this
+  change.
+
+Confirmed by test, not just reasoned about:
+`test/integration/thrash-v2-transport-detection.test.js`'s
+"v2 transport-detection matrix" describe block drives real
+`PerRequestHTTPServerTransport`/`WebStandardStreamableHTTPServerTransport`/
+`StdioServerTransport` instances (both v1's and v2's) through
+`.connect()` and asserts on the actual `mcp.tool.loop.detected` outcome —
+including a REGRESSION TEST specifically named as such for the live false
+positive this entry reported, and a dedicated "v1 unaffected" describe
+block asserting the no-behavior-change claim explicitly rather than
+leaving it implicit.
+
+**Why `.constructor.name`, given this entry's own body below (and ADR
+015's original Finding 8) explicitly said "not by name/instanceof":** that
+rejection conflated two different risks. `instanceof` requires importing
+a class — which fails across independently-resolved copies of the same
+package (the dual-package-hazard class of bug `detectServerKind()`
+guards against) and, for an optional peer dependency, might not resolve
+at all. `.constructor.name` requires no import of either SDK and is
+immune to the dual-package-hazard problem specifically: a class's `.name`
+is fixed by its declaration and identical across every resolved copy of
+the package, unlike class *identity*, which `instanceof` depends on. See
+ADR 015's Update section for the full correction and the honestly-stated
+residual fragility (a bundler/minifier renaming the class would defeat
+this check — but the failure mode is losing detection, the safe
+direction, not fabricating loops).
+
+**Superseded status update, kept for the record (originally read: "NOT
+fixed — still stands, and is now a LIVE gap rather than a
+forward-looking one"):** ADR 015 Phases 1–3 shipped real MCP v2 support
+(`@modelcontextprotocol/server` is now a recognized, supported optional
+peer — closing entry 7 above) without initially touching this heuristic.
+`isSingleConnectionTransport()` was, at that point, confirmed
+byte-identical to the implementation this entry was originally written
+against. That was a deliberate scoping choice at the time, not an
+oversight — this round of work explicitly carved this specific fix out
+as follow-up, grouped with entry 6's fallback-session-id gap under what
+ADR 015's own phased rollout plan calls "Phase 3 — session/thrash
+correctness." It was then investigated and fixed before v0.10.0 actually
+shipped, per the update above, rather than left open across a release
+boundary.
 
 ### Body
 
