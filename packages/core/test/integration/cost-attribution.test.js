@@ -14,7 +14,11 @@ import {
   ATTR_MCP_TOOL_MODEL,
   ATTR_MCP_TOOL_COST_USD,
   ATTR_MCP_TOOL_COST_CURRENCY,
+  ATTR_MCP_TOOL_PRICING_STATUS,
   MCP_TOOL_COST_CURRENCY_USD,
+  MCP_TOOL_PRICING_STATUS_KNOWN,
+  MCP_TOOL_PRICING_STATUS_UNKNOWN,
+  MCP_TOOL_PRICING_STATUS_USER_OVERRIDE,
 } from '../../src/attributes.js';
 import { ATTRIBUTE_KEYS } from '../../src/fingerprint/attributes.js';
 import { DEFAULT_PRICING } from '../../src/cost/pricing.js';
@@ -111,6 +115,7 @@ describe('cost attribution integration', () => {
       expect(span.attributes[ATTR_MCP_TOOL_TOKENS_TOTAL]).toBe(1500);
       expect(span.attributes[ATTR_MCP_TOOL_MODEL]).toBe('claude-sonnet-5');
       expect(span.attributes[ATTR_MCP_TOOL_COST_CURRENCY]).toBe(MCP_TOOL_COST_CURRENCY_USD);
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_KNOWN);
 
       const expectedCost = calculateCost(1000, 500, 'claude-sonnet-5', DEFAULT_PRICING);
       expect(span.attributes[ATTR_MCP_TOOL_COST_USD]).toBeCloseTo(expectedCost, 6);
@@ -235,11 +240,12 @@ describe('cost attribution integration', () => {
       expect(span.attributes[ATTR_MCP_TOOL_MODEL]).toBe('some-future-model-not-in-any-table');
       expect(span.attributes[ATTR_MCP_TOOL_COST_USD]).toBeUndefined();
       expect(span.attributes[ATTR_MCP_TOOL_COST_CURRENCY]).toBeUndefined();
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_UNKNOWN);
     });
   });
 
   describe('usage present with no model detectable anywhere', () => {
-    it('adds token attributes but no model or cost attributes', async () => {
+    it('adds token attributes but no model or cost attributes, and pricing_status is unknown', async () => {
       const server = createServer();
       instrumentMcpServer(server, { serviceName: 'svc' });
       registerTools(server, {
@@ -252,6 +258,7 @@ describe('cost attribution integration', () => {
       expect(span.attributes[ATTR_MCP_TOOL_TOKENS_TOTAL]).toBe(5);
       expect(span.attributes[ATTR_MCP_TOOL_MODEL]).toBeUndefined();
       expect(span.attributes[ATTR_MCP_TOOL_COST_USD]).toBeUndefined();
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_UNKNOWN);
     });
   });
 
@@ -327,6 +334,132 @@ describe('cost attribution integration', () => {
       expect(span.attributes[ATTR_MCP_TOOL_TOKENS_INPUT]).toBe(2);
       expect(span.attributes[ATTR_MCP_TOOL_TOKENS_OUTPUT]).toBe(8);
       expect(span.attributes[ATTR_MCP_TOOL_MODEL]).toBe('claude-sonnet-5');
+    });
+  });
+
+  describe('costTracking.pricing — per-model merge over defaults (ADR 016)', () => {
+    it('overrides one model while leaving the rest of DEFAULT_PRICING intact', async () => {
+      const server = createServer();
+      instrumentMcpServer(server, {
+        serviceName: 'svc',
+        costTracking: { pricing: { 'claude-sonnet-5': { pricingKind: 'chat', inputPer1M: 100, outputPer1M: 200, currency: 'USD' } } },
+      });
+      registerTools(server, {
+        overridden: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: 'claude-sonnet-5',
+          usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        }),
+        untouched: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: 'gpt-4o',
+          usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'overridden', arguments: {} }, { requestId: 1 });
+      await invokeToolCall(server, { name: 'untouched', arguments: {} }, { requestId: 2 });
+
+      const [overriddenSpan, untouchedSpan] = spanExporter.getFinishedSpans();
+      // Overridden: 1M*100 + 1M*200 = 300, not DEFAULT_PRICING's 3+15=18.
+      expect(overriddenSpan.attributes[ATTR_MCP_TOOL_COST_USD]).toBe(300);
+      expect(overriddenSpan.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_USER_OVERRIDE);
+
+      // Untouched model still resolves against DEFAULT_PRICING unchanged.
+      expect(untouchedSpan.attributes[ATTR_MCP_TOOL_COST_USD]).toBeCloseTo(
+        calculateCost(1_000_000, 1_000_000, 'gpt-4o', DEFAULT_PRICING),
+        6,
+      );
+      expect(untouchedSpan.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_KNOWN);
+    });
+
+    it('pricing takes precedence over pricingTable for a key present in both', async () => {
+      const server = createServer();
+      instrumentMcpServer(server, {
+        serviceName: 'svc',
+        costTracking: {
+          pricingTable: { 'my-model': { pricingKind: 'chat', inputPer1M: 1, outputPer1M: 1, currency: 'USD' } },
+          pricing: { 'my-model': { pricingKind: 'chat', inputPer1M: 9, outputPer1M: 9, currency: 'USD' } },
+        },
+      });
+      registerTools(server, {
+        ask: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: 'my-model',
+          usage: { input_tokens: 1_000_000, output_tokens: 0 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+      const [span] = spanExporter.getFinishedSpans();
+      expect(span.attributes[ATTR_MCP_TOOL_COST_USD]).toBe(9);
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_USER_OVERRIDE);
+    });
+
+    it('a non-object pricing value is ignored rather than throwing or corrupting the table', async () => {
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc', costTracking: { pricing: 'not-an-object' } });
+      registerTools(server, {
+        ask: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: 'claude-sonnet-5',
+          usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+      const [span] = spanExporter.getFinishedSpans();
+      expect(span.attributes[ATTR_MCP_TOOL_COST_USD]).toBeCloseTo(
+        calculateCost(1_000_000, 1_000_000, 'claude-sonnet-5', DEFAULT_PRICING),
+        6,
+      );
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_KNOWN);
+    });
+  });
+
+  describe('embedding models (ADR 016)', () => {
+    it('prices an embedding call using only input tokens', async () => {
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc' });
+      registerTools(server, {
+        embed: () => ({
+          content: [{ type: 'text', text: '[0.1, 0.2, 0.3]' }],
+          model: 'text-embedding-3-small',
+          usage: { input_tokens: 1_000_000, output_tokens: 0 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'embed', arguments: {} });
+
+      const [span] = spanExporter.getFinishedSpans();
+      expect(span.attributes[ATTR_MCP_TOOL_COST_USD]).toBeCloseTo(DEFAULT_PRICING['text-embedding-3-small'].inputPer1M, 6);
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_KNOWN);
+    });
+  });
+
+  describe('malformed user pricing entry via costTracking.pricing', () => {
+    it('degrades that model to pricing_status unknown instead of throwing or fabricating a cost', async () => {
+      const server = createServer();
+      instrumentMcpServer(server, {
+        serviceName: 'svc',
+        costTracking: { pricing: { 'broken-model': { pricingKind: 'chat', inputPer1M: 'not-a-number', currency: 'USD' } } },
+      });
+      registerTools(server, {
+        ask: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: 'broken-model',
+          usage: { input_tokens: 100, output_tokens: 50 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+      const [span] = spanExporter.getFinishedSpans();
+      expect(span.attributes[ATTR_MCP_TOOL_TOKENS_TOTAL]).toBe(150);
+      expect(span.attributes[ATTR_MCP_TOOL_COST_USD]).toBeUndefined();
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_UNKNOWN);
     });
   });
 
@@ -419,7 +552,10 @@ describe('cost attribution integration', () => {
       const dataPoint = findDataPoint(tokens, 'ask');
       expect(dataPoint.value).toBe(1500);
       expect(dataPoint.attributes[ATTR_MCP_TOOL_MODEL]).toBe('claude-sonnet-5');
-      expect(Object.keys(dataPoint.attributes).sort()).toEqual([ATTR_GEN_AI_TOOL_NAME, ATTR_MCP_TOOL_MODEL].sort());
+      expect(dataPoint.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_KNOWN);
+      expect(Object.keys(dataPoint.attributes).sort()).toEqual(
+        [ATTR_GEN_AI_TOOL_NAME, ATTR_MCP_TOOL_MODEL, ATTR_MCP_TOOL_PRICING_STATUS].sort(),
+      );
     });
 
     it('records mcp.tool.cost.total with the calculated cost', async () => {

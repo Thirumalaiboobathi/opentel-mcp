@@ -250,7 +250,7 @@ export type DuckTypedMcpServer = {
  * `McpServer`-shaped object whose `.server` isn't a recognized `Server`
  * instance from either installed SDK (most often a v2 object when this
  * package's v2 support didn't exist yet, or a duplicate/mismatched SDK
- * install) — see `docs/known-gaps.md` entries 7 and the module-level
+ * install) — see `docs/known-gaps.md` entry 7 and the module-level
  * docblock in `src/instrument.js` for the full detection contract. The
  * third, pre-existing case is the instrument-first ordering violation
  * described below.
@@ -266,15 +266,30 @@ export type DuckTypedMcpServer = {
  * registration, or pass `schemaDrift: { enabled: false }` to opt out. See
  * the README's "Known limitations" and the CHANGELOG's v0.8.0 entry.
  *
- * **v2 (`@modelcontextprotocol/server`) support is newer and narrower than
- * v1's** (ADR 015 Phases 1–3, `v0.10.0`): spans, standard attributes,
- * failure fingerprinting, and `mcp.failure.channel`/`validation_paths`
- * classification all work the same as v1. Two things do not yet: Agent
- * Thrash Detection's fallback session id under v2's default per-request
- * `createMcpHandler` deployment shape (see `instanceKey` below and the
- * README's "instanceKey" section), and `isSingleConnectionTransport()`'s
- * transport-detection heuristic, which is still confirmed to misclassify
- * v2's `PerRequestHTTPServerTransport` — see `docs/known-gaps.md` entry 8.
+ * **v2 (`@modelcontextprotocol/server`) support is at parity with v1's**
+ * (ADR 015 Phases 1–5, `v0.10.0`): spans, standard attributes, failure
+ * fingerprinting, `mcp.failure.channel`/`validation_paths` classification,
+ * Agent Thrash Detection's fallback session id (registry-backed via
+ * `instanceKey`, same as v1), and `isSingleConnectionTransport()`'s
+ * transport-detection heuristic (no longer misclassifies v2's
+ * `PerRequestHTTPServerTransport` — `docs/known-gaps.md` entries 6 and 8
+ * both closed in `v0.10.0`) all work the same as v1. One narrower gap
+ * remains, tracked in `docs/known-gaps.md` entry 6's own update: under
+ * v2's default per-request `createMcpHandler` deployment shape,
+ * `thrashSessionState` (whether a server has ever proven itself
+ * session-aware) is not itself registry-backed, and — structurally, not a
+ * bug — MCP spec 2026-07-28 removes protocol-level sessions entirely, so
+ * no configuration of this library can produce a *real* session id for a
+ * spec-2026-07-28-native deployment in the first place.
+ *
+ * **Trace context propagation (v0.11.0, ADR 017,
+ * `docs/adr/017-trace-context-propagation.md`)** works identically under
+ * both SDKs: `request.params._meta` is the same shape in both, so a
+ * `tools/call` request carrying a valid W3C `traceparent` in `_meta`
+ * joins that tool-call span into the calling agent's own trace, under v1
+ * or v2, with no configuration. Server-side extraction only this release
+ * — see the ADR's "Forward-compat" section for the deferred client-side
+ * shim.
  *
  * @param server - The server instance to instrument.
  * @param options - Instrumentation options.
@@ -345,13 +360,15 @@ export { DEFAULT_CLASSIFIERS } from './fingerprint/classify/index.js';
 
 export type {
   ModelPricing,
+  ChatModelPricing,
+  EmbeddingModelPricing,
   PricingTable,
   UsageExtractor,
   TokenUsage,
   CostTrackingOptions,
 } from './cost/types.d.ts';
 
-export { DEFAULT_PRICING } from './cost/pricing.js';
+export { DEFAULT_PRICING, DEFAULT_PRICING_LAST_VERIFIED, isDefaultPricingStale } from './cost/pricing.js';
 export { defaultExtractor } from './cost/extractor.js';
 export { calculateCost } from './cost/calculator.js';
 

@@ -36,6 +36,7 @@ import {
   ATTR_ERROR_TYPE,
   ATTR_MCP_TOOL_OUTCOME,
   ATTR_MCP_TOOL_MODEL,
+  ATTR_MCP_TOOL_PRICING_STATUS,
   MCP_METHOD_NAME_TOOLS_CALL,
 } from './attributes.js';
 import { ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
@@ -60,14 +61,21 @@ import { ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
  * models a deployment actually calls, the same cardinality argument this
  * package already relies on for `gen_ai.tool.name` on every other counter.
  *
+ * `pricingStatus` (recordTokens, recordCost; v0.11.0, ADR 016) is a fixed
+ * three-value enum ('known' | 'unknown' | 'user_override' —
+ * COST_METRIC_SAFE_ATTRIBUTES in ./attributes.js), always provided by the
+ * caller when usage was extracted at all — unlike `model`, it's never
+ * conditionally omitted, since it's computable even when no model was
+ * detected ('unknown' in that case).
+ *
  * @param {string} packageVersion
  * @returns {{
  *   recordCall: (toolName: string | undefined) => void,
  *   recordError: (toolName: string | undefined, errorType: string, failureCategory?: string) => void,
  *   recordSilentFailure: (toolName: string | undefined, failureCategory?: string) => void,
  *   recordDuration: (toolName: string | undefined, durationMs: number, outcome: string, failureCategory?: string) => void,
- *   recordTokens: (toolName: string | undefined, model: string | undefined, totalTokens: number) => void,
- *   recordCost: (toolName: string | undefined, model: string | undefined, costUsd: number) => void,
+ *   recordTokens: (toolName: string | undefined, model: string | undefined, totalTokens: number, pricingStatus: string) => void,
+ *   recordCost: (toolName: string | undefined, model: string | undefined, costUsd: number, pricingStatus: string) => void,
  * }}
  */
 export function setupMeter(packageVersion) {
@@ -123,16 +131,18 @@ export function setupMeter(packageVersion) {
         ...(failureCategory ? { [ATTRIBUTE_KEYS.CATEGORY]: failureCategory } : {}),
       });
     },
-    recordTokens(toolName, model, totalTokens) {
+    recordTokens(toolName, model, totalTokens, pricingStatus) {
       tokensTotal.add(totalTokens, {
         [ATTR_GEN_AI_TOOL_NAME]: toolName,
         ...(model ? { [ATTR_MCP_TOOL_MODEL]: model } : {}),
+        [ATTR_MCP_TOOL_PRICING_STATUS]: pricingStatus,
       });
     },
-    recordCost(toolName, model, costUsd) {
+    recordCost(toolName, model, costUsd, pricingStatus) {
       costTotal.add(costUsd, {
         [ATTR_GEN_AI_TOOL_NAME]: toolName,
         ...(model ? { [ATTR_MCP_TOOL_MODEL]: model } : {}),
+        [ATTR_MCP_TOOL_PRICING_STATUS]: pricingStatus,
       });
     },
   };

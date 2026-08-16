@@ -10,14 +10,32 @@
  * already use.
  */
 
-/** One model's per-million-token pricing. See src/cost/pricing.js. */
-export interface ModelPricing {
+/** A chat/completion model's per-million-token pricing — has an output-token cost. See src/cost/pricing.js. */
+export interface ChatModelPricing {
+  readonly pricingKind: 'chat';
   /** USD cost per 1,000,000 input tokens. */
   readonly inputPer1M: number;
   /** USD cost per 1,000,000 output tokens. */
   readonly outputPer1M: number;
   readonly currency: 'USD';
 }
+
+/**
+ * An embedding model's per-million-token pricing — input-token-only. No
+ * `outputPer1M` field: embeddings have no output-token cost, and omitting
+ * the field (rather than setting it to 0) makes that explicit instead of
+ * indistinguishable from a data-entry bug. See ADR 016
+ * (`docs/adr/016-pricing-override-and-staleness.md`) point 1.
+ */
+export interface EmbeddingModelPricing {
+  readonly pricingKind: 'embedding';
+  /** USD cost per 1,000,000 input tokens. */
+  readonly inputPer1M: number;
+  readonly currency: 'USD';
+}
+
+/** One model's per-million-token pricing. See src/cost/pricing.js. */
+export type ModelPricing = ChatModelPricing | EmbeddingModelPricing;
 
 /** Maps a normalized model name (see calculateCost() in src/cost/calculator.js) to its pricing. */
 export type PricingTable = Record<string, ModelPricing>;
@@ -59,13 +77,32 @@ export interface CostTrackingOptions {
   enabled?: boolean;
 
   /**
-   * Overrides `DEFAULT_PRICING`. Supply your own table to price models it
-   * doesn't know about, or to correct stale pricing — see
-   * src/cost/pricing.js's docblock.
+   * Fully replaces `DEFAULT_PRICING` (or, if `pricing` below is also set,
+   * replaces the *base* table `pricing` is then merged over) — supply your
+   * own table when you want an effective pricing table that contains only
+   * your own models, none of `DEFAULT_PRICING`'s. For the more common case
+   * of correcting or adding a few models while keeping the rest of
+   * `DEFAULT_PRICING`, prefer `pricing` instead. See ADR 016
+   * (`docs/adr/016-pricing-override-and-staleness.md`) point 2 for why both
+   * exist and how they compose.
    *
    * @default DEFAULT_PRICING
    */
   pricingTable?: PricingTable;
+
+  /**
+   * Partial pricing table, merged per-model OVER `pricingTable ??
+   * DEFAULT_PRICING` — each key you supply replaces that one model's
+   * entire `ModelPricing` entry; every model you don't name is untouched.
+   * This is the recommended way to correct stale pricing or add a model
+   * `DEFAULT_PRICING` doesn't know about, without having to spread the
+   * whole default table yourself. A model priced via this option (or via
+   * `pricingTable`) reports `pricing_status: 'user_override'` on
+   * `mcp.tool.pricing_status` rather than `'known'`. See ADR 016 point 2.
+   *
+   * @default undefined
+   */
+  pricing?: Partial<PricingTable>;
 
   /**
    * Overrides `defaultExtractor`. Supply your own to recognize a tool

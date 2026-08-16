@@ -495,19 +495,20 @@ point, or JSON-in-text inside `content[0].text`) automatically gets
 `mcp.tool.tokens.*` / `mcp.tool.model` / `mcp.tool.cost.*` span
 attributes, priced against `DEFAULT_PRICING`.
 
-### Advanced: custom pricing, a custom extractor, and a budget guardrail
+### Advanced: overriding pricing, a custom extractor, and a budget guardrail
 
 ```js
-import { instrumentMcpServer, DEFAULT_PRICING } from 'opentel-mcp';
+import { instrumentMcpServer } from 'opentel-mcp';
 
 instrumentMcpServer(server, {
   serviceName: 'my-mcp-server',
   costTracking: {
-    // Extend or override DEFAULT_PRICING — e.g. price an internal model
-    // it doesn't know about, or correct stale numbers.
-    pricingTable: {
-      ...DEFAULT_PRICING,
-      'my-internal-model': { inputPer1M: 1.0, outputPer1M: 2.0, currency: 'USD' },
+    // Merged per-model OVER DEFAULT_PRICING — correct a stale price or add
+    // a model DEFAULT_PRICING doesn't know about, without having to spread
+    // the whole default table yourself. Everything you don't name here is
+    // untouched. See "Overriding pricing" below.
+    pricing: {
+      'my-internal-model': { pricingKind: 'chat', inputPer1M: 1.0, outputPer1M: 2.0, currency: 'USD' },
     },
     // Recognize your own tool result shape. Return null for anything you
     // don't recognize — never throw (see src/cost/extractor.js).
@@ -526,6 +527,41 @@ instrumentMcpServer(server, {
 });
 ```
 
+### Overriding pricing (v0.11.0+)
+
+Two ways to change what `costTracking` prices against, composing as
+`{ ...(pricingTable ?? DEFAULT_PRICING), ...pricing }` — see ADR 016
+(`docs/adr/016-pricing-override-and-staleness.md`) for the full reasoning:
+
+- **`costTracking.pricing`** — a *partial* table, merged **per-model**
+  over `DEFAULT_PRICING` (or over `pricingTable`, if you set both). Each
+  key you supply replaces that one model's entire pricing entry; every
+  model you don't name keeps its default price. This is the recommended
+  way to correct a stale number or add a model — enterprises on
+  committed-use discounts, AWS EDP, Bedrock provisioned throughput, or
+  Azure OpenAI negotiated rates should use this to reflect what they
+  actually pay, not list price.
+- **`costTracking.pricingTable`** — *fully replaces* `DEFAULT_PRICING`.
+  Use this when you want an effective table containing **only** your own
+  models, none of `DEFAULT_PRICING`'s.
+
+A model priced via either option reports `pricing_status: 'user_override'`
+(see the span attributes table below) instead of `'known'`.
+
+### Embedding models (v0.11.0+)
+
+Embeddings are input-token-only — there's no "output" to price. Rather
+than modeling that as `outputPer1M: 0` (indistinguishable from a
+data-entry bug), `ModelPricing` carries an explicit
+`pricingKind: 'chat' | 'embedding'` discriminator; an `'embedding'` entry
+has no `outputPer1M` field at all, and `calculateCost()` never reads
+`outputTokens` for one. `DEFAULT_PRICING` includes OpenAI
+`text-embedding-3-small`/`text-embedding-3-large`/`text-embedding-ada-002`,
+Cohere `cohere-embed-v3`, and Bedrock `amazon-titan-embed-v2` out of the
+box. A pre-v0.11.0 custom pricing entry with no `pricingKind` field is
+still treated as `'chat'` at runtime — only the TypeScript type is
+stricter, not the runtime.
+
 ### Span attributes
 
 | Attribute | Standard OTel? | Description | Example |
@@ -535,19 +571,23 @@ instrumentMcpServer(server, {
 | `mcp.tool.tokens.total` | Custom | input + output | 1500 |
 | `mcp.tool.model` | Custom | Detected model name | "claude-sonnet-5" |
 | `gen_ai.response.model` | Standard (GenAI semconv)[^5] | Same value as `mcp.tool.model`, co-emitted for dashboard compatibility | "claude-sonnet-5" |
+| `mcp.tool.pricing_status` | Custom[^7] | `"known"` \| `"unknown"` \| `"user_override"` — set whenever token usage was extracted, even with no model detected | "known" |
 | `mcp.tool.cost.usd` | Custom | Estimated cost, from `calculateCost()` | 0.0105 |
 | `mcp.tool.cost.currency` | Custom | Always `"USD"` today | "USD" |
 | `mcp.tool.cost.budget_exceeded` | Custom | `true` once a configured `costTracking.budget` limit is crossed | true |
 | `mcp.tool.cost.budget_scope` | Custom | Which budget scope tripped: `"session"` \| `"tool"` (session wins if both did) | "session" |
 
 [^5]: `gen_ai.response.model` is a real OTel GenAI semantic convention attribute ("the name of the model that generated the response") — but this span is an MCP tool-call span (`gen_ai.operation.name: execute_tool`), not a dedicated LLM request/response span, so co-emitting it here is a **pragmatic dashboard-compatibility choice, not a spec-pure emission**. It's set purely so off-the-shelf GenAI dashboards (Grafana, SigNoz, Honeycomb) that filter/group by `gen_ai.response.model` pick these spans up without any opentel-mcp-specific configuration. Full reasoning in `src/attributes.js`'s `ATTR_GEN_AI_RESPONSE_MODEL` docblock.
+[^7]: `mcp.tool.pricing_status` is provenance-based, not value-based: `"user_override"` means the model's key was present in your `costTracking.pricing`/`pricingTable`, whether or not the numbers you supplied happen to match `DEFAULT_PRICING`. `"unknown"` covers both "no model detected" and "model detected but not priceable" (unrecognized, or a malformed override entry) — see ADR 016 point 4.
 
-The four token/model attributes are set together or not at all; the two
-cost attributes only appear when a model was detected *and* it resolves
-in the configured `pricingTable`; the two budget attributes only appear
-when a cost was calculated *and* a configured limit was crossed. Source
-of truth: `src/attributes.js` and `src/instrument.js`'s
-`applyCostAttribution()`.
+The four token/model attributes are set together or not at all;
+`mcp.tool.pricing_status` is set whenever usage was extracted at all
+(unlike the model/cost attributes, it's present even with no model
+detected); the two cost attributes only appear when a model was detected
+*and* it resolves in the effective pricing table; the two budget
+attributes only appear when a cost was calculated *and* a configured
+limit was crossed. Source of truth: `src/attributes.js` and
+`src/instrument.js`'s `applyCostAttribution()`.
 
 ### Metrics
 
@@ -557,21 +597,38 @@ registered, `enableMetrics: false` opts out of these too.
 
 | Metric | Type | Unit | Attributes | Emitted when |
 |---|---|---|---|---|
-| `mcp.tool.tokens.total` | Counter | tokens | `gen_ai.tool.name`, `mcp.tool.model`[^6] | Usage detected in the tool result |
-| `mcp.tool.cost.total` | Counter | USD | `gen_ai.tool.name`, `mcp.tool.model`[^6] | Cost calculated (model resolved in `pricingTable`) |
+| `mcp.tool.tokens.total` | Counter | tokens | `gen_ai.tool.name`, `mcp.tool.model`[^6], `mcp.tool.pricing_status` | Usage detected in the tool result |
+| `mcp.tool.cost.total` | Counter | USD | `gen_ai.tool.name`, `mcp.tool.model`[^6], `mcp.tool.pricing_status` | Cost calculated (model resolved in the effective pricing table) |
 
-[^6]: `mcp.tool.model` is only added when a model was detected — the same optional-attribute cardinality pattern `mcp.failure.category` already uses on the other four metrics.
+[^6]: `mcp.tool.model` is only added when a model was detected — the same optional-attribute cardinality pattern `mcp.failure.category` already uses on the other four metrics. `mcp.tool.pricing_status` is always added — a fixed, closed 3-value enum, well within this package's metric-label cardinality discipline (see `COST_METRIC_SAFE_ATTRIBUTES` in `src/attributes.js`).
 
-### Pricing accuracy
+Grouping `mcp.tool.tokens.total` by `mcp.tool.pricing_status` answers "what
+fraction of tokens/spend is running through models we can't price" as a
+direct query, instead of inferring it from missing `mcp.tool.cost.*` data.
 
-> **Pricing table last verified 2026-07-29.** Users **MUST** override
-> `pricingTable` for production accuracy — provider pricing changes
-> frequently and opentel-mcp does not guarantee `DEFAULT_PRICING` stays
-> current.
+### Pricing accuracy and staleness
 
-`DEFAULT_PRICING` (`src/cost/pricing.js`) covers 15+ models across five
-providers — Anthropic, OpenAI, Google, AWS Bedrock, and DeepSeek — as a
-convenience default, not a maintained price list.
+> **`DEFAULT_PRICING` is a best-effort snapshot, not a maintained price
+> list.** Provider pricing changes frequently and varies by region/contract
+> — `opentel-mcp` does not guarantee it stays current, and says so at
+> runtime, not just here: once `DEFAULT_PRICING` (checked via
+> `DEFAULT_PRICING_LAST_VERIFIED`, also exported) is more than 90 days
+> past its last-verified date, `instrumentMcpServer()` fires a one-time
+> `diag.warn()` naming that date — and, when `setupNodeSdk: true`, also
+> attaches an `mcp.pricing.default_table_last_verified` resource
+> attribute, so long-running deployments can alert on it directly. Both
+> only fire when `DEFAULT_PRICING` is actually contributing to your
+> effective table (i.e. you haven't fully replaced it via `pricingTable`)
+> — see ADR 016 point 3.
+
+`DEFAULT_PRICING` (`src/cost/pricing.js`) covers 20+ models — chat and
+embedding — across six providers: Anthropic, OpenAI, Google, Cohere, AWS
+Bedrock, and DeepSeek. **Bedrock entries (Nova and Titan embeddings)
+assume us-east-1 list pricing** — Bedrock pricing varies by region and
+this table is not region-keyed (no reliable region signal exists in any
+tool-result usage shape this package recognizes to key a lookup on — see
+ADR 016 point 5); override via `costTracking.pricing` for a different
+region.
 
 ### Extending it
 
@@ -581,7 +638,12 @@ convenience default, not a maintained price list.
   TokenUsage | null`, never throwing) to recognize anything else.
 - `calculateCost(inputTokens, outputTokens, model, pricingTable)` is also
   exported directly, for recomputing cost outside the instrumentation
-  hot path (e.g. over historical spans).
+  hot path (e.g. over historical spans). Malformed pricing entries
+  (missing/negative/non-numeric `inputPer1M`/`outputPer1M`) degrade to
+  `null`, same as an unknown model — never throws.
+- `isDefaultPricingStale(now?, thresholdDays?)` (also exported) is the
+  pure function backing the staleness warning above, if you want to check
+  it yourself (e.g. in a startup health check).
 - Disable everything in this section with `costTracking: { enabled:
   false }`; tracing, metrics, and fingerprinting are all unaffected.
 - Budget tracking (`costTracking.budget`) is in-memory and scoped to one
@@ -1524,6 +1586,84 @@ actual traffic volume (the Collector's own docs cover sizing these). If
 your schema-drift or two-axis observation signals matter for retention
 too, add `mcp.tool.schema_drift.detected` (boolean_attribute) as another
 OR'd policy the same way.
+
+## Trace Context Propagation (v0.11.0+)
+
+The most-complained-about gap in agent observability: an agent framework
+(LangGraph or otherwise) calls a tool on your MCP server, and you get two
+disconnected traces — the agent's own trace dies at the tool boundary,
+and the server's trace for what the tool actually did starts fresh, with
+no edge between them. Debugging a slow or failing agent run means
+manually correlating timestamps across two separate traces (or two
+separate services in the same backend) instead of looking at one.
+
+opentel-mcp closes the server-side half of this: when a `tools/call`
+request carries a valid [W3C `traceparent`](https://www.w3.org/TR/trace-context/)
+in `params._meta`, the tool-call span becomes a **child of the calling
+agent's own span** — the same trace, not two. `tracestate` is propagated
+too, when present.
+
+### Zero-config — nothing to opt into
+
+There's no `traceContext: { enabled: false }` option, deliberately: this
+is unconditional, because there's nothing for an operator to want to turn
+off. Any client that already emits `traceparent` via a standard OTel
+SDK's `propagation.inject()` — in any language, this isn't Node-specific
+on the client side — gets linked traces the moment it copies that string
+into `_meta.traceparent` on its outgoing `tools/call` request:
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "search_docs",
+    "arguments": { "query": "..." },
+    "_meta": {
+      "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      "tracestate": "vendorname=opaquevalue"
+    }
+  }
+}
+```
+
+A client that doesn't set `_meta.traceparent` (today's overwhelming
+majority, until client-side shims exist — see "What's not built yet"
+below) sees **zero change of any kind** — confirmed byte-identical to
+pre-v0.11.0 behavior, not merely "should behave the same."
+
+### The upstream sampling decision is honored automatically
+
+If the calling agent's own trace wasn't sampled (the `traceparent`'s
+flags byte has the sampled bit unset), this tool-call span isn't recorded
+or exported either — matching the agent's own choice, via the OTel SDK's
+own default `ParentBasedSampler`, which already inspects a remote
+parent's `traceFlags` for exactly this. opentel-mcp writes no sampling
+logic of its own for this — see ADR 017's "Sampling" section
+(`docs/adr/017-trace-context-propagation.md`) for why forcing sampling
+regardless was considered and rejected.
+
+### Conflicting or pre-existing context
+
+If your transport's own auto-instrumentation (e.g.
+`@opentelemetry/instrumentation-http` on a Streamable HTTP server) has
+already put some other span active by the time this package's handler
+runs, a valid `_meta.traceparent` **replaces it outright** — it is never
+merged. The `_meta`-carried context is message-scoped (this one logical
+agent operation); the transport-level span is connection/request-scoped
+and isn't the right parent for it. Full reasoning: ADR 017's
+"Conflicting `_meta.traceparent`" section.
+
+### What's not built yet
+
+**Server-side extraction only.** There is no client-side shim in this
+package (yet) for a Node or Python agent framework to *set*
+`_meta.traceparent` on its own outgoing calls — you need a client that
+already does this itself (or does it via your own glue code:
+`propagation.inject(context.active(), meta, ...)` from your OTel SDK,
+writing into `_meta` before the call). Extraction is independently
+useful today, for free, to any client that already sets `_meta` in this
+shape; the client-side half is tracked as future work, not implied as
+solved by this release.
 
 ## Configuration
 

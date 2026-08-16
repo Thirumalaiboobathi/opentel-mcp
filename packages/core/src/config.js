@@ -4,8 +4,9 @@
  */
 
 import { diag } from '@opentelemetry/api';
-import { DEFAULT_PRICING } from './cost/pricing.js';
+import { DEFAULT_PRICING, DEFAULT_PRICING_LAST_VERIFIED, isDefaultPricingStale } from './cost/pricing.js';
 import { defaultExtractor } from './cost/extractor.js';
+import { normalizeModelName } from './cost/calculator.js';
 import { resolveThrashConfig } from './thrash/config.js';
 import { resolveSchemaDriftConfig } from './schema-drift/config.js';
 
@@ -13,9 +14,16 @@ import { resolveSchemaDriftConfig } from './schema-drift/config.js';
  * @typedef {object} CostTrackingOptions
  * @property {boolean} [enabled=true] - Set to false to disable cost/token span attributes and the
  *   mcp.tool.tokens.total / mcp.tool.cost.total metrics entirely.
- * @property {import('./cost/pricing.js').PricingTable} [pricingTable] - Overrides DEFAULT_PRICING
- *   (src/cost/pricing.js). Supply your own table to price models DEFAULT_PRICING doesn't know about, or to
- *   correct stale pricing — see that module's docblock.
+ * @property {import('./cost/pricing.js').PricingTable} [pricingTable] - Fully replaces DEFAULT_PRICING (or,
+ *   if `pricing` below is also set, replaces the base table `pricing` is merged over). Supply your own table
+ *   when you want an effective table containing ONLY your own models. For correcting/adding a few models
+ *   while keeping the rest of DEFAULT_PRICING, prefer `pricing` instead — see ADR 016
+ *   (docs/adr/016-pricing-override-and-staleness.md) point 2.
+ * @property {Partial<import('./cost/pricing.js').PricingTable>} [pricing] - Partial pricing table, merged
+ *   per-model OVER `pricingTable ?? DEFAULT_PRICING` — each key you supply replaces that model's entire
+ *   ModelPricing entry; every model you don't name is untouched. The recommended way to correct stale
+ *   pricing or add a model DEFAULT_PRICING doesn't know about. A model priced via this option (or via
+ *   `pricingTable`) reports `pricing_status: 'user_override'` — see ADR 016 point 2.
  * @property {import('./cost/extractor.js').UsageExtractor} [extractor] - Overrides defaultExtractor
  *   (src/cost/extractor.js). Supply your own to recognize a tool result shape defaultExtractor doesn't.
  * @property {import('./cost/budget.js').BudgetConfig} [budget] - Per-session and per-tool cumulative-cost
@@ -113,6 +121,24 @@ export function __resetServiceNameWarnedForTests() {
   warnedServiceNameIgnored = false;
 }
 
+// Guards the DEFAULT_PRICING staleness diagnostic below (ADR 016 point 3),
+// same one-per-process pattern as warnedServiceNameIgnored above.
+let warnedPricingStale = false;
+
+// Test-only, same purpose as __resetServiceNameWarnedForTests above. Not
+// part of the public API.
+export function __resetPricingStaleWarnedForTests() {
+  warnedPricingStale = false;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 // ADR 012, Phase 2: the first env var this codebase reads for a bare
 // top-level InstrumentOptions field, not one nested inside a feature's own
 // sub-config (contrast OTEL_MCP_THRASH_*/OTEL_MCP_SCHEMA_DRIFT_*, both
@@ -171,6 +197,50 @@ export function resolveOptions(options) {
   }
 
   const rawCostTracking = opts.costTracking ?? {};
+  const costTrackingEnabled = rawCostTracking.enabled ?? true;
+
+  // ADR 016 point 2: pricingTable (when supplied) is the BASE table,
+  // fully replacing DEFAULT_PRICING; pricing (when supplied) is then
+  // merged per-model OVER that base — a plain object spread is exactly
+  // "per-model, not top-level replacement" here, since each spread key is
+  // one model. Non-object pricingTable/pricing values (a caller's typo,
+  // e.g. a string or null) are silently ignored rather than spread, same
+  // "malformed config degrades, never crashes" discipline calculateCost()
+  // itself follows for a malformed individual entry.
+  const hasCustomPricingTable = isPlainObject(rawCostTracking.pricingTable);
+  const hasPricingOverride = isPlainObject(rawCostTracking.pricing);
+  const basePricingTable = hasCustomPricingTable ? rawCostTracking.pricingTable : DEFAULT_PRICING;
+  const pricingTable = hasPricingOverride ? { ...basePricingTable, ...rawCostTracking.pricing } : basePricingTable;
+
+  // ADR 016 point 4: which normalized model keys came from the caller's
+  // own config surface (pricingTable and/or pricing), for the
+  // mcp.tool.pricing_status 'known' vs 'user_override' distinction —
+  // computed once here, not per call. Provenance-based: a key counts as
+  // an override because the caller named it, regardless of whether the
+  // value they supplied happens to match DEFAULT_PRICING's own entry.
+  const pricingOverrideKeys = new Set();
+  if (hasCustomPricingTable) {
+    for (const key of Object.keys(rawCostTracking.pricingTable)) pricingOverrideKeys.add(normalizeModelName(key));
+  }
+  if (hasPricingOverride) {
+    for (const key of Object.keys(rawCostTracking.pricing)) pricingOverrideKeys.add(normalizeModelName(key));
+  }
+
+  // ADR 016 point 3: only warn when DEFAULT_PRICING is actually
+  // contributing to the effective table — a caller who fully replaced it
+  // via pricingTable isn't using our defaults at all, so a staleness
+  // warning about them would be misleading. Gated on costTrackingEnabled
+  // too: no cost tracking happens at all otherwise, so DEFAULT_PRICING's
+  // age is moot.
+  if (costTrackingEnabled && !hasCustomPricingTable && !warnedPricingStale && isDefaultPricingStale()) {
+    warnedPricingStale = true;
+    diag.warn(
+      `opentel-mcp: DEFAULT_PRICING was last verified ${DEFAULT_PRICING_LAST_VERIFIED}, more than 90 days ago. ` +
+        'Provider list pricing may have changed since. Override costTracking.pricing (merged per-model over ' +
+        'DEFAULT_PRICING) for models whose pricing you need to keep current — see ADR 016, ' +
+        'docs/adr/016-pricing-override-and-staleness.md.',
+    );
+  }
 
   return {
     serviceName: opts.serviceName,
@@ -180,8 +250,10 @@ export function resolveOptions(options) {
     setupNodeSdk,
     fingerprinting: opts.fingerprinting ?? true,
     costTracking: {
-      enabled: rawCostTracking.enabled ?? true,
-      pricingTable: rawCostTracking.pricingTable ?? DEFAULT_PRICING,
+      enabled: costTrackingEnabled,
+      pricingTable,
+      pricingOverrideKeys,
+      usingDefaultPricing: !hasCustomPricingTable,
       extractor: rawCostTracking.extractor ?? defaultExtractor,
       budget: rawCostTracking.budget,
     },

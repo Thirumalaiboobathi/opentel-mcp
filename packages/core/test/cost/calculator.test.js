@@ -118,9 +118,100 @@ describe('calculateCost', () => {
   });
 
   describe('every model in DEFAULT_PRICING', () => {
-    it.each(Object.entries(DEFAULT_PRICING))('%s produces the expected cost for 1M/1M tokens', (model, pricing) => {
+    const chatEntries = Object.entries(DEFAULT_PRICING).filter(([, pricing]) => pricing.pricingKind === 'chat');
+    const embeddingEntries = Object.entries(DEFAULT_PRICING).filter(([, pricing]) => pricing.pricingKind === 'embedding');
+
+    it.each(chatEntries)('%s produces the expected cost for 1M/1M tokens', (model, pricing) => {
       const expected = pricing.inputPer1M + pricing.outputPer1M;
       expect(calculateCost(1_000_000, 1_000_000, model, DEFAULT_PRICING)).toBeCloseTo(expected, 6);
+    });
+
+    it.each(embeddingEntries)('%s (embedding) prices only the input tokens for 1M/1M tokens', (model, pricing) => {
+      // Output tokens are supplied (1M) but must not contribute — proves the
+      // embedding branch ignores outputTokens rather than needing it to be 0.
+      expect(calculateCost(1_000_000, 1_000_000, model, DEFAULT_PRICING)).toBeCloseTo(pricing.inputPer1M, 6);
+    });
+  });
+
+  describe('embedding cost math', () => {
+    const table = { 'my-embedder': { pricingKind: 'embedding', inputPer1M: 0.1, currency: 'USD' } };
+
+    it('charges only for input tokens', () => {
+      // 500,000 input @ $0.10/1M = $0.05
+      expect(calculateCost(500_000, 0, 'my-embedder', table)).toBeCloseTo(0.05, 6);
+    });
+
+    it('ignores a nonzero outputTokens value entirely', () => {
+      expect(calculateCost(500_000, 999_999, 'my-embedder', table)).toBeCloseTo(0.05, 6);
+      expect(calculateCost(500_000, 0, 'my-embedder', table)).toBe(calculateCost(500_000, 999_999, 'my-embedder', table));
+    });
+
+    it('is 0 for 0 input tokens', () => {
+      expect(calculateCost(0, 100, 'my-embedder', table)).toBe(0);
+    });
+
+    it('still validates outputTokens as a non-negative finite number', () => {
+      expect(calculateCost(500_000, -1, 'my-embedder', table)).toBeNull();
+      expect(calculateCost(500_000, NaN, 'my-embedder', table)).toBeNull();
+    });
+
+    it('resolves normally via provider-prefixed / cased model names', () => {
+      expect(calculateCost(1_000_000, 0, 'OpenAI/my-embedder', table)).toBeCloseTo(0.1, 6);
+    });
+  });
+
+  describe('malformed pricing entries (must degrade to null, never throw)', () => {
+    it('returns null when inputPer1M is missing', () => {
+      const table = { m: { pricingKind: 'chat', outputPer1M: 1, currency: 'USD' } };
+      expect(calculateCost(1000, 1000, 'm', table)).toBeNull();
+    });
+
+    it('returns null when inputPer1M is non-numeric', () => {
+      const table = { m: { pricingKind: 'chat', inputPer1M: '1', outputPer1M: 1, currency: 'USD' } };
+      expect(calculateCost(1000, 1000, 'm', table)).toBeNull();
+    });
+
+    it('returns null when inputPer1M is negative', () => {
+      const table = { m: { pricingKind: 'chat', inputPer1M: -1, outputPer1M: 1, currency: 'USD' } };
+      expect(calculateCost(1000, 1000, 'm', table)).toBeNull();
+    });
+
+    it('returns null for a chat-kind entry missing outputPer1M', () => {
+      const table = { m: { pricingKind: 'chat', inputPer1M: 1, currency: 'USD' } };
+      expect(calculateCost(1000, 1000, 'm', table)).toBeNull();
+    });
+
+    it('treats a missing pricingKind as chat (pre-v0.11.0 custom tables keep working)', () => {
+      const table = { m: { inputPer1M: 1, outputPer1M: 2, currency: 'USD' } };
+      expect(calculateCost(1_000_000, 1_000_000, 'm', table)).toBe(3);
+    });
+
+    it('treats an unrecognized pricingKind as chat', () => {
+      const table = { m: { pricingKind: 'bogus', inputPer1M: 1, outputPer1M: 2, currency: 'USD' } };
+      expect(calculateCost(1_000_000, 1_000_000, 'm', table)).toBe(3);
+    });
+
+    it('returns null when the pricing entry is not an object', () => {
+      expect(calculateCost(1000, 1000, 'm', { m: 'not-an-object' })).toBeNull();
+      expect(calculateCost(1000, 1000, 'm', { m: null })).toBeNull();
+      expect(calculateCost(1000, 1000, 'm', { m: 42 })).toBeNull();
+    });
+
+    it('never throws for any malformed entry shape', () => {
+      const shapes = [
+        {},
+        { pricingKind: 'chat' },
+        { pricingKind: 'embedding' },
+        { pricingKind: 'chat', inputPer1M: NaN, outputPer1M: NaN },
+        { pricingKind: 'chat', inputPer1M: Infinity, outputPer1M: 1 },
+        null,
+        'garbage',
+        42,
+        [1, 2, 3],
+      ];
+      for (const pricing of shapes) {
+        expect(() => calculateCost(1000, 1000, 'm', { m: pricing })).not.toThrow();
+      }
     });
   });
 });

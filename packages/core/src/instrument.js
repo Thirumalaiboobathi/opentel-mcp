@@ -16,8 +16,10 @@ import { computeFingerprint } from './fingerprint/compose.js';
 import { toSpanAttributes, ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
 import { classifyFailureChannel } from './fingerprint/classify/channel.js';
 import { extractValidationPaths } from './fingerprint/classify/validation-paths.js';
-import { calculateCost } from './cost/calculator.js';
+import { calculateCost, normalizeModelName } from './cost/calculator.js';
+import { DEFAULT_PRICING_LAST_VERIFIED } from './cost/pricing.js';
 import { createBudgetTracker } from './cost/budget.js';
+import { extractTraceContext } from './tracecontext/extract.js';
 import { ThrashDetector } from './thrash/detector.js';
 import { createThrashEmitter } from './thrash/emitter.js';
 import { SchemaDriftDetector } from './schema-drift/detector.js';
@@ -41,6 +43,11 @@ import {
   ATTR_MCP_TOOL_COST_CURRENCY,
   ATTR_MCP_TOOL_COST_BUDGET_EXCEEDED,
   ATTR_MCP_TOOL_COST_BUDGET_SCOPE,
+  ATTR_MCP_TOOL_PRICING_STATUS,
+  ATTR_MCP_PRICING_DEFAULT_TABLE_LAST_VERIFIED,
+  MCP_TOOL_PRICING_STATUS_KNOWN,
+  MCP_TOOL_PRICING_STATUS_UNKNOWN,
+  MCP_TOOL_PRICING_STATUS_USER_OVERRIDE,
   MCP_TOOL_COST_CURRENCY_USD,
   ERROR_TYPE_TOOL_ERROR,
   GEN_AI_OPERATION_NAME_EXECUTE_TOOL,
@@ -666,8 +673,17 @@ function setupTracer(server, resolved) {
       spanProcessors.push(new BatchSpanProcessor(new OTLPTraceExporter({ url: resolved.exporterUrl })));
     }
 
+    // ADR 016 point 3: only attached when DEFAULT_PRICING is actually
+    // contributing to the effective pricing table (same condition the
+    // one-time diag.warn in resolveOptions() uses) — a resource attribute
+    // naming a table this deployment doesn't use would be noise, not signal.
+    const pricingResourceAttributes =
+      resolved.costTracking.enabled && resolved.costTracking.usingDefaultPricing
+        ? { [ATTR_MCP_PRICING_DEFAULT_TABLE_LAST_VERIFIED]: DEFAULT_PRICING_LAST_VERIFIED }
+        : {};
+
     const provider = new NodeTracerProvider({
-      resource: resourceFromAttributes({ 'service.name': resolved.serviceName }),
+      resource: resourceFromAttributes({ 'service.name': resolved.serviceName, ...pricingResourceAttributes }),
       spanProcessors,
     });
     provider.register();
@@ -765,12 +781,19 @@ function extractSessionAndRequestId(kind, extraOrCtx) {
  * extractor/calculateCost a second time — added in v0.6.0, purely
  * additive: nothing in v0.5.0 consumed this function's return value.
  *
+ * v0.11.0 (ADR 016, docs/adr/016-pricing-override-and-staleness.md point
+ * 4): also sets mcp.tool.pricing_status — unconditionally whenever usage
+ * was extracted (even with no model detected, unlike mcp.tool.model/
+ * mcp.tool.cost.*), so a dashboard can compute "% of tokens/spend unpriced"
+ * directly instead of inferring it from an attribute's absence. Passed to
+ * recordTokens/recordCost too, for the same metric-level visibility.
+ *
  * @param {import('@opentelemetry/api').Span} span
  * @param {ReturnType<import('./metrics.js').setupMeter> | null} metricsRecorder
  * @param {string | undefined} toolName
  * @param {string | undefined} sessionId
  * @param {*} result
- * @param {import('./config.js').CostTrackingOptions} costTracking
+ * @param {import('./config.js').CostTrackingOptions & { pricingOverrideKeys: Set<string> }} costTracking
  * @param {ReturnType<import('./cost/budget.js').createBudgetTracker>} budgetTracker
  * @returns {{ tokensIn: number, tokensOut: number, costUsd: number } | null}
  */
@@ -788,21 +811,34 @@ function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result
       span.setAttribute(ATTR_MCP_TOOL_MODEL, usage.model);
       span.setAttribute(ATTR_GEN_AI_RESPONSE_MODEL, usage.model);
     }
-    metricsRecorder?.recordTokens(toolName, usage.model, usage.totalTokens);
 
     let costUsd = null;
     if (usage.model) {
       costUsd = calculateCost(usage.inputTokens, usage.outputTokens, usage.model, costTracking.pricingTable);
-      if (costUsd !== null) {
-        span.setAttribute(ATTR_MCP_TOOL_COST_USD, costUsd);
-        span.setAttribute(ATTR_MCP_TOOL_COST_CURRENCY, MCP_TOOL_COST_CURRENCY_USD);
-        metricsRecorder?.recordCost(toolName, usage.model, costUsd);
+    }
 
-        const budgetResult = budgetTracker.recordAndCheck(sessionId, toolName, costUsd);
-        if (budgetResult.exceeded) {
-          span.setAttribute(ATTR_MCP_TOOL_COST_BUDGET_EXCEEDED, true);
-          span.setAttribute(ATTR_MCP_TOOL_COST_BUDGET_SCOPE, budgetResult.scope);
-        }
+    // ADR 016 point 4: provenance-based, computed against the same
+    // normalized key calculateCost() itself looked up — 'unknown' covers
+    // both "no model detected at all" and "model detected but didn't
+    // resolve to a cost" (unrecognized, or a malformed override entry).
+    const pricingStatus =
+      !usage.model || costUsd === null
+        ? MCP_TOOL_PRICING_STATUS_UNKNOWN
+        : costTracking.pricingOverrideKeys.has(normalizeModelName(usage.model))
+          ? MCP_TOOL_PRICING_STATUS_USER_OVERRIDE
+          : MCP_TOOL_PRICING_STATUS_KNOWN;
+    span.setAttribute(ATTR_MCP_TOOL_PRICING_STATUS, pricingStatus);
+    metricsRecorder?.recordTokens(toolName, usage.model, usage.totalTokens, pricingStatus);
+
+    if (costUsd !== null) {
+      span.setAttribute(ATTR_MCP_TOOL_COST_USD, costUsd);
+      span.setAttribute(ATTR_MCP_TOOL_COST_CURRENCY, MCP_TOOL_COST_CURRENCY_USD);
+      metricsRecorder?.recordCost(toolName, usage.model, costUsd, pricingStatus);
+
+      const budgetResult = budgetTracker.recordAndCheck(sessionId, toolName, costUsd);
+      if (budgetResult.exceeded) {
+        span.setAttribute(ATTR_MCP_TOOL_COST_BUDGET_EXCEEDED, true);
+        span.setAttribute(ATTR_MCP_TOOL_COST_BUDGET_SCOPE, budgetResult.scope);
       }
     }
 
@@ -1170,6 +1206,17 @@ function applyToolOutcomeThrown(toolOutcomeCounter) {
  * input — see ADR 007's "Where the new dimension lives" for why fingerprint
  * values must not change as a result.
  *
+ * Trace context propagation (v0.11.0, ADR 017,
+ * docs/adr/017-trace-context-propagation.md): the span's parent context is
+ * extractTraceContext(request.params._meta) (src/tracecontext/extract.js),
+ * not context.active() directly — when the request carries a valid W3C
+ * `traceparent` in `_meta`, this span becomes a child of the CALLING
+ * agent's own span, joining what would otherwise be two disconnected
+ * traces into one. Unconditional, no config flag: absent or malformed
+ * `_meta` resolves to context.active() unchanged, making this
+ * byte-identical to the pre-v0.11.0 behavior for every call that doesn't
+ * carry one.
+ *
  * Cost/token attribution (see applyCostAttribution above and config.js's
  * `costTracking` option) runs in both the isError and success branches,
  * independently of fingerprinting — a tool call can carry token usage
@@ -1238,8 +1285,15 @@ function wrapToolCallHandler(
   return (request, extra) => {
     const toolName = request?.params?.name;
     const spanName = toolName ? `${TOOLS_CALL_METHOD} ${toolName}` : TOOLS_CALL_METHOD;
+    // ADR 017 (docs/adr/017-trace-context-propagation.md): request.params._meta
+    // is the same shape on both SDKs (unlike sessionId/requestId below, no
+    // `kind` branching needed — confirmed against both installed SDKs'
+    // schemas). Absent/malformed _meta resolves to context.active()
+    // unchanged, making this call byte-identical to the pre-v0.11.0
+    // 3-arg startActiveSpan() call it replaces.
+    const parentContext = extractTraceContext(request?.params?._meta);
 
-    return tracer.startActiveSpan(spanName, { kind: SpanKind.SERVER }, async (span) => {
+    return tracer.startActiveSpan(spanName, { kind: SpanKind.SERVER }, parentContext, async (span) => {
       const argumentCount = Object.keys(request?.params?.arguments ?? {}).length;
       // ADR 015 Finding 3/7: v2's ctx.sessionId is the direct equivalent of
       // v1's extra.sessionId — still optional, still undefined for

@@ -996,3 +996,25 @@ were investigated, not overlooked.
 - The fixed-name gateway-header idea joins it as a second future-ADR
   candidate (see "Other identity sources checked" above); `authInfo` and
   trace id do not — both are rejected outright, not deferred.
+
+## Update (2026-08-16): the trace id rejection above no longer holds — see ADR 018
+
+**"Trace id. Dead end." (the "Other identity sources checked" list
+above) is superseded, not retracted by editing it in place** — left as
+written for the record of what was true when it was checked, per this
+document's own established practice of appending corrections rather than
+rewriting history (see the "Update" sections already throughout this
+file). ADR 017 (`docs/adr/017-trace-context-propagation.md`, Phase 2)
+closed the server-side half of the "two independent gaps, neither
+closable by fixing only one side" finding above. A follow-up
+investigation, checking whether the client-side half was still
+hypothetical rather than assuming either way, found real (if narrower
+than a first glance suggests) evidence that it is not: real, shipping
+third-party instrumentation wrapping the official v1 MCP client SDK
+already propagates `traceparent` into `_meta` today. Full findings, the
+resulting design (a new, narrowly-scoped fallback tier for Agent Thrash
+Detection's session-identity resolution — not a replacement for real
+session ids, and explicitly not a claim that v2's structural
+no-session-id gap is closed), and the adoption caveat that keeps this
+scoped honestly: ADR 018
+(`docs/adr/018-trace-id-as-thrash-fallback.md`).

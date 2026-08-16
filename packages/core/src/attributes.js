@@ -168,3 +168,48 @@ export const MCP_TOOL_COST_BUDGET_SCOPE_SESSION = 'session';
 
 /** Well-known mcp.tool.cost.budget_scope value: costTracking.budget.perToolUsd was exceeded. */
 export const MCP_TOOL_COST_BUDGET_SCOPE_TOOL = 'tool';
+
+// --- Pricing provenance (v0.11.0, non-spec, ADR 016) ---
+//
+// docs/adr/016-pricing-override-and-staleness.md. Lets a dashboard answer
+// "what fraction of spend/tokens is unpriced" as a direct query instead of
+// an inference from missing mcp.tool.cost.* attributes.
+
+/**
+ * Whether the model detected for this tool call resolved to a known price.
+ * Set whenever token usage was extracted at all (same gating as
+ * ATTR_MCP_TOOL_TOKENS_INPUT/OUTPUT/TOTAL) — present even when no model was
+ * detected, unlike ATTR_MCP_TOOL_MODEL/ATTR_MCP_TOOL_COST_USD. One of
+ * MCP_TOOL_PRICING_STATUS_KNOWN / _UNKNOWN / _USER_OVERRIDE.
+ */
+export const ATTR_MCP_TOOL_PRICING_STATUS = 'mcp.tool.pricing_status';
+
+/** Well-known mcp.tool.pricing_status value: no model was detected, or the detected model has no pricing entry. */
+export const MCP_TOOL_PRICING_STATUS_UNKNOWN = 'unknown';
+
+/** Well-known mcp.tool.pricing_status value: priced against an unmodified DEFAULT_PRICING entry. */
+export const MCP_TOOL_PRICING_STATUS_KNOWN = 'known';
+
+/** Well-known mcp.tool.pricing_status value: priced against a caller-supplied costTracking.pricing/pricingTable entry. */
+export const MCP_TOOL_PRICING_STATUS_USER_OVERRIDE = 'user_override';
+
+/**
+ * Attribute keys safe to attach to mcp.tool.tokens.total / mcp.tool.cost.total
+ * metric labels, for the cost/pricing domain specifically. Mirrors the
+ * governance pattern fingerprint/attributes.js's METRIC_SAFE_ATTRIBUTES and
+ * schema-drift/attributes.js's own same-named export already established
+ * for their domains — this domain gets its own list rather than borrowing
+ * either of those (mixing an unrelated domain's cardinality reasoning in
+ * here would obscure which ADR covers which attribute). Not re-exported
+ * from index.js, same as schema-drift's — internal governance, not public
+ * API. mcp.tool.model remains governed the way it already was, an inline
+ * cardinality comment in metrics.js, not a list entry here — see ADR 016
+ * point 4 for why that attribute's boundedness argument doesn't fit a
+ * fixed-enum list cleanly the way this one does.
+ *
+ * @type {readonly string[]}
+ */
+export const COST_METRIC_SAFE_ATTRIBUTES = Object.freeze([ATTR_MCP_TOOL_PRICING_STATUS]);
+
+/** Resource attribute (setupNodeSdk: true only) naming DEFAULT_PRICING's lastVerified date. See ADR 016 point 3. */
+export const ATTR_MCP_PRICING_DEFAULT_TABLE_LAST_VERIFIED = 'mcp.pricing.default_table_last_verified';

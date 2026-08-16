@@ -1,5 +1,142 @@
 # Changelog
 
+## 0.11.0
+
+**⚠️ Type change, not a runtime behavior change — read this first.**
+`ModelPricing` is now a discriminated union
+(`{pricingKind: 'chat', inputPer1M, outputPer1M, currency} |
+{pricingKind: 'embedding', inputPer1M, currency}`) instead of a single
+shape with both token fields always present. A TypeScript consumer with
+an existing custom `pricingTable`/`pricing` object typed against the old
+shape will see a compile error requiring `pricingKind` on each entry.
+**Runtime behavior for those same objects is unchanged**: `calculateCost()`
+treats a missing or unrecognized `pricingKind` as `'chat'`, exactly the
+behavior every pre-v0.11.0 entry already had. See ADR 016
+(`docs/adr/016-pricing-override-and-staleness.md`) point 1.
+
+### Added — Pricing table override and staleness signalling (Phase 1 of 2)
+
+`DEFAULT_PRICING` had the same disease this whole library exists to fix
+elsewhere: a hardcoded snapshot with no signal when it's wrong or stale.
+This release closes that. Full design: ADR 016
+(`docs/adr/016-pricing-override-and-staleness.md`).
+
+- **Embedding model support.** `DEFAULT_PRICING` gains OpenAI
+  `text-embedding-3-small`/`text-embedding-3-large`/`text-embedding-ada-002`,
+  Cohere `cohere-embed-v3`, and Bedrock `amazon-titan-embed-v2`.
+  Embeddings are input-token-only — rather than modeling that as
+  `outputPer1M: 0` (indistinguishable from a data-entry bug), a new
+  `pricingKind: 'chat' | 'embedding'` discriminator makes it explicit; an
+  `'embedding'` entry has no `outputPer1M` field at all, and
+  `calculateCost()` never reads `outputTokens` for one (still validated as
+  a non-negative finite number, just never charged for).
+- **`costTracking.pricing`: per-model merge over defaults.** New option,
+  a *partial* pricing table merged per-model OVER `pricingTable ??
+  DEFAULT_PRICING` — each key you supply replaces that model's entire
+  pricing entry, every model you don't name is untouched. This is now the
+  recommended way to correct a stale price or add a model
+  `DEFAULT_PRICING` doesn't know about, without spreading the whole
+  default table by hand (the old workaround the README used to teach).
+  `costTracking.pricingTable` keeps its existing full-replace behavior,
+  unchanged, for the narrower "I want only my own models" case — see ADR
+  016 point 2 for why both exist.
+- **`mcp.tool.pricing_status` span + metric attribute.** One of `"known"`
+  | `"unknown"` | `"user_override"`, set whenever token usage was
+  extracted at all — even with no model detected (`"unknown"` in that
+  case), unlike the existing model/cost attributes. Added to the
+  `mcp.tool.tokens.total` / `mcp.tool.cost.total` metrics too, so a
+  dashboard can compute "% of tokens/spend unpriced" as a direct
+  aggregation instead of inferring it from missing data. Provenance-based:
+  `"user_override"` means the model's key came from your
+  `pricing`/`pricingTable`, regardless of whether the numbers you supplied
+  happen to match `DEFAULT_PRICING`'s own entry.
+- **Staleness signalling.** `DEFAULT_PRICING_LAST_VERIFIED` (also
+  exported) names the table's last-checked date; once it's more than 90
+  days old, `instrumentMcpServer()` fires a one-time `diag.warn()`, and,
+  when `setupNodeSdk: true`, also attaches an
+  `mcp.pricing.default_table_last_verified` resource attribute. Both only
+  fire when `DEFAULT_PRICING` is actually contributing to the effective
+  table — a caller who fully replaced it via `pricingTable` isn't using
+  our defaults, so a warning about them would be misleading.
+  `isDefaultPricingStale(now?, thresholdDays?)` (also exported) is the
+  pure function behind the warning, for callers who want to check it
+  themselves.
+- **Bedrock region caveat, documented not modeled.** Bedrock pricing
+  varies by region; `DEFAULT_PRICING`'s Bedrock entries (Nova, and the new
+  Titan embedding entry) assume us-east-1 list price and the table is not
+  region-keyed — no tool-result usage shape this package recognizes
+  carries a region signal to key a lookup on. Documented loudly in the
+  README and in `pricing.js`; override via `costTracking.pricing` for a
+  different region. See ADR 016 point 5.
+- `calculateCost()` gained defensive validation for malformed pricing
+  entries (missing/negative/non-numeric `inputPer1M`/`outputPer1M`),
+  since `pricing`/`pricingTable` now make it reachable with
+  caller-supplied shapes it previously never had to distrust — degrades
+  to `null`, same as an unknown model, never throws.
+
+### Added — W3C Trace Context propagation over MCP `_meta` (Phase 2 of 2, server-side only)
+
+The most-complained-about gap in agent observability: an agent's own
+trace (LangGraph or otherwise) and the MCP server's trace for the tool
+call it made were always two disconnected traces, with no edge between
+them. Full design, including the sampling and conflicting-context
+decisions below: ADR 017 (`docs/adr/017-trace-context-propagation.md`).
+
+- **`tools/call` requests carrying a valid W3C `traceparent` in
+  `params._meta` now become a child of the calling agent's own span**,
+  joining what were two disconnected traces into one — under both MCP v1
+  and v2, with zero configuration and no new option. `tracestate` is
+  propagated too, when present. Works for any client already emitting
+  `traceparent` via a standard OTel SDK's `propagation.inject()` in any
+  language — this isn't Node/JS-specific on the client side, only on
+  which side of the wire this release implements.
+- **The upstream sampling decision is honored automatically, by
+  construction, with no sampling logic written for this feature**: the
+  extracted `SpanContext` is marked `isRemote: true` with the real parsed
+  `traceFlags`, which is exactly what the SDK's own default
+  `ParentBasedSampler` already keys its remote-parent decision off of. A
+  not-sampled upstream `traceparent` means this tool-call span is not
+  recorded or exported, matching the calling agent's own choice — see the
+  ADR's "Sampling" section for why forcing sampling regardless was
+  considered and rejected.
+- **A `_meta`-extracted context always replaces, never merges with, an
+  already-active local context** (e.g. an ambient HTTP-server span from
+  auto-instrumentation on a Streamable HTTP transport) — the message-level
+  `_meta` context is the semantically correct parent for one tool call,
+  full stop, regardless of what transport-level span it happened to
+  arrive inside. See the ADR's "Conflicting `_meta.traceparent`" section.
+- **Absent, malformed, or unparseable `_meta`/`traceparent` produces
+  behavior that is byte-identical to pre-v0.11.0** — not merely
+  equivalent to it: confirmed by reading both `NoopTracer` and the real
+  SDK `Tracer`'s own `startActiveSpan()` fallback (`ctx ?? context.active()`),
+  which is exactly what this feature's `extractTraceContext()` returns
+  for every case that isn't a valid `traceparent`. No `diag.warn()` for
+  the common "client doesn't send `_meta.traceparent`" case — see the
+  ADR's "no warn spam" constraint.
+- **Zero new dependencies.** `@opentelemetry/core`'s
+  `W3CTraceContextPropagator` was the obvious reference implementation
+  and was deliberately not taken as a dependency, per
+  `CONTRIBUTING.md`'s "no new dependencies without discussion first" —
+  everything needed except the traceparent regex itself (~10 lines,
+  matching `@opentelemetry/core`'s own validation field-for-field) was
+  already available from `@opentelemetry/api`, already a peer dependency
+  — including `createTraceState()`, a fully spec-validated `tracestate`
+  parser. Full reasoning: ADR 017's "No new dependency" section.
+- **Server-side extraction only.** The client-side shim that would let a
+  Node/Python agent framework *set* `_meta.traceparent` on outgoing calls
+  is explicitly out of scope for this phase — extraction is independently
+  useful today, for free, to any client whose own tooling already sets
+  `_meta` in this shape. Tracked as future work, not implied as solved.
+
+Also fixed in this release: two places (`index.d.ts`'s
+`instrumentMcpServer()` docblock, and this file's own v0.10.0 entry
+below) still described `docs/known-gaps.md` entries 6/7/8 using language
+that read as still-open, or as scoped out of v0.10.0 — both were stale.
+Entries 7 and 8 have been fully fixed since v0.10.0 with no open caveats;
+entry 6's fallback-session-id half is fixed too, narrowed to a smaller,
+genuinely-still-open remainder (see the corrected v0.10.0 entry below and
+`index.d.ts`'s updated docblock for the accurate, current accounting).
+
 ## 0.10.0
 
 **⚠️ Behavior change, unrelated to the feature below — read this first.**
@@ -60,15 +197,32 @@ new was added for this, since ADR 012's original design already covers
 this exact deployment shape, v2 just makes it the default instead of an
 edge case.
 
-**Two gaps not closed this release, both tracked in `docs/known-gaps.md`
-with a "Status update (v0.10.0)" note:** Agent Thrash Detection's fallback
-session id still doesn't survive v2's per-request factory pattern even
-with `instanceKey` set (entry 6 — real session ids work fine either way),
-and `isSingleConnectionTransport()`'s transport-detection heuristic still
-misclassifies the transport `createMcpHandler` builds internally (entry
-8, live as of this release, not merely forward-looking). Both were
-explicitly scoped out of this round, not overlooked; workaround for
-either: `thrashDetection: { enabled: false }`.
+**Correction (recorded here rather than silently edited): both gaps below
+were actually closed in this same v0.10.0 release, not left open.** The
+paragraph originally here said entries 6 and 8 (`docs/known-gaps.md`)
+were scoped out of this round — true of the round that produced the text
+above, not of what actually shipped. A follow-up investigation, completed
+before v0.10.0 was cut, folded both fixes back in: `isSingleConnectionTransport()`
+no longer misclassifies the transport `createMcpHandler` builds internally
+(entry 8 — fully fixed: v2 now requires positive confirmation,
+`transport.constructor.name === 'StdioServerTransport'`, instead of
+inferring single-connection from an absent `sessionId` property), and
+Agent Thrash Detection's fallback session id is now registry-backed via
+`instanceKey` (entry 6's fallback-id gap — fixed: repeated
+`instrumentMcpServer()` calls sharing an `instanceKey` now reuse the same
+generated id instead of a fresh one per call). Both fixes shipped in the
+same commit, in a specific order — fixing detection (entry 8) before
+sharing the fallback id (entry 6) — since sharing it first would have made
+entry 8's false positive worse, not better.
+
+**What remains genuinely open, narrower than either original gap:**
+`thrashSessionState` (whether a server has ever proven itself
+session-aware) still isn't registry-backed, and — structurally, not a
+bug this library can fix — MCP spec 2026-07-28 removes protocol-level
+sessions entirely, so no configuration of this library can produce a
+*real* session id for a spec-2026-07-28-native deployment in the first
+place. See ADR 015's final "Update ... Findings 3 and 8 landed here too"
+section and `docs/known-gaps.md` entries 6 and 8 for the full accounting.
 
 ## 0.9.0
 
