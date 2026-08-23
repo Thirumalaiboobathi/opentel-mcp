@@ -658,6 +658,28 @@ region.
   on the span today, so "Fleet-wide fingerprint frequency" below has
   nothing to substitute with for this scope specifically. `perToolUsd` is
   unaffected — it never depended on session id.
+- **A budget only ever sees priced spend — an unpriced call (`mcp.tool.pricing_status:
+  "unknown"`) never reaches it at all, and never counts toward
+  `perSessionUsd`/`perToolUsd`, regardless of how many tokens it burned**
+  (`docs/known-gaps.md` entry 9). v0.12.0 makes this loud instead of
+  silent, but does not close it: setting a `budget` at all fires a one-time
+  `diag.warn()` naming the constraint up front, and the first time an
+  actual unpriced call happens while a budget is active, a second one-time
+  `diag.warn()` names the model and which scope(s) are configured. Both
+  are pure diagnostics — no new span attribute, no change to
+  `mcp.tool.cost.budget_exceeded`'s meaning, and an unpriced call still
+  contributes nothing to the running total. Deliberate: inventing a
+  fallback price for an unpriceable call would trade one confidently-wrong
+  number (silent zero) for a different one (a made-up price) — the exact
+  failure this attribute/warning pair exists to catch, one layer up. If
+  you're seeing either warning, the fix is the same one "Overriding
+  pricing" above already documents: add the model to `costTracking.pricing`.
+  Both warnings inherit the same per-tracker-instance granularity as the
+  budget tracker itself — see the item above and `src/cost/budget.js`'s
+  `createBudgetTracker()` docblock for exactly what that means under a
+  fresh-`Server`-per-request deployment (a stable `instanceKey` shares one
+  tracker, and one already-armed warning, across calls; without one, both
+  warnings re-fire on every request).
 
 ## Agent Thrash Detection (v0.6.0+)
 
@@ -895,8 +917,39 @@ in order:
    shared fallback key, even if `assumeSingleSession` is set. A server
    that has proven it hands out real session ids doesn't get to fall back
    just because one particular call lacked one.
-3. **Before any real session id has ever been observed**, a generated
-   per-connection fallback id is used only when:
+3. **(v0.12.0, ADR 018) Before any real session id has ever been observed,
+   and before the generated-fallback rule below runs**, if this call's
+   span has a validly-extracted REMOTE trace parent — i.e.
+   `request.params._meta` carried a valid W3C `traceparent` (see "Trace
+   Context Propagation" below) that resolved to a remote `SpanContext`,
+   not a freshly-generated root span — that parent's **trace id** is used
+   as the session-id candidate instead. Never reads a span's own `traceId`
+   unconditionally: a root span's trace id is fresh, random, and different
+   on every single call, so using it without confirming it was actually
+   inherited from a real upstream parent would silently turn "skip,
+   undetermined" into "always produce a session id that never matches the
+   previous call's" — quieter and worse than skipping. Does **not** mark
+   the server session-aware (`hasSeenRealSessionId` stays untouched) — a
+   trace id being present on one call is a fact about that one client's
+   behavior, not a proof about the transport itself.
+
+   **⚠️ Read this before assuming it closes the stateless-MCP session gap
+   below.** This only fires when the calling *client* chooses to
+   propagate trace context into `_meta.traceparent` — today, that means
+   third-party OTel instrumentation (e.g.
+   `@arizeai/openinference-instrumentation-mcp`) wrapping **v1-based** SDK
+   clients, not either MCP SDK's own built-in behavior; no
+   v2-targeting instrumentation exists yet. **It does not close
+   `docs/known-gaps.md` entry 6** — a v2/2026-07-28-native deployment
+   whose client doesn't propagate `_meta.traceparent` (the default,
+   unconfigured case for essentially every v2 client today) gets nothing
+   new here: the exact same skip behavior as before. Full investigation,
+   including why one trace is typically one agent turn (not a protocol
+   guarantee) and the residual merge risk this accepts: ADR 018
+   (`docs/adr/018-trace-id-as-thrash-fallback.md`).
+4. **Before any real session id has ever been observed, and no usable
+   trace id was found above**, a generated per-connection fallback id is
+   used only when:
    - the transport is **structurally confirmed single-connection** — no
      `sessionId` property on `server.transport` at all (e.g. stdio's
      `StdioServerTransport`, which has no session concept whatsoever), or

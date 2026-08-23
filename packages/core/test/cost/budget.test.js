@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { diag } from '@opentelemetry/api';
 import { createBudgetTracker } from '../../src/cost/budget.js';
 
 describe('createBudgetTracker', () => {
@@ -148,6 +149,111 @@ describe('createBudgetTracker', () => {
       expect(tracker.recordAndCheck('s1', 'tool', 2)).toEqual({ exceeded: true, scope: 'session' });
       expect(tracker.recordAndCheck('s1', 'tool', 0.001)).toEqual({ exceeded: true, scope: 'session' });
       expect(tracker.recordAndCheck('s1', 'tool', 0.001)).toEqual({ exceeded: true, scope: 'session' });
+    });
+  });
+
+  describe('construction-time unpriced-budget warning (v0.12.0, known-gaps entry 9)', () => {
+    it('warns once at construction when perSessionUsd is configured', () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      createBudgetTracker({ perSessionUsd: 5 });
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toMatch(/perSessionUsd\/perToolUsd/);
+      warnSpy.mockRestore();
+    });
+
+    it('warns once at construction when only perToolUsd is configured', () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      createBudgetTracker({ perToolUsd: 5 });
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn at construction when no budget is configured', () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      createBudgetTracker(undefined);
+      createBudgetTracker({});
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('warns exactly once per tracker even though it only fires at construction', () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const tracker = createBudgetTracker({ perSessionUsd: 5 });
+      tracker.recordAndCheck('s1', 'tool', 1);
+      tracker.recordAndCheck('s1', 'tool', 1);
+      tracker.recordAndCheck('s1', 'tool', 100);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('recordUnpriced() — first-unpriced-call warning (v0.12.0, known-gaps entry 9)', () => {
+    it('warns on the first unpriced call when a budget is configured, naming the model and scope', () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const tracker = createBudgetTracker({ perSessionUsd: 5 });
+      warnSpy.mockClear(); // drop the construction-time warning, isolate this test to recordUnpriced()'s own call
+
+      tracker.recordUnpriced('some-unlisted-model');
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toContain('some-unlisted-model');
+      expect(warnSpy.mock.calls[0][0]).toMatch(/perSessionUsd/);
+      warnSpy.mockRestore();
+    });
+
+    it('names both scopes when both perSessionUsd and perToolUsd are configured', () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const tracker = createBudgetTracker({ perSessionUsd: 5, perToolUsd: 2 });
+      warnSpy.mockClear();
+
+      tracker.recordUnpriced('some-model');
+
+      expect(warnSpy.mock.calls[0][0]).toMatch(/perSessionUsd/);
+      expect(warnSpy.mock.calls[0][0]).toMatch(/perToolUsd/);
+      warnSpy.mockRestore();
+    });
+
+    it('describes an undetected model without throwing', () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const tracker = createBudgetTracker({ perToolUsd: 5 });
+      warnSpy.mockClear();
+
+      expect(() => tracker.recordUnpriced(undefined)).not.toThrow();
+      expect(warnSpy.mock.calls[0][0]).toMatch(/no model detected/);
+      warnSpy.mockRestore();
+    });
+
+    it('warns only once per tracker instance, not on every subsequent unpriced call', () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const tracker = createBudgetTracker({ perSessionUsd: 5 });
+      warnSpy.mockClear();
+
+      tracker.recordUnpriced('model-a');
+      tracker.recordUnpriced('model-b');
+      tracker.recordUnpriced('model-a');
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn on an unpriced call when no budget is configured', () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const tracker = createBudgetTracker(undefined);
+      warnSpy.mockClear();
+
+      tracker.recordUnpriced('some-model');
+
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('does not affect recordAndCheck()\'s own behavior or return shape', () => {
+      const tracker = createBudgetTracker({ perSessionUsd: 5 });
+      tracker.recordUnpriced('some-model');
+      // A subsequent priced call still accumulates and checks normally —
+      // recordUnpriced() never touches sessionCostMap/toolCostMap.
+      expect(tracker.recordAndCheck('s1', 'tool', 3)).toEqual({ exceeded: false, scope: null });
+      expect(tracker.recordAndCheck('s1', 'tool', 3)).toEqual({ exceeded: true, scope: 'session' });
     });
   });
 });

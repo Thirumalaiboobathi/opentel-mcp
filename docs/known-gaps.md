@@ -874,6 +874,52 @@ leaving real-session-id-based detection intact.
 the cost-aware sampling recipe (`docs/adr/011-cost-aware-sampling.md`) —
 not an external report.
 
+**Status update (v0.12.0): the visibility half is fixed; the behavior
+question below remains open and unscheduled.** Assessed against exactly
+the two options this entry's own "Possible directions" list below
+sketched, and resolved for the smaller of the two: `createBudgetTracker()`
+(`src/cost/budget.js`) now fires a one-time `diag.warn()` at construction
+whenever `perSessionUsd`/`perToolUsd` is configured at all, naming the
+constraint up front, and a second one-time `diag.warn()` — via a new
+`recordUnpriced(model)` method, called from `applyCostAttribution()`'s
+existing `costUsd === null` branch, the same branch that already sets
+`mcp.tool.pricing_status: "unknown"` — the first time an unpriced call
+under an active budget is actually observed, naming the model and which
+scope(s) are configured. Both no-op when no budget is configured. Neither
+changes `BudgetCheckResult`'s shape, adds a span attribute, or alters
+`recordAndCheck()`'s behavior — this is diagnostics only, deliberately: an
+unpriced call still contributes nothing to `perSessionUsd`/`perToolUsd`'s
+running totals, exactly as this entry originally reported. What changed is
+that the gap is now loud rather than silent, not that it's closed.
+
+**Why the second option (routing unpriced calls into the tracker with an
+explicit marker) was not built.** Argued explicitly before implementing
+anything: making an unpriced call actually *count* toward a USD budget
+means inventing a number for it — a configurable fallback price, or some
+other stand-in — and a wrong fallback price is a *different*
+confidently-wrong number, not a fix for the underlying disease this
+library exists to catch. The whole value of a budget guardrail is that its
+number can be trusted; manufacturing one to fill a gap would trade one
+silent-failure shape for a quieter, harder-to-notice one wearing a "the
+budget is working" costume. That direction also isn't a small addition —
+it needs a real decision about what "exceeded" even means for a call with
+no priced cost (a new token-count threshold? an "unknown = immediately
+over budget" policy?), new public type/attribute surface, and by this
+project's own consistent practice for exactly this class of decision
+(ADR 011, ADR 016, ADR 018 all gated a public behavior/API change behind
+an ADR before code), its own investigation — not something to fold
+silently into a diagnostics-only patch. Left here as still open and
+unscheduled, not attempted.
+
+**Tests:** `test/cost/budget.test.js`'s two new describe blocks
+(construction-time warning, `recordUnpriced()`) cover both warnings' exact
+one-time-per-tracker-instance firing behavior, the no-budget-configured
+no-op case, and that the warning names the model and configured scope(s).
+Confirmed live end-to-end through the real `instrumentMcpServer()` entry
+point too (a real unrecognized-model tool result, a configured
+`perSessionUsd`, both warnings fire once each, a second identical call
+re-fires neither).
+
 ### Body
 
 `applyCostAttribution()` (`src/instrument.js`) only calls

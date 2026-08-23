@@ -764,7 +764,13 @@ function extractSessionAndRequestId(kind, extraOrCtx) {
  * (src/cost/budget.js) — if that reports the call pushed a configured
  * budget over its limit, sets mcp.tool.cost.budget_exceeded /
  * mcp.tool.cost.budget_scope. An unrecognized model silently skips cost
- * *and* budget attribution — the token attributes still land.
+ * *and* budget attribution — the token attributes still land. v0.12.0
+ * (docs/known-gaps.md entry 9): that "silently" is now only true of the
+ * span/metrics — the same branch calls `budgetTracker.recordUnpriced()`
+ * instead, which fires a one-time diag.warn() naming the model, but only
+ * when a budget is actually configured (a pure no-op otherwise). No
+ * behavior change: this is diagnostics only, not a new price or a new
+ * budget-exceeded condition.
  *
  * No-op when `costTracking.enabled` is false. Called from both the
  * isToolResultError and success branches below (there's a result to read
@@ -840,6 +846,14 @@ function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result
         span.setAttribute(ATTR_MCP_TOOL_COST_BUDGET_EXCEEDED, true);
         span.setAttribute(ATTR_MCP_TOOL_COST_BUDGET_SCOPE, budgetResult.scope);
       }
+    } else {
+      // v0.12.0, docs/known-gaps.md entry 9: the same condition that set
+      // pricingStatus to "unknown" above — usage was extracted, but never
+      // reached recordAndCheck() at all, so a configured budget silently
+      // never saw it. recordUnpriced() no-ops unless a budget is actually
+      // configured, and warns at most once per tracker instance — see its
+      // own docblock (src/cost/budget.js).
+      budgetTracker.recordUnpriced(usage.model);
     }
 
     return { tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: costUsd ?? 0 };

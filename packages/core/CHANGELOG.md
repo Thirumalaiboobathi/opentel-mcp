@@ -1,5 +1,135 @@
 # Changelog
 
+## 0.12.0
+
+Agent Thrash Detection gains a new, narrower session-identity fallback for
+calls that carry no real session id but do carry a client-propagated W3C
+trace context. This release also fixes two real bugs in the tail-sampling
+recipe v0.8.0 introduced, and adds visibility for a silent budget-tracking
+gap found during that same investigation. Full design for the fallback
+tier: ADR 018 (`docs/adr/018-trace-id-as-thrash-fallback.md`).
+
+### Added — trace id as a thrash-detection session-id fallback (ADR 018)
+
+- **New tier in `resolveThrashSessionId()`** (`src/instrument.js`), reached
+  only when no real session id has ever been observed on this server, and
+  evaluated before the existing generated-UUID/skip fallback: if a
+  `tools/call` request's span has a validly-extracted REMOTE parent — i.e.
+  `request.params._meta` carried a valid W3C `traceparent` that
+  `extractTraceContext()` (ADR 017) turned into a remote `SpanContext` —
+  that parent's trace id is used as the session-id candidate for
+  thrash-detection grouping. Gated on
+  `trace.getSpanContext(parentContext)?.isRemote === true`, never on a
+  span's own `traceId` read unconditionally — a root span's trace id is
+  freshly, randomly generated on every call, and reading it unconditionally
+  would have silently turned today's honest "skip, undetermined" into
+  "always produce a session id that never matches the previous call's,"
+  which is worse than skipping. See the ADR's "THE TRAP" for the full
+  argument.
+- Real `extra.sessionId` still wins unconditionally in every case
+  (steps 1–2 of the resolution order untouched, byte for byte) — a trace
+  id is only ever consulted for a call that has no real session id at all.
+- Does **not** set `thrashSessionState.hasSeenRealSessionId` — that flag
+  means "this transport hands out real session identity," a permanent
+  per-server fact; a trace id being present on one call is a per-call fact
+  about that one client's behavior, not proof about the transport.
+- No new `diag.warn()` for this tier, deliberately — unlike the
+  generated-UUID fallback (which warns because it's this library guessing
+  an unproven assumption about transport topology), a trace-id candidate
+  is real, client-supplied data with no operator action item to flag, and
+  warning on every occurrence — potentially far more often than the
+  once-per-server UUID warning — would just train operators to ignore this
+  library's warnings generally.
+- No changes to `ThrashDetector`/`thrash/detector.js` — its composite key
+  already treats `sessionId` as opaque.
+
+  **Read the constraint before assuming this closes stateless MCP's
+  session gap.** This tier only fires when the calling *client* chooses to
+  propagate trace context into `_meta.traceparent` — today, per ADR 018's
+  investigation, that means third-party OTel instrumentation
+  (`@arizeai/openinference-instrumentation-mcp` and equivalents) wrapping
+  **v1-based** SDK clients, not either MCP SDK's own built-in behavior, and
+  **no v2-targeting instrumentation was found to exist anywhere**. **This
+  does NOT close `docs/known-gaps.md` entry 6's structural finding** — a
+  v2/2026-07-28-native deployment whose client doesn't propagate
+  `_meta.traceparent` (the default, unconfigured case for essentially
+  every v2 client today) gets nothing new from this release: the exact
+  same `null`/skip behavior as before. See the README's "Session id
+  resolution" section and ADR 018's "Adoption caveat" for the full scope.
+
+### Added — `mcp.tool.schema_drift_detected` span attribute
+
+- New boolean span attribute, set alongside (never instead of) the
+  existing `mcp.tool.schema_drift.detected` span event
+  (`schema-drift/emitter.js`) — the same resolution ADR 011 already
+  applied to thrash detection (`mcp.tool.thrash_detected`) for the
+  identical event-vs-attribute ambiguity: whether a Collector
+  `tailsamplingprocessor`'s `boolean_attribute` policy can match
+  span-*event* data (as opposed to top-level span attributes) could not be
+  confirmed either way (Go source, not installed in this repository). Only
+  ever set to `true`, and only when drift was actually detected — never
+  explicitly set `false`.
+
+### Fixed — tail-sampling recipe referenced a non-existent span attribute
+
+- The README's `tailsamplingprocessor` recipe recommended keying a
+  `boolean_attribute` policy on `mcp.tool.schema_drift.detected` — but
+  that string was only ever a span *event* name and a metric counter name
+  (`schema-drift/attributes.js`), never passed to `span.setAttribute()`
+  anywhere in this package. As documented, that policy could never have
+  matched anything. Fixed by the new `mcp.tool.schema_drift_detected`
+  attribute above.
+- Also added a `string_attribute` policy on `mcp.tool.pricing_status =
+  "unknown"` — v0.11.0's "confidently wrong zero" problem reappearing at
+  the sampling layer: an unpriced call has real extracted token usage but
+  no `mcp.tool.cost.usd`, indistinguishable from a genuinely free call to
+  a numeric-threshold policy.
+- Recipe YAML extracted to `docs/recipes/tail-sampling.yaml` (repo-only,
+  not published — the same carve-out `dashboards/` already has), with a
+  new cross-check test (`test/recipes/tail-sampling-attributes.test.js`)
+  asserting every attribute a policy references is a real, exported
+  constant AND actually passed to `span.setAttribute()` — the check that
+  would have caught this bug automatically. The README now references the
+  file instead of duplicating it, and states plainly that attribute
+  *names* are cross-checked but Collector policy *behavior* itself has not
+  been run end to end (no Docker/Collector available in this project's dev
+  environment).
+- `docs/known-gaps.md` entry 9 (new): an unpriced call never reaches
+  `budgetTracker.recordAndCheck()`, so budget guardrails cannot trip on
+  unpriced spend regardless of amount. The visibility half is fixed in
+  this same release — see "Added" below — but the underlying accounting
+  behavior is not; what should happen to an unpriced call's budget
+  accounting is a real design question, deliberately left open.
+
+### Added — visibility for unpriced spend against a configured budget (known-gaps entry 9)
+
+- **Two new one-time `diag.warn()` diagnostics in `createBudgetTracker()`**
+  (`src/cost/budget.js`), no behavior change and no new public surface:
+  one fires at construction whenever `perSessionUsd`/`perToolUsd` is
+  configured at all, stating plainly that unpriced calls won't count
+  toward it; the other — a new `recordUnpriced(model)` method, called from
+  `applyCostAttribution()`'s existing `costUsd === null` branch
+  (`src/instrument.js`), the same branch that already sets
+  `mcp.tool.pricing_status: "unknown"` — fires the first time an unpriced
+  call under an active budget is actually observed, naming the model and
+  which scope(s) are configured. Both no-op when no budget is configured;
+  neither changes `BudgetCheckResult`'s shape or adds a span attribute.
+- **Deliberately diagnostics only — no fallback pricing was added.**
+  Making an unpriced call actually count toward a USD budget means
+  inventing a number for it, and a wrong invented price is a *different*
+  confidently-wrong number, not a fix — the same disease this warning
+  exists to flag, one layer up. See `docs/known-gaps.md` entry 9's
+  "Status update (v0.12.0)" for the full argument against building that
+  now, and why it stays open as a future, ADR-gated decision rather than
+  folded into this patch.
+- Both warnings share the budget tracker's own existing
+  once-per-tracker-instance granularity (`createBudgetTracker()`'s own
+  docblock) — under the default (no `instanceKey`), a fresh-server-per-request
+  deployment re-warns on every request for both, the same inherited-caveat
+  shape `docs/known-gaps.md` entry 6 documents for the thrash fallback
+  warning; a stable `instanceKey` shares one tracker, and one already-armed
+  warning, across calls, same as every other registry-backed tracker.
+
 ## 0.11.0
 
 **⚠️ Type change, not a runtime behavior change — read this first.**
