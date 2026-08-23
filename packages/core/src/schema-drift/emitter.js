@@ -15,7 +15,9 @@
  * instrument uses (`metrics.getMeter('opentel-mcp', packageVersion)` —
  * see src/metrics.js's own docblock on why a second getMeter() call
  * still reports under the same meter to any backend), plus one span
- * event on the currently active span.
+ * event and one boolean span attribute (v0.12.0, ADR 011,
+ * docs/adr/011-cost-aware-sampling.md — see ATTR_MCP_TOOL_SCHEMA_DRIFT_DETECTED's
+ * own docblock in ./attributes.js for why) on the currently active span.
  *
  * "No active span" handling follows the SAME precedent this module
  * mirrors, not an invented behavior: ADR 010's "What gets emitted"
@@ -38,7 +40,7 @@
 
 import { trace, metrics } from '@opentelemetry/api';
 import { ATTR_GEN_AI_TOOL_NAME } from '../attributes.js';
-import { SPAN_EVENT_NAME_SCHEMA_DRIFT_DETECTED, ATTRIBUTE_KEYS } from './attributes.js';
+import { SPAN_EVENT_NAME_SCHEMA_DRIFT_DETECTED, ATTR_MCP_TOOL_SCHEMA_DRIFT_DETECTED, ATTRIBUTE_KEYS } from './attributes.js';
 
 /** @typedef {import('./types.d.ts').SchemaDriftEvent} SchemaDriftEvent */
 
@@ -66,7 +68,12 @@ export function createSchemaDriftEmitter(packageVersion) {
      * full detail, including the previous/current hashes and (only when
      * non-empty, mirroring `mcp.failure.validation_paths`'s
      * omit-rather-than-set-empty discipline, ADR 009) the changed field
-     * names. Never throws: metrics and the span event are independently
+     * names, plus (v0.12.0, ADR 011) a boolean
+     * `mcp.tool.schema_drift_detected` span ATTRIBUTE on that same span —
+     * a Collector tail-sampling policy can key on it directly, without
+     * depending on whether span-event data is matchable at all (see
+     * ATTR_MCP_TOOL_SCHEMA_DRIFT_DETECTED's docblock in ./attributes.js).
+     * Never throws: metrics and the span event/attribute are independently
      * guarded, so a failure in one never suppresses the other, the same
      * fail-open philosophy as every other emitter in this codebase.
      *
@@ -98,6 +105,7 @@ export function createSchemaDriftEmitter(packageVersion) {
         if (event.changedFields?.length > 0) attrs[ATTRIBUTE_KEYS.CHANGED_FIELDS] = event.changedFields;
 
         span.addEvent(SPAN_EVENT_NAME_SCHEMA_DRIFT_DETECTED, attrs);
+        span.setAttribute(ATTR_MCP_TOOL_SCHEMA_DRIFT_DETECTED, true);
       } catch {
         // Never throw — see emit()'s docblock.
       }

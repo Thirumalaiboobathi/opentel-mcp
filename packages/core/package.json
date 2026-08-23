@@ -78,6 +78,7 @@
     "@opentelemetry/sdk-metrics": "^2.9.0",
     "@opentelemetry/sdk-trace-base": "^2.9.0",
     "@vitest/coverage-v8": "^2.1.9",
+    "js-yaml": "^4.3.1",
     "typescript": "^7.0.2",
     "vitest": "^2.1.8",
     "zod": "^4.4.3"

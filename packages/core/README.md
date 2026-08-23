@@ -1231,6 +1231,25 @@ silently and only the metric still fires.
 | `mcp.tool.schema_drift.removed_fields` | Property names removed — present only when `type` is `field_removed` or `multiple` |
 | `mcp.tool.schema_drift.changed_fields` | Property names whose value changed — present only when `type` is `type_changed` or `multiple` |
 
+**Also sets a boolean span *attribute*, `mcp.tool.schema_drift_detected: true`**,
+on that same span, alongside the event above (v0.12.0, ADR 011 —
+`docs/adr/011-cost-aware-sampling.md`, the same resolution already applied
+to `mcp.tool.thrash_detected` above, for the identical reason). This
+exists for one specific consumer: an OpenTelemetry Collector's
+`tailsamplingprocessor`, whose `boolean_attribute` policy matches
+top-level span attributes — whether such a policy can also match
+span-*event* data was investigated and left genuinely unverified (no Go
+source to check against in this repository), so the attribute exists to
+remove that uncertainty entirely for anyone wiring up schema-drift-aware
+tail sampling. See "Cost-aware trace sampling (a Collector recipe, not a
+library feature)" below. Deliberately a different string from the
+`mcp.tool.schema_drift.detected` span event/metric name above, for the
+same reason `mcp.tool.thrash_detected` doesn't reuse `mcp.tool.loop.detected`'s
+string: the one reader who most needs this name to be unambiguous —
+someone writing a Collector tail-sampling policy — would otherwise see one
+bare string with no way to tell which of the two same-named signals
+they're keying on.
+
 ### Configuration
 
 All fields of `schemaDrift`, each independently overridable by its own
@@ -1493,86 +1512,52 @@ fundamentally bigger, more invasive ask than `instrumentMcpServer(server,
 options)`, and exactly the class of intervention this project has already
 ruled out elsewhere (never override a host's own OpenTelemetry setup).
 
-**What this package does instead: mark, don't decide.** Two of the three
+**What this package does instead: mark, don't decide.** Four of the five
 signals a tail-sampling policy needs already exist as plain span
-attributes with no changes required — `mcp.tool.cost.usd` (see "Cost &
-Token Attribution" above) and `mcp.tool.cost.budget_exceeded` (a
-cumulative budget guardrail, same section). The third,
-`mcp.tool.thrash_detected` — a boolean span attribute set alongside the
-existing `mcp.loop.detected` span event (see "Agent Thrash Detection" →
-"Span event" above) — is the one new addition this release makes,
-specifically so a tail-sampling policy has an unambiguous, attribute-level
-signal to key on. The actual decision — buffer a trace, evaluate a
-policy, keep or drop the whole thing — belongs to the OpenTelemetry
-Collector's `tailsamplingprocessor`, which already does this correctly,
-already handles the hard parts (per-trace span buffering across a wait
-window, multi-service traces, decision policies), and runs where it can
-see every span in a trace regardless of which process produced it —
-something this library, running inside one MCP server process, never can.
+attributes with no changes required — `mcp.tool.cost.usd` and
+`mcp.tool.pricing_status` (see "Cost & Token Attribution" above),
+`mcp.tool.cost.budget_exceeded` (a cumulative budget guardrail, same
+section), and `mcp.tool.thrash_detected` — a boolean span attribute set
+alongside the existing `mcp.loop.detected` span event (see "Agent Thrash
+Detection" → "Span event" above). The fifth, `mcp.tool.schema_drift_detected`
+— a boolean span attribute set alongside the existing
+`mcp.tool.schema_drift.detected` span event (see "Tool schema drift
+detection" → "Span event" above) — is the one new addition this release
+makes, for the identical reason `mcp.tool.thrash_detected` was added in
+the first place: a tail-sampling policy needs an unambiguous,
+attribute-level signal to key on, and a span *event* isn't confirmed
+matchable the same way (see below). The actual decision — buffer a trace,
+evaluate a policy, keep or drop the whole thing — belongs to the
+OpenTelemetry Collector's `tailsamplingprocessor`, which already does this
+correctly, already handles the hard parts (per-trace span buffering
+across a wait window, multi-service traces, decision policies), and runs
+where it can see every span in a trace regardless of which process
+produced it — something this library, running inside one MCP server
+process, never can.
 
 ### A working Collector config
 
-Real, pasteable `tailsamplingprocessor` config — not pseudo-config. Keeps
-any trace containing an expensive call, a budget-exceeded call, or a
-detected thrash loop; everything else gets an ordinary probabilistic
-sample. (Standard OpenTelemetry Collector Contrib syntax — external to
-this repository, so treat field names as this component's own documented
-contract, not something confirmed against code living here.)
+The full, pasteable `tailsamplingprocessor` config lives in
+[`docs/recipes/tail-sampling.yaml`](../../docs/recipes/tail-sampling.yaml)
+— not duplicated here, so there's exactly one copy to keep in sync with
+this package's actual attribute names. (Standard OpenTelemetry Collector
+Contrib syntax — external to this repository, so treat field names as
+that component's own documented contract, not something confirmed against
+code living here.)
 
-```yaml
-receivers:
-  otlp:
-    protocols:
-      grpc:
-      http:
+It keeps any trace containing:
 
-processors:
-  tail_sampling:
-    decision_wait: 10s
-    num_traces: 50000
-    expected_new_traces_per_sec: 10
-    policies:
-      # Keep any trace containing a call that cost more than $0.10.
-      - name: expensive-tool-calls
-        type: numeric_attribute
-        numeric_attribute:
-          key: mcp.tool.cost.usd
-          min_value: 0.10
+| Policy | Type | Keys on | Why |
+|---|---|---|---|
+| `expensive-tool-calls` | `numeric_attribute` | `mcp.tool.cost.usd` ≥ `0.10` | A single call cost more than your threshold |
+| `budget-exceeded-calls` | `boolean_attribute` | `mcp.tool.cost.budget_exceeded` = `true` | A configured cumulative budget was crossed |
+| `thrash-loops` | `boolean_attribute` | `mcp.tool.thrash_detected` = `true` | An agent thrash loop was detected |
+| `schema-drift-events` | `boolean_attribute` | `mcp.tool.schema_drift_detected` = `true` | A tool's `inputSchema` changed between two `tools/list` calls |
+| `unpriced-calls` | `string_attribute` | `mcp.tool.pricing_status` = `"unknown"` | See below — a real, unpriced cost, not a cheap one |
 
-      # Keep any trace where a configured cost budget was crossed.
-      - name: budget-exceeded-calls
-        type: boolean_attribute
-        boolean_attribute:
-          key: mcp.tool.cost.budget_exceeded
-          value: true
-
-      # Keep any trace containing a detected agent thrash loop.
-      - name: thrash-loops
-        type: boolean_attribute
-        boolean_attribute:
-          key: mcp.tool.thrash_detected
-          value: true
-
-      # Everything else: an ordinary 10% probabilistic sample. Policies
-      # are OR'd together by the processor, so this doesn't reduce
-      # anything the three policies above already decided to keep — it
-      # only adds baseline visibility into the traces none of them matched.
-      - name: baseline-sample
-        type: probabilistic
-        probabilistic:
-          sampling_percentage: 10
-
-exporters:
-  otlp:
-    endpoint: your-backend:4317
-
-service:
-  pipelines:
-    traces:
-      receivers: [otlp]
-      processors: [tail_sampling]
-      exporters: [otlp]
-```
+— everything else gets an ordinary 10% probabilistic sample (policies are
+OR'd together, so this doesn't reduce anything the policies above already
+kept; it only adds baseline visibility into what none of them matched).
 
 Point `instrumentMcpServer({ exporterUrl: 'http://localhost:4318/v1/traces' })`
 (or your host's own OTLP exporter configuration) at this Collector's
@@ -1580,12 +1565,55 @@ Point `instrumentMcpServer({ exporterUrl: 'http://localhost:4318/v1/traces' })`
 this policy before anything is exported downstream.
 
 **Adjust `min_value`/`sampling_percentage` to your own cost/volume
-profile** — `0.10` and `10%` above are illustrative starting points, not
-recommendations; `decision_wait`/`num_traces` should scale with your
-actual traffic volume (the Collector's own docs cover sizing these). If
-your schema-drift or two-axis observation signals matter for retention
-too, add `mcp.tool.schema_drift.detected` (boolean_attribute) as another
-OR'd policy the same way.
+profile** — `0.10` and `10%` in the recipe are illustrative starting
+points, not recommendations; `decision_wait`/`num_traces` should scale
+with your actual traffic volume (the Collector's own docs cover sizing
+these).
+
+**Why `unpriced-calls` is in here — the v0.11.0 "confidently wrong zero"
+problem, one layer up.** `mcp.tool.pricing_status` (ADR 016 point 4, "Cost
+& Token Attribution" → "Span attributes" above) exists because an
+unrecognized model must not be silently reported as costing nothing — it
+gets `"unknown"`, distinct from a genuinely free/untracked call. But a
+call with `mcp.tool.pricing_status: "unknown"` has real extracted token
+usage and *no* `mcp.tool.cost.usd` at all (unpriced calls never reach
+`mcp.tool.cost.usd`, by construction — see "Cost & Token Attribution"
+above). To the `expensive-tool-calls` policy above, an attribute that
+was never set is indistinguishable from a cost of exactly `0` — the same
+"confidently wrong" failure the pricing-provenance work fixed at the
+attribute level, reappearing here because a numeric-threshold policy has
+no way to see the difference between "cheap" and "unknown." The
+`unpriced-calls` policy closes that gap the same way `mcp.tool.pricing_status`
+closes it at the attribute level: an explicit signal instead of an
+inferred absence. (Cost tracking's other kind of absence — a plain-text
+result with no recognizable token usage at all — has no attribute of any
+kind, `mcp.tool.pricing_status` included, and is not what this policy is
+for: that call genuinely has no cost signal, which is expected, not a
+gap.)
+
+**What's verified here, and what isn't — read this before trusting this
+recipe blindly.** Every `mcp.tool.*` key in
+[`tail-sampling.yaml`](../../docs/recipes/tail-sampling.yaml) is
+cross-checked by
+[`test/recipes/tail-sampling-attributes.test.js`](test/recipes/tail-sampling-attributes.test.js)
+against this package's real, exported attribute constants — and,
+specifically, against which of them are actually passed to
+`span.setAttribute()` in `src/`, not merely a span-event or metric name
+that happens to look like an attribute. That test is what would have
+caught this recipe's own predecessor bug: an earlier version of this
+section recommended the schema-drift span *event* name as a
+`boolean_attribute` policy target, which could never have matched
+anything. **What is not verified: the actual behavior of this config
+against a real Collector.** `tailsamplingprocessor` is Contrib-only Go
+source with no npm package and nothing installed in this repository, and
+no Docker daemon was reachable in the environment this recipe was last
+revised in — unlike the Grafana dashboard (`dashboards/README.md`, "Generating
+sample data / verifying locally"), which was verified end to end against
+a real Prometheus + Grafana stack before shipping, this recipe has not
+had the equivalent live-Collector run. Treat the attribute names as
+trustworthy and the policy semantics as sourced from public OpenTelemetry
+Collector Contrib documentation, not as something this project has
+independently confirmed by running it.
 
 ## Trace Context Propagation (v0.11.0+)
 
@@ -2154,7 +2182,19 @@ pragmatic choice rather than a spec-pure one.
   `mcp.tool.cost.usd` / `mcp.tool.cost.budget_exceeded` attributes, plus
   a documented, pasteable OpenTelemetry Collector `tailsamplingprocessor`
   config that keeps expensive/budget-exceeded/thrashing traces alongside
-  a normal probabilistic sample for everything else.
+  a normal probabilistic sample for everything else. **Update (v0.12.0):**
+  the recipe YAML moved to `docs/recipes/tail-sampling.yaml` (README
+  references it rather than duplicating it), gained two more policies —
+  `mcp.tool.schema_drift_detected` (a new attribute, the same event/attribute
+  fix applied to schema drift) and `mcp.tool.pricing_status = "unknown"`
+  (closes a v0.11.0-adjacent gap: an unpriced call has real cost but no
+  `mcp.tool.cost.usd`, which a numeric-threshold policy can't tell apart
+  from a genuinely free one) — and is now cross-checked by a test
+  (`test/recipes/tail-sampling-attributes.test.js`) that fixes a real bug
+  this section previously had: it recommended the schema-drift span
+  *event* name as a `boolean_attribute` policy target, which could never
+  have matched anything. See "Cost-aware trace sampling" above for the
+  full detail, including what is and isn't verified.
 - v0.10.0: `@modelcontextprotocol/server` (MCP v2, protocol revision
   2026-07-28) support ✓ — see "MCP v2 support" above and ADR 015
   (`docs/adr/015-mcp-v2-support.md`). Spans, standard attributes, failure

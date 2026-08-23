@@ -999,9 +999,33 @@ function describeFallbackReason(server, kind) {
  *      is set. A server that has proven it hands out real session ids
  *      does not get to fall back just because one particular call lacked
  *      one.
- *   3. Before any real sessionId has ever been observed: the generated
- *      per-connection fallback (`thrashConnectionFallbackSessionId`) is
- *      used when `thrashConfig.assumeSingleSession` is true, or when
+ *   2.5. (ADR 018, docs/adr/018-trace-id-as-thrash-fallback.md) Before any
+ *      real sessionId has ever been observed, and before step 3's
+ *      UUID/skip fallback runs: if this call's span has a validly
+ *      extracted REMOTE parent — i.e. `request.params._meta` carried a
+ *      valid W3C `traceparent` that `extractTraceContext()`
+ *      (src/tracecontext/extract.js) turned into a remote `SpanContext` —
+ *      use that parent's trace id as the session-id candidate. Gated on
+ *      `trace.getSpanContext(parentContext)?.isRemote === true`, never on
+ *      a span's own `traceId` in isolation: every span, root or child, has
+ *      a `traceId`, and a ROOT span's (no valid `traceparent` extracted)
+ *      is freshly, randomly generated on every single call — using it
+ *      unconditionally would silently turn today's honest "skip,
+ *      undetermined" into "always produce a session id that never matches
+ *      the previous call's," which is worse than skipping (see the ADR's
+ *      "THE TRAP"). Does NOT set `thrashSessionState.hasSeenRealSessionId`
+ *      — that flag means "this transport hands out real session
+ *      identity," a permanent per-server fact; a trace id being present
+ *      on one call is a per-call fact about that one client's behavior,
+ *      not proof about the transport (ADR 018's "Constraints accepted").
+ *      No diag.warn(): unlike step 3 below, this isn't a guess about
+ *      transport topology the operator can correct — it's real,
+ *      client-supplied data, strictly finer-grained than the fallback it
+ *      sits beside, with no operator action item to flag.
+ *   3. Before any real sessionId has ever been observed, and step 2.5
+ *      above didn't apply: the generated per-connection fallback
+ *      (`thrashConnectionFallbackSessionId`) is used when
+ *      `thrashConfig.assumeSingleSession` is true, or when
  *      `isSingleConnectionTransport(server)` reliably determines the
  *      transport is single-connection. Otherwise, skip — an undetermined
  *      transport is not assumed to be single-connection. The first time
@@ -1016,9 +1040,10 @@ function describeFallbackReason(server, kind) {
  * @param {string} thrashConnectionFallbackSessionId
  * @param {import('./thrash/config.js').ThrashConfig} thrashConfig
  * @param {'v1' | 'v2' | undefined} kind - Threaded through to isSingleConnectionTransport()/describeFallbackReason() — see their docblocks (ADR 015).
+ * @param {import('@opentelemetry/api').Context} parentContext - The span's parent context, as returned by extractTraceContext() (ADR 017) — checked here for a validly-extracted remote SpanContext (ADR 018, step 2.5).
  * @returns {string | null}
  */
-function resolveThrashSessionId(server, sessionId, thrashSessionState, thrashConnectionFallbackSessionId, thrashConfig, kind) {
+function resolveThrashSessionId(server, sessionId, thrashSessionState, thrashConnectionFallbackSessionId, thrashConfig, kind, parentContext) {
   if (sessionId !== undefined) {
     thrashSessionState.hasSeenRealSessionId = true;
     return sessionId;
@@ -1026,6 +1051,11 @@ function resolveThrashSessionId(server, sessionId, thrashSessionState, thrashCon
 
   if (thrashSessionState.hasSeenRealSessionId) {
     return null;
+  }
+
+  const remoteParentSpanContext = trace.getSpanContext(parentContext);
+  if (remoteParentSpanContext?.isRemote === true) {
+    return remoteParentSpanContext.traceId;
   }
 
   if (thrashConfig.assumeSingleSession || isSingleConnectionTransport(server, kind)) {
@@ -1320,6 +1350,7 @@ function wrapToolCallHandler(
         thrashConnectionFallbackSessionId,
         thrashConfig,
         kind,
+        parentContext,
       );
 
       span.setAttribute(ATTR_MCP_METHOD_NAME, TOOLS_CALL_METHOD);

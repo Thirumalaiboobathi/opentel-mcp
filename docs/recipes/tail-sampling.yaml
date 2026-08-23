@@ -1,0 +1,112 @@
+# Cost-aware trace sampling — an OpenTelemetry Collector `tailsamplingprocessor`
+# recipe for opentel-mcp, not a feature this library implements itself.
+#
+# Full reasoning for why this is a Collector recipe and not in-process code:
+# docs/adr/011-cost-aware-sampling.md. README section:
+# packages/core/README.md, "Cost-aware trace sampling (a Collector recipe,
+# not a library feature)".
+#
+# Repo-only: this file is not published in the opentel-mcp npm package (see
+# packages/core/package.json's "files" array, and dashboards/README.md's
+# "npm packaging" section for the identical carve-out already established
+# for dashboards/ — this file lives outside packages/core the same way, so
+# npm pack/publish never includes it regardless of the files array).
+#
+# Cross-checked, not hand-verified end to end: every mcp.tool.* key
+# referenced below is asserted, by
+# packages/core/test/recipes/tail-sampling-attributes.test.js, to (a) exist
+# among this package's exported attribute constants and (b) actually be
+# passed to span.setAttribute() somewhere in src/ — not merely a span-event
+# or metric name that happens to look like an attribute. That test is what
+# would have caught this file's own predecessor bug (the README recommending
+# the schema-drift span EVENT name as a boolean_attribute policy target,
+# which cannot work).
+#
+# What is NOT verified: the actual behavior of this config against a real
+# `otel/opentelemetry-collector-contrib` instance (tailsamplingprocessor is
+# Contrib-only — no npm package, no binary installed in this repo's dev
+# environment, and no Docker daemon was reachable when this recipe was last
+# revised). Attribute *names* are cross-checked against real source; policy
+# *behavior* — decision_wait sizing, whether these policy types match the
+# way public Collector Contrib docs describe, the OR-composition semantics
+# — is not. Treat this as a well-sourced starting point, not a config this
+# project has run.
+#
+# Standard OpenTelemetry Collector Contrib syntax — external to this
+# repository, so treat field names as that component's own documented
+# contract, not something confirmed against code living here.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 50000
+    expected_new_traces_per_sec: 10
+    policies:
+      # Keep any trace containing a call that cost more than $0.10.
+      - name: expensive-tool-calls
+        type: numeric_attribute
+        numeric_attribute:
+          key: mcp.tool.cost.usd
+          min_value: 0.10
+
+      # Keep any trace where a configured cost budget was crossed.
+      - name: budget-exceeded-calls
+        type: boolean_attribute
+        boolean_attribute:
+          key: mcp.tool.cost.budget_exceeded
+          value: true
+
+      # Keep any trace containing a detected agent thrash loop.
+      - name: thrash-loops
+        type: boolean_attribute
+        boolean_attribute:
+          key: mcp.tool.thrash_detected
+          value: true
+
+      # Keep any trace containing a detected tool schema drift event.
+      - name: schema-drift-events
+        type: boolean_attribute
+        boolean_attribute:
+          key: mcp.tool.schema_drift_detected
+          value: true
+
+      # Keep any trace containing a call whose cost is unknown, not zero.
+      # A call that extracted real token usage but didn't resolve to a
+      # price (unrecognized model, or a malformed pricing override) never
+      # gets mcp.tool.cost.usd set at all — to the expensive-tool-calls
+      # policy above, that's indistinguishable from a call that
+      # genuinely cost nothing. This is the same "confidently wrong zero"
+      # problem v0.11.0's pricing-provenance work (ADR 016) fixed at the
+      # attribute level, reappearing one layer up at the sampling layer.
+      # See packages/core/README.md's "Cost-aware trace sampling" section.
+      - name: unpriced-calls
+        type: string_attribute
+        string_attribute:
+          key: mcp.tool.pricing_status
+          values: ['unknown']
+
+      # Everything else: an ordinary 10% probabilistic sample. Policies
+      # are OR'd together by the processor, so this doesn't reduce
+      # anything the policies above already decided to keep — it only
+      # adds baseline visibility into the traces none of them matched.
+      - name: baseline-sample
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+exporters:
+  otlp:
+    endpoint: your-backend:4317
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [tail_sampling]
+      exporters: [otlp]

@@ -5,7 +5,12 @@ import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-tr
 import { MeterProvider, MetricReader } from '@opentelemetry/sdk-metrics';
 import { createSchemaDriftEmitter } from '../../src/schema-drift/emitter.js';
 import { ATTR_GEN_AI_TOOL_NAME } from '../../src/attributes.js';
-import { SPAN_EVENT_NAME_SCHEMA_DRIFT_DETECTED, ATTRIBUTE_KEYS, METRIC_SAFE_ATTRIBUTES } from '../../src/schema-drift/attributes.js';
+import {
+  SPAN_EVENT_NAME_SCHEMA_DRIFT_DETECTED,
+  ATTR_MCP_TOOL_SCHEMA_DRIFT_DETECTED,
+  ATTRIBUTE_KEYS,
+  METRIC_SAFE_ATTRIBUTES,
+} from '../../src/schema-drift/attributes.js';
 
 /** Minimal in-memory MetricReader — mirrors test/thrash/emitter.test.js's TestMetricReader. */
 class TestMetricReader extends MetricReader {
@@ -199,6 +204,22 @@ describe('createSchemaDriftEmitter', () => {
     expect(attrs[ATTRIBUTE_KEYS.ADDED_FIELDS]).toEqual(['limit']);
     expect(attrs[ATTRIBUTE_KEYS.REMOVED_FIELDS]).toEqual(['offset']);
     expect(attrs[ATTRIBUTE_KEYS.CHANGED_FIELDS]).toEqual(['q']);
+  });
+
+  it('sets the mcp.tool.schema_drift_detected boolean span ATTRIBUTE alongside the span event (ADR 011)', () => {
+    const emitter = createSchemaDriftEmitter('0.0.0-test');
+    const tracer = trace.getTracer('test');
+
+    tracer.startActiveSpan('span', (span) => {
+      emitter.emit(mkEvent());
+      span.end();
+    });
+
+    const [span] = spanExporter.getFinishedSpans();
+    // A top-level span attribute, distinct from the span event asserted
+    // above — a Collector tail-sampling policy can key on this directly
+    // without depending on whether span-event data is matchable at all.
+    expect(span.attributes[ATTR_MCP_TOOL_SCHEMA_DRIFT_DETECTED]).toBe(true);
   });
 
   it('skips the span event silently, but still emits the metric, when there is no active span', async () => {

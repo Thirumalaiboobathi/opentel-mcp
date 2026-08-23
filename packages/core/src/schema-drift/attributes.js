@@ -32,6 +32,38 @@
  */
 export const SPAN_EVENT_NAME_SCHEMA_DRIFT_DETECTED = 'mcp.tool.schema_drift.detected';
 
+/**
+ * Boolean span ATTRIBUTE, distinct from SPAN_EVENT_NAME_SCHEMA_DRIFT_DETECTED
+ * above (v0.12.0). Same ambiguity, same resolution ADR 011
+ * (docs/adr/011-cost-aware-sampling.md) already applied to thrash detection:
+ * whether an OpenTelemetry Collector `tailsamplingprocessor`'s
+ * `boolean_attribute` policy can match span-EVENT data (as opposed to
+ * top-level span attributes) could not be confirmed either way — the
+ * processor is Go source in a separate repository, not installed here. ADR
+ * 011 resolved that uncertainty for thrash by adding a parallel attribute,
+ * `ATTR_MCP_TOOL_THRASH_DETECTED` (thrash/attributes.js); this is the
+ * identical fix applied here, for the identical reason. (This one wasn't
+ * added alongside ADR 010/011 originally — a v0.12.0 recipe-verification
+ * pass found the README recommending SPAN_EVENT_NAME_SCHEMA_DRIFT_DETECTED
+ * itself as a `boolean_attribute` policy target, which cannot work, since
+ * that string was never anything but an event/metric name.)
+ *
+ * Deliberately NOT `mcp.tool.schema_drift.detected` (SPAN_EVENT_NAME_SCHEMA_DRIFT_DETECTED's
+ * own string) — reusing it would reintroduce the exact ambiguity this
+ * attribute exists to remove: a bare string with no way to tell, from the
+ * name alone, whether a given consumer is reading the event or the
+ * attribute. Named `mcp.tool.schema_drift_detected` (underscore, no dot
+ * before "detected"), mirroring `ATTR_MCP_TOOL_THRASH_DETECTED`'s own
+ * naming (thrash/attributes.js: `mcp.tool.thrash_detected`, not
+ * `mcp.tool.loop.detected`, for the same reason).
+ *
+ * Only ever set to `true`, and only when drift was actually detected on
+ * this call — never explicitly set `false` for a clean call, matching
+ * `ATTR_MCP_TOOL_THRASH_DETECTED`'s same "omit rather than set a
+ * negative/empty value" convention.
+ */
+export const ATTR_MCP_TOOL_SCHEMA_DRIFT_DETECTED = 'mcp.tool.schema_drift_detected';
+
 /** @type {Readonly<Record<'TYPE' | 'PREVIOUS_HASH' | 'CURRENT_HASH' | 'ADDED_FIELDS' | 'REMOVED_FIELDS' | 'CHANGED_FIELDS', string>>} */
 export const ATTRIBUTE_KEYS = Object.freeze({
   /**

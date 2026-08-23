@@ -864,3 +864,84 @@ not help here — it only adds a *second* way to reach the fallback path
 away the auto-detected one this entry is about, and no configuration
 option exists today to disable transport auto-detection on its own while
 leaving real-session-id-based detection intact.
+
+---
+
+## 9. Budget guardrails cannot trip on unpriced spend, regardless of amount
+
+**Target:** Unscheduled
+**Found by:** internal self-review, v0.12.0 Phase 2/3 investigation into
+the cost-aware sampling recipe (`docs/adr/011-cost-aware-sampling.md`) —
+not an external report.
+
+### Body
+
+`applyCostAttribution()` (`src/instrument.js`) only calls
+`budgetTracker.recordAndCheck()` (`src/cost/budget.js`) inside its
+`if (costUsd !== null)` branch:
+
+```js
+if (costUsd !== null) {
+  span.setAttribute(ATTR_MCP_TOOL_COST_USD, costUsd);
+  span.setAttribute(ATTR_MCP_TOOL_COST_CURRENCY, MCP_TOOL_COST_CURRENCY_USD);
+  metricsRecorder?.recordCost(toolName, usage.model, costUsd, pricingStatus);
+
+  const budgetResult = budgetTracker.recordAndCheck(sessionId, toolName, costUsd);
+  ...
+}
+```
+
+`costUsd` is `null` whenever `calculateCost()` doesn't resolve a price —
+no model detected, or a detected model with no pricing-table entry — which
+is exactly the case `mcp.tool.pricing_status` (ADR 016 point 4) exists to
+flag as `"unknown"` rather than silently reporting as free. That attribute
+fix stopped short of `budget.js`: a call whose usage extraction succeeded
+(so real, non-zero token consumption is confirmed) but whose model is
+unpriced **never reaches `recordAndCheck()` at all** — not "recorded as
+$0," genuinely never called. `sessionCostMap`/`toolCostMap` (both in
+`createBudgetTracker()`) accumulate real cost only; an unpriced call
+contributes nothing to either running total, no matter how many tokens it
+burned.
+
+**Concrete consequence:** a session or tool that racks up substantial
+token spend exclusively through an unlisted/unrecognized model (a new
+provider release ahead of `DEFAULT_PRICING`, or a custom
+`costTracking.pricing` override with a typo'd model key) can never trip
+`perSessionUsd`/`perToolUsd`, ever — `mcp.tool.cost.budget_exceeded` stays
+permanently unset for that session/tool regardless of actual usage,
+identical in shape to the "confidently wrong zero" problem ADR 016 fixed
+at the attribute level, one layer deeper: this time the guardrail meant to
+act on that number is the thing silently blind, not just a dashboard
+reading it.
+
+**Why this is a library-behavior question, not the sampling recipe's:**
+found during the same investigation that added the recipe's
+`mcp.tool.pricing_status = "unknown"` tail-sampling policy (see
+`packages/core/README.md`'s "Cost-aware trace sampling" section), but that
+policy only affects which *traces a Collector retains* — it cannot make
+`budgetTracker` itself see spend it was never called with. Closing this
+gap means deciding what `recordAndCheck()` should actually do with an
+unpriced call (accumulate against a token count instead of USD? track it
+as a separate "unpriced spend" scope? warn once per session/tool the first
+time it happens?) — a real design question, not a one-line fix, so this is
+recorded rather than patched in-place.
+
+**Possible directions, not decided:**
+
+- Track unpriced-call *token* totals per session/tool alongside the
+  existing USD maps, and expose them (a new
+  `mcp.tool.cost.budget_exceeded`-adjacent attribute, or a
+  `getThrashSummary()`-style accessor) so an operator can at least see
+  "N unpriced tokens this session" even without a USD figure to threshold
+  on.
+- A configurable fallback price for unrecognized models (a "treat unknown
+  as expensive" opt-in), so budget tracking fails toward over-counting
+  rather than silently under-counting — mirrors this codebase's existing
+  "fail toward under-detection, never over-detection" principle for thrash
+  detection's transport heuristic (see entry 8 above), but inverted, since
+  here silence is the unsafe direction, not the safe one.
+- Do nothing beyond documenting it: budget tracking has always been
+  best-effort/observability-only (`src/cost/budget.js`'s own module
+  docblock: "never blocks a tool call and never throws"), and an operator
+  running unlisted models may already be expected to supply
+  `costTracking.pricing` overrides for them.
