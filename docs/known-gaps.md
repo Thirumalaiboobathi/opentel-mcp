@@ -991,3 +991,213 @@ recorded rather than patched in-place.
   docblock: "never blocks a tool call and never throws"), and an operator
   running unlisted models may already be expected to supply
   `costTracking.pricing` overrides for them.
+
+---
+
+## 10. Three raw-content channels reach spans; the largest isn't in the custom `mcp.*` attributes at all
+
+**Target:** The two low-risk items below are fixed. `recordException`/
+`setStatus` and `mcp.tool.model` remain unscheduled — each needs its own
+ADR before a fix, per this entry's original "No fix proposed here"
+reasoning.
+**Found by:** internal self-review — a raw-content audit of every
+attribute and span event this package emits, prompted by re-checking ADR
+012's (`docs/adr/012-tracker-lifecycle-and-shared-state.md`) claim that
+every attribute this library emits today is library-computed metadata.
+
+**Status update: items 3 and "error_class" fixed; items 1 and 2 remain
+open, deliberately.** `mcp.failure.validation_paths` format 1
+(`parseZodIssuesArray()`, `fingerprint/classify/validation-paths.js`) now
+gates each string path segment through `PATH_SEGMENT_RE`, the same
+identifier-only shape formats 2/3 already required — a segment that isn't
+schema-identifier-shaped (a `z.record()` schema's runtime key) is replaced
+with the placeholder `<KEY>` rather than surfaced, dropped, or silently
+omitted (see the constant's own comment for the three-way argument: drop
+the whole path loses the signal entirely; dropping just the segment
+fabricates a path to a *different*, real field; a placeholder is the only
+option that does neither). Numeric (array-index) segments are never
+redacted — Zod only ever produces those for array indices, never object
+keys. `mcp.failure.error_class` (`fingerprint/attributes.js`) is now
+capped at 128 characters by `computeFingerprint()`
+(`fingerprint/compose.js`'s `MAX_ERROR_CLASS_LENGTH`) — length-bounded
+only, not pattern-scrubbed, since a class identifier isn't expected to
+contain the structured-PII shapes `normalizeMessage()` scrubs for; a
+non-string `.name` is coerced to a string before capping rather than
+throwing. ADR 004 (`docs/adr/004-semantic-conventions-alignment.md`) is
+updated where it called the same underlying `err.name` value
+"low-cardinality" for `error.type` — that was an assumption about
+well-behaved code, not an enforced property, and `error.type` itself
+remains uncapped (a separate, spec-owned attribute outside this fix's
+scope). `recordException`/`setStatus({ message })` and `mcp.tool.model`/
+`gen_ai.response.model` are untouched, on purpose — see the Body's own
+"No fix proposed here" reasoning below, which still holds for both.
+**Tests:** `test/fingerprint/classify.validation-paths.test.js`'s new
+"dynamic/record keys are redacted" describe block (identifier paths
+unaffected, a record-shaped email key redacted, a root-level dynamic key,
+numeric segments never redacted, mixed identifier/dynamic segments in one
+path, independent redaction across multiple issues in one array) and
+`test/fingerprint/compose.test.js`'s new cases (128-char cap, short names
+untouched, two names sharing a 128-char prefix hash identically — a
+documented tradeoff, not a bug — and a non-string `.name` coerced rather
+than throwing).
+
+### Body
+
+Traced every `mcp.*`/`gen_ai.*` attribute and every span event this
+package emits back to where its value originates. The custom attribute
+surface this project has been actively governing — fingerprint, thrash,
+schema-drift, cost provenance — holds up: closed enums, hashes, counts,
+and numeric measurements throughout. `classifyFailureChannel()`
+(`src/fingerprint/classify/channel.js`) reads message text internally but
+only ever *returns* one of six closed enum values, so no raw text escapes
+into `mcp.failure.channel`. `normalizeMessage()`
+(`src/fingerprint/normalize/message.js`,
+`src/fingerprint/normalize/patterns.js`) scrubs UUIDs, emails, URLs, IPs,
+timestamps, filesystem paths, hex runs, and quoted opaque ids before
+hashing, and the normalized string itself is never emitted as its own
+attribute — only hashed into `mcp.failure.fingerprint`, or folded
+(truncated to 60 chars, and only the stack frame's function name/line, not
+message content) into `mcp.failure.signature`.
+
+But three paths do carry raw, application-controlled content onto spans,
+and the largest of the three isn't in the custom attribute surface at
+all — it's two stdlib OTel calls that predate, and fall outside, all of
+the governance work above.
+
+**1. `span.recordException(err)` / `span.setStatus({ message: err?.message })`
+— the largest exposure, present since the earliest instrumentation.**
+
+Both thrown-exception paths call these two in sequence: tools/call at
+`src/instrument.js:1458-1459`, tools/list at `src/instrument.js:1583-1584`.
+
+```js
+span.recordException(err);
+span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
+```
+
+`recordException` is the OpenTelemetry JS SDK's own `Span` method — it
+adds an `exception` span event carrying `exception.message` (= `err.message`)
+and `exception.stacktrace` (= `err.stack`), verbatim, with no length cap.
+`setStatus`'s `message` puts the same raw `err.message` on the span a
+second time, as the status description. Neither call is gated by
+`fingerprintingEnabled` — both fire on every thrown exception
+unconditionally, whether or not fingerprinting is on — and neither goes
+through `normalizeMessage()` or any other scrubbing step in this codebase:
+they run directly against `err`, entirely outside the fingerprint
+pipeline (`computeFingerprint()`, `src/fingerprint/compose.js`, only runs
+afterward and separately, feeding the hashed/normalized `mcp.failure.*`
+attributes from the same `err`). If a thrown error's message or stack
+contains an email address, a credential, a connection string, or a
+username-bearing file path, it lands on the span exactly as thrown.
+
+This isn't a hidden accident either — `docs/adr/013-ui-query-layer.md:86-87`
+documents querying `event.exception.message` directly as an ordinary
+TraceQL example, treating it as a normal queryable field, not something
+flagged anywhere as unscrubbed or sensitive.
+
+**2. `mcp.tool.model` / `gen_ai.response.model` — a tool result's own
+content, echoed verbatim. Since v0.5.0.**
+
+`readModel()` (`src/cost/extractor.js:83-97`) reads `result.model`,
+`result.usage.model`, or `result._meta.model` — including from JSON
+parsed out of `result.content[0].text` — gated by nothing stronger than
+`typeof candidate === 'string' && candidate.trim() !== ''`. `applyCostAttribution()`
+(`src/instrument.js:816-818`) sets both attributes to that value
+unmodified:
+
+```js
+if (usage.model) {
+  span.setAttribute(ATTR_MCP_TOOL_MODEL, usage.model);
+  span.setAttribute(ATTR_GEN_AI_RESPONSE_MODEL, usage.model);
+}
+```
+
+No allowlist against `DEFAULT_PRICING`'s known models, no length cap —
+this is a tool result's own declared field, put on the span exactly as
+the tool (or whatever produced the tool's response) wrote it.
+
+**3. `mcp.failure.validation_paths`, format 1 only — scoped and
+conditional, not a blanket gap.**
+
+`parseZodIssuesArray()` (`src/fingerprint/classify/validation-paths.js:165-188`),
+which handles the JSON-issues-array rendering (SDK ≤1.29.0, or any
+low-level `Server` author who throws a raw, unrendered `ZodError`), joins
+Zod issue `path` segments with no character restriction — whatever string
+or number Zod put in `path` is used as-is. For a `z.record()`-shaped
+schema, Zod's `path` includes the actual runtime key the caller passed —
+e.g. an email address used as an object key — so that value reaches
+`mcp.failure.validation_paths` unfiltered whenever a failure renders in
+this format. The two newer formats — `extractRenderedPaths()` (SDK
+≥1.30.0) and `extractV2Paths()` (`@modelcontextprotocol/server` v2) — are
+safe: both are gated by `RENDERED_DOT_PATH_RE`/`V2_ISSUE_START_RE`,
+identifier-only regexes that cannot carry arbitrary content. This gap
+requires both a dynamic-key schema and the older/raw rendering path to be
+live at once.
+
+**Also flagged, an already-known tradeoff rather than a new finding:
+`mcp.failure.error_class`.**
+
+`inputs.errorClass = coerced.name` (`src/fingerprint/compose.js:124`) is
+`err.name` (or `obj.name` for a non-`Error` throwable), set on the span
+unmodified at `src/fingerprint/attributes.js:88` — no truncation, no
+scrubbing, unlike `normalizedMessage`, which gets both. In practice
+`err.name` is almost always a fixed class identifier ("TypeError",
+"ZodError"), but nothing enforces that — a tool author who assigns an
+arbitrary string to `.name` puts it on the span raw. The identical raw
+value also reaches `error.type` on the thrown path
+(`src/instrument.js:1460`), which ADR 004
+(`docs/adr/004-semantic-conventions-alignment.md:62-79`) already accepts
+as a deliberate tradeoff, describing the exception class name as
+"low-cardinality." That description is an assumption about how tool
+authors and thrown values behave, not a property this library measures or
+enforces anywhere.
+
+**What this means for ADR 012's boundary.** ADR 012
+(`docs/adr/012-tracker-lifecycle-and-shared-state.md:923-938`) rejected
+reading a host-designated tool argument specifically because it would be
+"the first attribute carrying a value the *application* chose to put in a
+tool argument" — a categorically different risk than anything this
+library emitted at the time that decision was written. Read literally,
+that's still true: nothing reads `request.params.arguments` values today.
+But the boundary the ADR was actually protecting — raw, unbounded,
+application-controlled content reaching a span — is already crossed, by
+mechanisms that weren't in view when that decision was made:
+`recordException`/`setStatus` (stdlib OTel behavior, not this package's
+own attribute code) and `mcp.tool.model` (a tool *result* field, not an
+argument). "Tool argument" vs. "tool result" vs. "exception message" does
+not hold up as a privacy boundary on its own — a tool author, or a
+compromised or buggy tool, controls the content of all three equally.
+
+**No fix proposed here, deliberately — both real candidates cut against
+something this project already committed to elsewhere.** Scrubbing or
+gating `recordException`/`setStatus` would diverge from the
+exception-recording behavior every other OTel-instrumented library in a
+user's stack already produces for the exact same kind of error — silently
+different behavior for this one library's spans is its own kind of
+surprise for an operator reading a trace. Capping or allowlisting
+`mcp.tool.model` changes what `applyCostAttribution()` accepts as a valid
+model identifier, which has direct, non-cosmetic consequences for
+cost/budget attribution (`docs/adr/016-pricing-override-and-staleness.md`):
+a narrower model-matching rule could start silently missing calls that are
+today priced correctly. Both need their own scoped decision — the same
+way ADR 011, ADR 016, and ADR 018 each got one before the corresponding
+code changed — not a bundled patch folded into this entry.
+
+## Update (2026-08-30): both remaining items now have a design — ADR 019
+
+The two items left open after the direct fix above — `recordException`/
+`setStatus({ message })` and `mcp.tool.model`/`gen_ai.response.model` —
+each got the scoped decision this entry said they needed. ADR 019
+(`docs/adr/019-raw-content-on-spans.md`) first settles the framing
+question that decides how to weigh both (checked against OpenTelemetry's
+own semantic-conventions guidance on `exception.message`/
+`exception.stacktrace` sensitivity, rather than inventing a position), then
+designs: a new `errorRecording.mode` (`'full'` | `'normalized'` |
+`'none'`) option for the exception-recording pair, defaulting to today's
+unchanged `'full'` behavior; and a length/character-allowlist gate for
+`mcp.tool.model`, with rejection routed through the same
+`pricing_status: 'unknown'` + one-time-warning machinery
+`docs/known-gaps.md` entry 9 already established, specifically so
+rejection can never become a silent drop. Design only, as of this update
+— no code has changed for either item. Recommended target: v0.13.0 for
+both, paired.

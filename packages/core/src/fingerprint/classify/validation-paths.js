@@ -147,6 +147,51 @@ function extractJsonArraySubstring(text) {
   return null; // unbalanced -- never guess a truncated substring
 }
 
+// Known-gaps entry 10 (docs/known-gaps.md): unlike the two RENDERED
+// formats below (RENDERED_DOT_PATH_RE, V2_ISSUE_START_RE), this JSON
+// format's `path` array comes straight from a parsed ZodError with no
+// character restriction at all -- for a `z.record()`/map-shaped schema,
+// a failing issue's `path` includes the actual runtime KEY the caller
+// passed (e.g. an email address used as an object key), which is caller
+// data, not a schema-declared field name. `PATH_SEGMENT_RE` gates each
+// string segment against the same identifier-only shape the rendered
+// formats already require (RENDERED_DOT_PATH_RE without the `.`/`[...]`
+// chaining, since here each segment is already a separate array element,
+// not a joined string to split) -- a segment that doesn't match is, by
+// construction, not a schema-declared property name a tool author wrote,
+// so it's treated as a dynamic key and redacted.
+//
+// Numeric segments (array indices) are never redacted: Zod only ever
+// produces a `number` path segment for an array index, never for an
+// object/record key (JSON object keys are always strings, even for a
+// numeric-looking one) -- so a `number` segment is structurally always a
+// small integer index, never caller-chosen content.
+//
+// What "redacted" means was a real choice among three, argued here rather
+// than picked silently:
+//   - Drop the whole path. Loses the entire signal for exactly the
+//     validation failures a record-shaped schema exists to catch -- the
+//     one case this gap is about is also the one case this option throws
+//     away completely.
+//   - Drop just the offending segment. WRONG, not just lossy: joining the
+//     remaining segments produces a path that names a DIFFERENT, real
+//     field. `["users", "<dynamic-key>", "email"]` dropped down to
+//     `users.email` looks like a legitimate, confidently-reported path to
+//     a field named `email` directly under `users` -- a fabricated
+//     dot-path this feature's own "never guess" discipline (see this
+//     module's docblock) exists specifically to rule out.
+//   - Replace the segment with a fixed placeholder. Preserves the path's
+//     shape and depth (still says "the failure was inside a record-like
+//     value at this position") without leaking the key's content -- the
+//     same shape/anomaly-signal-without-content-capture tradeoff
+//     `mcp.tool.argument_count` already makes (`src/attributes.js`), and
+//     the same placeholder-substitution mechanism `normalizeMessage()`'s
+//     `NORMALIZE_STEPS` already uses for EMAIL/UUID/URL/etc.
+//     (`normalize/patterns.js`). Chosen: it's the only option that
+//     neither destroys the signal nor fabricates a wrong one.
+const PATH_SEGMENT_RE = /^[\w$]+$/;
+const REDACTED_PATH_SEGMENT = '<KEY>';
+
 /**
  * Parses `jsonText` and, only if EVERY element confidently looks like a
  * Zod issue (a plain object with both a `path` array of string/number
@@ -158,6 +203,12 @@ function extractJsonArraySubstring(text) {
  * business to guess at, and a MIX of matching/non-matching elements is
  * more likely a sign this isn't really a Zod issues array at all than a
  * reason to keep only the matching ones.
+ *
+ * Any string segment that isn't identifier-shaped (`PATH_SEGMENT_RE`) is
+ * replaced with `REDACTED_PATH_SEGMENT` before joining — see the
+ * constants' own comment above for why a placeholder, not a dropped
+ * segment or a dropped path. Numeric segments (array indices) are never
+ * redacted.
  *
  * @param {string} jsonText
  * @returns {string[] | null}
@@ -182,7 +233,10 @@ function parseZodIssuesArray(jsonText) {
     if (!Array.isArray(path) || path.length === 0) return null;
     if (!path.every((segment) => typeof segment === 'string' || typeof segment === 'number')) return null;
 
-    paths.push(path.join('.'));
+    const redactedPath = path.map((segment) =>
+      typeof segment === 'number' || PATH_SEGMENT_RE.test(segment) ? segment : REDACTED_PATH_SEGMENT,
+    );
+    paths.push(redactedPath.join('.'));
   }
   return paths;
 }

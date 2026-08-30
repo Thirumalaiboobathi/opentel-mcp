@@ -21,6 +21,15 @@ export const ATTRIBUTE_KEYS = Object.freeze({
   SIGNATURE: 'mcp.failure.signature',
   CATEGORY: 'mcp.failure.category',
   ORIGIN: 'mcp.failure.origin',
+  /**
+   * `result.inputs.errorClass` — `err.name` (or a non-Error throwable's
+   * `.name`), e.g. `"TypeError"`, `"ZodError"`. Capped at 128 characters
+   * by `computeFingerprint()` (`fingerprint/compose.js`'s
+   * `MAX_ERROR_CLASS_LENGTH`) — length-bounded only, not pattern-scrubbed
+   * the way `normalizedMessage` is: this is the application/library's own
+   * error class name, whatever it set `.name` to, not free text this
+   * library controls the shape of (docs/known-gaps.md entry 10).
+   */
   ERROR_CLASS: 'mcp.failure.error_class',
   /**
    * ADR 007's channel dimension (`classifyFailureChannel()`,
@@ -42,6 +51,13 @@ export const ATTRIBUTE_KEYS = Object.freeze({
    * CHANNEL, additive and never part of the fingerprint hash: the path
    * text is already implicit in the hashed normalized message (see ADR
    * 009), so hashing it again would be redundant, not more correct.
+   *
+   * A path segment that isn't a schema-declared identifier (a
+   * `z.record()`/map schema's runtime key, e.g. an email used as an
+   * object key) is redacted to `<KEY>` rather than surfaced — see
+   * `PATH_SEGMENT_RE`'s comment in validation-paths.js (docs/known-gaps.md
+   * entry 10) for why a placeholder, not a dropped segment or a dropped
+   * path.
    */
   VALIDATION_PATHS: 'mcp.failure.validation_paths',
 });

@@ -72,11 +72,28 @@ span section for the full authoritative table):
   the real code would require wrapping at that outer layer instead, which
   ADR 001 explicitly rejected (patching `Protocol`'s response-serialization
   path is a larger, less stable surface than patching `setRequestHandler`).
-  The exception class name is a reasonable substitute: it's low-cardinality
-  and still useful for grouping/alerting. Revisit this if a future SDK
-  version exposes the final JSON-RPC error code back to the handler layer
-  (e.g. via a hook after serialization) or if the spec's guidance hardens
-  from SHOULD to MUST.
+  The exception class name is a reasonable substitute: it's still useful
+  for grouping/alerting, and *usually* low-cardinality. **Update
+  (docs/known-gaps.md entry 10):** "low-cardinality" was an assumption
+  about well-behaved code — a fixed set of class identifiers
+  ("TypeError", "ZodError") — not a property this library ever measured
+  or enforced. Nothing stops a tool author (or a library it depends on)
+  from assigning an unbounded, arbitrary string to `err.name`, and
+  `error.type` (`instrument.js`, `errorType = err?.name ?? 'Error'`) is
+  set from that value directly, uncapped, exactly as thrown. The sibling
+  custom attribute carrying the same underlying `err.name` value,
+  `mcp.failure.error_class` (`ATTRIBUTE_KEYS.ERROR_CLASS`,
+  `fingerprint/attributes.js`), is now capped at 128 characters by
+  `computeFingerprint()` (`fingerprint/compose.js`'s
+  `MAX_ERROR_CLASS_LENGTH`) — but that cap lives in the fingerprinting
+  pipeline and does not reach `error.type`, which remains uncapped. Left
+  that way deliberately for now: `error.type` is a spec-defined attribute
+  this ADR already treats as spec-owned (see "`mcp.tool.status` and
+  `mcp.tool.error.message` dropped" above), not part of the custom
+  `mcp.*` surface entry 10 audited, and capping it is a separate,
+  unscoped change. Revisit this if a future SDK version exposes the final
+  JSON-RPC error code back to the handler layer (e.g. via a hook after
+  serialization) or if the spec's guidance hardens from SHOULD to MUST.
 
 ## Alternatives rejected
 

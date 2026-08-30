@@ -161,6 +161,53 @@ describe('computeFingerprint', () => {
     expect(result.signature.length).toBeLessThanOrEqual(60);
   });
 
+  it('caps errorClass at 128 chars for a very long err.name (docs/known-gaps.md entry 10)', () => {
+    const err = new Error('boom');
+    err.name = 'A'.repeat(200);
+
+    const result = computeFingerprint(err, CTX);
+
+    expect(result.inputs.errorClass).toHaveLength(128);
+    expect(result.inputs.errorClass).toBe('A'.repeat(128));
+  });
+
+  it('leaves a normal, short err.name untouched by the cap', () => {
+    const err = new TypeError('boom');
+
+    const result = computeFingerprint(err, CTX);
+
+    expect(result.inputs.errorClass).toBe('TypeError');
+  });
+
+  it('two err.names sharing the same first 128 chars but differing after that hash identically (documented tradeoff, not a bug)', () => {
+    const stack = stackWithFrame('/home/thiru/proj/src/x.js', 12);
+    const errA = new Error('boom');
+    errA.name = `${'A'.repeat(128)}Suffix1`;
+    errA.stack = stack;
+    const errB = new Error('boom');
+    errB.name = `${'A'.repeat(128)}Suffix2`;
+    errB.stack = stack;
+
+    const resultA = computeFingerprint(errA, CTX);
+    const resultB = computeFingerprint(errB, CTX);
+
+    expect(resultA.inputs.errorClass).toBe(resultB.inputs.errorClass);
+    expect(resultA.fingerprint).toBe(resultB.fingerprint);
+  });
+
+  it('coerces a non-string err.name to a string before capping, rather than throwing', () => {
+    const err = new Error('boom');
+    // JS allows assigning a non-string to `.name` -- nothing in the
+    // language enforces it stays a string.
+    err.name = 12345;
+
+    let result;
+    expect(() => {
+      result = computeFingerprint(err, CTX);
+    }).not.toThrow();
+    expect(result.inputs.errorClass).toBe('12345');
+  });
+
   it('builds "TypeError@anon:<line>" for an anonymous top frame', () => {
     const err = new TypeError('boom');
     err.stack = 'TypeError: boom\n    at /home/thiru/proj/src/x.js:10:5';

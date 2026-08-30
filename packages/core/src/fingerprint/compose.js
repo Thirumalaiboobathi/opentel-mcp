@@ -23,6 +23,24 @@ import { DEFAULT_CLASSIFIERS, runClassifiers } from './classify/index.js';
 const HASH_INPUT_VERSION = 'v1';
 const DEFAULT_STACK_FRAMES = 5;
 
+// Known-gaps entry 10 (docs/known-gaps.md): `errorClass` is `err.name` (or
+// a non-Error throwable's `.name`), and unlike `normalizedMessage` above it
+// gets no NORMALIZE_STEPS scrubbing — it lands on `mcp.failure.error_class`
+// (fingerprint/attributes.js) and `error.type` (instrument.js) exactly as
+// whatever thrown value set it. In practice `.name` is almost always a
+// short, fixed class identifier ("TypeError", "ZodError"), but nothing in
+// the language enforces that — a tool author (or library it depends on)
+// can assign any string. Capped here, not scrubbed like a message: a class
+// name isn't expected to contain structured PII shapes (emails, ids, ...)
+// the way a free-text message is, so pattern-matching would be reaching
+// for a problem this value doesn't really have. Length is the actual
+// unbounded dimension, so that's what's bounded. This also caps what feeds
+// the fingerprint hash below, which is fine: two DIFFERENT long class
+// names sharing an identical first 128 characters colliding into the same
+// fingerprint is not a real-world scenario a normal class identifier ever
+// produces.
+const MAX_ERROR_CLASS_LENGTH = 128;
+
 /**
  * @param {FingerprintContext} [ctx]
  * @returns {FingerprintResult}
@@ -120,8 +138,9 @@ export function computeFingerprint(err, ctx, opts = {}) {
       category = 'dependency';
     }
 
+    const rawErrorClass = typeof coerced.name === 'string' ? coerced.name : String(coerced.name);
     const inputs = {
-      errorClass: coerced.name,
+      errorClass: rawErrorClass.slice(0, MAX_ERROR_CLASS_LENGTH),
       category,
       origin: ctx.origin,
       toolName: ctx.toolName ?? null,

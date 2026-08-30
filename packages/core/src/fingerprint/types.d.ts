@@ -80,7 +80,7 @@ export interface NormalizedStackFrame {
 
 /** The normalized, low-cardinality inputs that get hashed into a fingerprint. */
 export interface FingerprintInputs {
-  /** e.g. `"TypeError"`, `"ZodError"`, `"MCPToolError"`. */
+  /** e.g. `"TypeError"`, `"ZodError"`, `"MCPToolError"`. Capped at 128 characters (compose.js's MAX_ERROR_CLASS_LENGTH) — unlike `normalizedMessage`, not pattern-scrubbed, only length-bounded. */
   readonly errorClass: string;
   readonly category: FailureCategory;
   readonly origin: FailureOrigin;

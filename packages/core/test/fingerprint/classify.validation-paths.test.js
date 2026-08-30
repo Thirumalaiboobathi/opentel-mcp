@@ -163,6 +163,60 @@ describe('extractValidationPaths — thrown McpError (low-level Server path)', (
   });
 });
 
+describe('extractValidationPaths — JSON issues array (format 1): dynamic/record keys are redacted, not leaked (docs/known-gaps.md entry 10)', () => {
+  it('extracts an identifier-shaped path exactly as before (unaffected by the redaction gate)', () => {
+    const err = new McpError(
+      ErrorCode.InvalidParams,
+      'Input validation error: Invalid arguments for tool foo: [{"code":"invalid_type","path":["email"],"message":"bad"}]',
+    );
+    expect(extractValidationPaths(err)).toEqual(['email']);
+  });
+
+  it('does not leak a record schema\'s runtime key (e.g. an email used as an object key)', () => {
+    const err = new McpError(
+      ErrorCode.InvalidParams,
+      'Input validation error: Invalid arguments for tool foo: ' +
+        '[{"code":"invalid_type","path":["users","not-an-email@example.com","age"],"message":"bad"}]',
+    );
+    expect(extractValidationPaths(err)).toEqual(['users.<KEY>.age']);
+  });
+
+  it('redacts a bare dynamic key at the root of the path, not just a nested one', () => {
+    const err = new McpError(
+      ErrorCode.InvalidParams,
+      'Input validation error: Invalid arguments for tool foo: [{"code":"invalid_type","path":["not an identifier"],"message":"bad"}]',
+    );
+    expect(extractValidationPaths(err)).toEqual(['<KEY>']);
+  });
+
+  it('never redacts a numeric (array-index) segment, only string segments', () => {
+    const err = new McpError(
+      ErrorCode.InvalidParams,
+      'Input validation error: Invalid arguments for tool foo: [{"code":"invalid_type","path":["items",3,"name"],"message":"bad"}]',
+    );
+    expect(extractValidationPaths(err)).toEqual(['items.3.name']);
+  });
+
+  it('a path mixing identifier-shaped and dynamic-key segments redacts only the dynamic one', () => {
+    const err = new McpError(
+      ErrorCode.InvalidParams,
+      'Input validation error: Invalid arguments for tool foo: ' +
+        '[{"code":"invalid_type","path":["accounts","acct_123","owner","jane@example.com","role"],"message":"bad"}]',
+    );
+    expect(extractValidationPaths(err)).toEqual(['accounts.acct_123.owner.<KEY>.role']);
+  });
+
+  it('redacts independently across multiple issues in the same array', () => {
+    const err = new McpError(
+      ErrorCode.InvalidParams,
+      'Input validation error: Invalid arguments for tool foo: ' +
+        '[{"code":"invalid_type","path":["email"],"message":"bad"},' +
+        '{"code":"invalid_type","path":["users","user@example.com"],"message":"bad"}]',
+    );
+    expect(extractValidationPaths(err)).toEqual(['email', 'users.<KEY>']);
+  });
+});
+
 describe('extractValidationPaths — SDK 1.30.0+ rendered format ("<message> at <path>", synthetic — exercised for real above via the McpServer describe block)', () => {
   it('extracts a single failing field', () => {
     const err = new McpError(
