@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { calculateCost } from '../../src/cost/calculator.js';
+import { calculateCost, isValidModelId, describeInvalidModelId, MODEL_ID_MAX_LENGTH } from '../../src/cost/calculator.js';
 import { DEFAULT_PRICING } from '../../src/cost/pricing.js';
 
 describe('calculateCost', () => {
@@ -213,5 +213,105 @@ describe('calculateCost', () => {
         expect(() => calculateCost(1000, 1000, 'm', { m: pricing })).not.toThrow();
       }
     });
+  });
+});
+
+// ADR 019 Part 2 (docs/adr/019-raw-content-on-spans.md, v0.13.0 Phase 2).
+describe('isValidModelId', () => {
+  it('accepts every DEFAULT_PRICING key unchanged', () => {
+    for (const key of Object.keys(DEFAULT_PRICING)) {
+      expect(isValidModelId(key)).toBe(true);
+    }
+  });
+
+  it('accepts a "provider/model" form — normalizeModelName()\'s own documented, tested contract', () => {
+    expect(isValidModelId('Anthropic/Claude-Sonnet-5')).toBe(true);
+    expect(isValidModelId('openai/gpt-4o')).toBe(true);
+  });
+
+  it('accepts a dot/colon-bearing Bedrock-style model id and a full ARN', () => {
+    expect(isValidModelId('anthropic.claude-3-sonnet-20240229-v1:0')).toBe(true);
+    expect(isValidModelId('arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0')).toBe(
+      true,
+    );
+  });
+
+  it('accepts an @-versioned model id (Vertex AI convention)', () => {
+    expect(isValidModelId('text-bison@001')).toBe(true);
+  });
+
+  it('accepts an underscore', () => {
+    expect(isValidModelId('some_model_name')).toBe(true);
+  });
+
+  it('accepts exactly MODEL_ID_MAX_LENGTH characters', () => {
+    expect(isValidModelId('a'.repeat(MODEL_ID_MAX_LENGTH))).toBe(true);
+  });
+
+  it('rejects a value one character over MODEL_ID_MAX_LENGTH', () => {
+    expect(isValidModelId('a'.repeat(MODEL_ID_MAX_LENGTH + 1))).toBe(false);
+  });
+
+  it('rejects a value with a disallowed character (space)', () => {
+    expect(isValidModelId('claude sonnet 5')).toBe(false);
+  });
+
+  it('rejects a value with a disallowed character (angle brackets, e.g. an injection attempt)', () => {
+    expect(isValidModelId('<script>alert(1)</script>')).toBe(false);
+  });
+
+  it('rejects a value containing a newline', () => {
+    expect(isValidModelId('claude-sonnet-5\nInjected: true')).toBe(false);
+  });
+
+  it('rejects an empty string', () => {
+    expect(isValidModelId('')).toBe(false);
+  });
+
+  it('rejects a non-string value', () => {
+    expect(isValidModelId(undefined)).toBe(false);
+    expect(isValidModelId(null)).toBe(false);
+    expect(isValidModelId(42)).toBe(false);
+    expect(isValidModelId({})).toBe(false);
+    expect(isValidModelId(['claude-sonnet-5'])).toBe(false);
+  });
+
+  it('never throws for any input', () => {
+    for (const value of [undefined, null, 42, {}, [], Symbol('x'), () => {}]) {
+      expect(() => isValidModelId(value)).not.toThrow();
+    }
+  });
+});
+
+describe('describeInvalidModelId', () => {
+  it('reports "not a string" for a non-string value, without echoing it', () => {
+    expect(describeInvalidModelId(42)).toBe('not a string');
+    expect(describeInvalidModelId({ secret: 'value' })).toBe('not a string');
+  });
+
+  it('reports "empty string" for an empty string', () => {
+    expect(describeInvalidModelId('')).toBe('empty string');
+  });
+
+  it('reports the length and the max when over MODEL_ID_MAX_LENGTH, without echoing the value', () => {
+    const huge = 'x'.repeat(9000);
+    const description = describeInvalidModelId(huge);
+    expect(description).toContain('9000');
+    expect(description).toContain(String(MODEL_ID_MAX_LENGTH));
+    expect(description).not.toContain(huge);
+  });
+
+  it('reports "disallowed character" for an in-range value with a bad character, without echoing it', () => {
+    const secret = 'jane@example.com is the model, believe me';
+    const description = describeInvalidModelId(secret);
+    expect(description).toContain('disallowed character');
+    expect(description).not.toContain(secret);
+    expect(description).not.toContain('jane@example.com is the model');
+  });
+
+  it('never throws for any input', () => {
+    for (const value of [undefined, null, 42, {}, [], Symbol('x'), () => {}, 'a'.repeat(9000)]) {
+      expect(() => describeInvalidModelId(value)).not.toThrow();
+    }
   });
 });

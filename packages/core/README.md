@@ -461,6 +461,59 @@ examples/fingerprint-demo.js`). Not yet wired through
 `computeFingerprint` directly rather than configuring the automatic
 per-call-site wrapping; tracked in the roadmap below.
 
+## Error recording (v0.13.0+)
+
+Every thrown `tools/call`/`tools/list` error goes through
+`span.recordException(err)` (an OpenTelemetry SDK method, not one of this
+library's own attributes) plus `span.setStatus({ code: ERROR, message:
+err.message })` — unconditionally, whether or not `fingerprinting` is
+enabled. By default that means `err.message` and `err.stack` land on the
+span exactly as thrown. `errorRecording.mode` controls this:
+
+| Mode | `exception.message` / status message | `exception.stacktrace` | When to use |
+|---|---|---|---|
+| `'full'` (default) | Raw `err.message`, unmodified | Raw `err.stack`, unmodified | Today's behavior, unchanged — matches what every other OTel-instrumented library in the same trace does for the same kind of event |
+| `'normalized'` | `normalizeMessage(err.message)` — the exact scrubbing pipeline (`src/fingerprint/normalize/message.js`) fingerprinting already runs before hashing: UUIDs, emails, URLs, IPs, timestamps, filesystem paths, hex runs, quoted ids | Reconstructed from `parseAndNormalizeStack()` (`src/fingerprint/normalize/stack.js`) — keeps every function name/file/line, strips only the local `cwd` prefix (and collapses `node_modules` package versions) | Tool results come from third-party or unaudited MCP servers and you want the same scrubbing fingerprinting already trusts, applied to the raw exception content too |
+| `'none'` | Not set — `span.setStatus({ code: ERROR })` with no message, the same pattern already used for tool-level `isError: true` failures | Not set | You rely entirely on `mcp.failure.*` (category/fingerprint/signature — already hashed/normalized) and don't want any free-text exception content on the span at all |
+
+No mode mutates the original `err` — both call sites rethrow it
+afterward, so `'normalized'`/`'none'` build the exception event
+independently rather than editing `err.message`/`err.stack` in place.
+`error.type`/`exception.type` (`err.name`) is capped at 128 characters
+unconditionally in every mode — the same cap `mcp.failure.error_class`
+uses — since a length cap on a class-identifier field costs a
+well-behaved tool nothing, unlike message/stack content.
+
+**`'normalized'` is targeted scrubbing, not general-purpose redaction —
+read this before treating it as a PII filter.** `normalizeMessage()`
+matches specific, structured shapes: UUIDs, email addresses, URLs,
+IPv4/IPv6 addresses, ISO-8601/Unix timestamps, filesystem paths, long hex
+runs, and quoted alphanumeric ids (8–64 chars, mixed letters/digits). It
+does not recognize sensitive content in general. An API key in a format
+none of those patterns match (a bare, unquoted token with no digit in it,
+or a custom prefix scheme), or a customer's name embedded in ordinary
+prose ("could not process request for Jane Smith"), passes through
+`'normalized'` mode completely unchanged — identical to what `'full'`
+mode would put on the span. Treat `'normalized'` as "the same scrubbing
+fingerprinting already trusts for hashing," not as a guarantee that
+whatever a tool's error messages contain is safe to record; if a tool's
+errors routinely carry sensitive free text these patterns don't happen to
+match, `'none'` is the only mode that keeps message/stack content off the
+span entirely.
+
+**Default stays `'full'` through all of `0.x`.** Changing it would alter
+what every trace backend renders for the single highest-traffic failure
+path in this library, silently, for every existing deployment that
+doesn't opt in — see ADR 019 Part 1 (`docs/adr/019-raw-content-on-spans.md`)
+for the full argument, including why the default is expected to flip to
+`'normalized'` at `1.0`, not before.
+
+### Configuration
+
+| Option | Env var | Type | Default | Description |
+|---|---|---|---|---|
+| `mode` | `OTEL_MCP_ERROR_RECORDING_MODE` | `'full'` \| `'normalized'` \| `'none'` | `'full'` | See table above. An unrecognized value falls back to `'full'` silently, same as every other `OTEL_MCP_*` env var |
+
 ## Cost & Token Attribution (v0.5.0)
 
 MCP tools increasingly wrap LLM calls themselves — a tool that
@@ -569,7 +622,7 @@ stricter, not the runtime.
 | `mcp.tool.tokens.input` | Custom | Input tokens consumed | 1000 |
 | `mcp.tool.tokens.output` | Custom | Output tokens produced | 500 |
 | `mcp.tool.tokens.total` | Custom | input + output | 1500 |
-| `mcp.tool.model` | Custom | Detected model name | "claude-sonnet-5" |
+| `mcp.tool.model` | Custom | Detected model name, gated by a length/shape check (v0.13.0) — see below | "claude-sonnet-5" |
 | `gen_ai.response.model` | Standard (GenAI semconv)[^5] | Same value as `mcp.tool.model`, co-emitted for dashboard compatibility | "claude-sonnet-5" |
 | `mcp.tool.pricing_status` | Custom[^7] | `"known"` \| `"unknown"` \| `"user_override"` — set whenever token usage was extracted, even with no model detected | "known" |
 | `mcp.tool.cost.usd` | Custom | Estimated cost, from `calculateCost()` | 0.0105 |
@@ -588,6 +641,37 @@ detected); the two cost attributes only appear when a model was detected
 attributes only appear when a cost was calculated *and* a configured
 limit was crossed. Source of truth: `src/attributes.js` and
 `src/instrument.js`'s `applyCostAttribution()`.
+
+### Model identifier validation (v0.13.0)
+
+A tool result's declared model field (`result.model`, `result.usage.model`,
+`result._meta.model`, or the same read out of JSON in
+`result.content[0].text`) is tool-result content, not library-computed
+metadata like everything else `applyCostAttribution()` puts on a span — so
+before it can reach `mcp.tool.model`, `gen_ai.response.model`,
+`calculateCost()`, or a metric label
+(`mcp.tool.tokens.total`/`mcp.tool.cost.total`), it has to pass a length
+cap (256 characters) and character allowlist
+(`/^[A-Za-z0-9._:/@-]{1,256}$/`). The allowlist is deliberately generous —
+verified against every `DEFAULT_PRICING` key *and* `normalizeModelName()`'s
+documented `provider/model` input contract (e.g.
+`"Anthropic/Claude-Opus-4-7"`), plus headroom for conventions like a full
+Bedrock ARN or a Vertex AI `@version` suffix — because silently rejecting a
+legitimate model name is a worse failure than admitting a few characters
+no known provider convention actually uses.
+
+**A rejected value is never a silent drop.** `mcp.tool.pricing_status` is
+set to `"unknown"` — the same status a legitimately unrecognized model
+already produces (see the footnote above) — and a `diag.warn()` fires
+once per `instrumentMcpServer()` call, reporting shape only (length, and
+whether length or character class failed), **never the rejected value
+itself**: echoing a malformed model id into log output would just move
+this exact problem from spans into logs instead of closing it. Token
+counts (`mcp.tool.tokens.*`) are unaffected either way — they're set
+before this gate runs. `costTracking.pricing`/`pricingTable` override keys
+(operator-authored config) are never subject to this check — only
+tool-result content is. Full design: ADR 019 Part 2
+(`docs/adr/019-raw-content-on-spans.md`).
 
 ### Metrics
 
@@ -1746,6 +1830,56 @@ useful today, for free, to any client that already sets `_meta` in this
 shape; the client-side half is tracked as future work, not implied as
 solved by this release.
 
+## What this library records — read this before routing spans anywhere sensitive data isn't already allowed
+
+This is a description of what happens today, not a claim about a specific
+threat model this library has verified it covers.
+
+opentel-mcp forwards what your tools and their thrown exceptions actually
+produce. It does not invent, infer, or independently verify tool-result
+content — if a tool's handler throws `new Error('user ' + email + ' not
+found')`, or a tool result puts a credential in a field this library
+reads, that content is exactly what reaches your telemetry backend. Three
+channels carry it:
+
+- **`span.recordException(err)` / `span.setStatus({ message })`** on every
+  thrown `tools/call`/`tools/list` error — `exception.message` and
+  `exception.stacktrace` are set from `err.message`/`err.stack` verbatim
+  by default. `errorRecording.mode` controls this; see "Error recording"
+  above.
+- **`mcp.tool.model` / `gen_ai.response.model`** — a tool result's own
+  declared model field, admitted once it passes a length/character-shape
+  check (v0.13.0). The check bounds shape, not content: a well-formed but
+  still arbitrary string from a tool result reaches the span. See "Cost &
+  Token Attribution" → "Model identifier validation" above.
+- **`mcp.failure.error_class`** (length-capped at 128 characters, not
+  pattern-scrubbed) and **`mcp.failure.validation_paths`** (a schema's
+  dynamic/record keys replaced with the placeholder `<KEY>`) — both
+  already hardened; see `docs/known-gaps.md` entry 10.
+
+**This isn't unique to opentel-mcp.** OpenTelemetry's own semantic
+conventions mark `exception.message` as an attribute that "may contain
+sensitive information" and still specify recording it by default —
+every other OTel-instrumented library sharing the same trace (an HTTP
+client, a DB driver, a queue consumer) records `err.message`/`err.stack`
+the same way, unscrubbed, through the same `recordException()` call.
+opentel-mcp matches that ecosystem default rather than silently diverging
+from it. What it adds on top: `errorRecording.mode` lets you choose
+`'normalized'` (targeted scrubbing — the same structured patterns
+fingerprinting matches: UUIDs, emails, URLs, IPs, timestamps, paths,
+quoted ids; **not** a general-purpose PII filter, so freeform sensitive
+text — a customer's name in prose, an API key in a format none of those
+patterns match — still reaches the span unchanged, see "Error recording"
+above) or `'none'` (record neither) instead of `'full'` — a level of
+operator control most peer instrumentations don't offer for this path.
+Full reasoning, including why the default doesn't change in this
+release: ADR 019 (`docs/adr/019-raw-content-on-spans.md`).
+
+This is a data-handling property of an observability library, not a
+security control opentel-mcp is claiming to provide — it doesn't
+authenticate, encrypt, or restrict who can read your traces; that's your
+tracing backend's job.
+
 ## Configuration
 
 All options passed to `instrumentMcpServer(server, options)`. Source of
@@ -1762,9 +1896,11 @@ truth: `src/config.js`.
 | `costTracking` | object | see below | Controls cost/token attribution[^9] — see "Cost & Token Attribution" above |
 | `thrashDetection` | object | see below | Controls Agent Thrash Detection[^10] — see "Agent Thrash Detection" above. Requires `fingerprinting: true` |
 | `schemaDrift` | object | see below | Controls tool schema drift detection[^11] — see "Tool schema drift detection" above. `enabled: true` by default changes `instrumentMcpServer()`'s throw behavior on upgrade — see that section's "Behavior change on upgrade" |
+| `errorRecording` | object | see below | Controls what raw exception content reaches `recordException()`/`setStatus()`[^12] — see "Error recording" above |
 
 [^10]: `{ enabled?, threshold?, windowMs?, maxTrackedKeys?, entryTtlMs?, reEmitAfter?, assumeSingleSession? }`, all fields optional, individually defaulted, and individually overridable via an `OTEL_MCP_THRASH_*` env var — see "Agent Thrash Detection" → "Configuration" above for the full table.
 [^11]: `{ enabled?, maxTrackedTools? }`, all fields optional, individually defaulted, and individually overridable via an `OTEL_MCP_SCHEMA_DRIFT_*` env var — see "Tool schema drift detection" → "Configuration" above for the full table.
+[^12]: `{ mode?: 'full' | 'normalized' | 'none' }`, defaulted to `'full'`, individually overridable via `OTEL_MCP_ERROR_RECORDING_MODE` — see "Error recording" → "Configuration" above for the full table.
 
 [^9]: `{ enabled?: boolean; pricingTable?: PricingTable; extractor?: UsageExtractor; budget?: { perSessionUsd?: number; perToolUsd?: number } }`, all fields optional and individually defaulted — `{ enabled: true, pricingTable: DEFAULT_PRICING, extractor: defaultExtractor }` with budget tracking off.
 [^2]: Required only when `setupNodeSdk` is `true`. Has no effect otherwise — the host app's registered `TracerProvider` owns the resource; passing it anyway logs a one-time `diag.warn`.
@@ -2181,7 +2317,7 @@ pragmatic choice rather than a spec-pure one.
   revision 2026-07-28, v0.10.0+; see "MCP v2 support" above for what's
   covered and `docs/known-gaps.md` entries 6 and 8 for what isn't yet)
 - @opentelemetry/api ^1.9.0
-- 748 tests, 744 passing + 4 intentionally skipped (`npm test`) — see `test/`
+- 948 tests, 944 passing + 4 intentionally skipped (`npm test`) — see `test/`
 - `npm run typecheck` (`tsc --noEmit`) type-checks the public `.d.ts`
   surface (`src/index.d.ts` and friends) — see CONTRIBUTING.md
 

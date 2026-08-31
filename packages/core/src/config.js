@@ -9,6 +9,7 @@ import { defaultExtractor } from './cost/extractor.js';
 import { normalizeModelName } from './cost/calculator.js';
 import { resolveThrashConfig } from './thrash/config.js';
 import { resolveSchemaDriftConfig } from './schema-drift/config.js';
+import { resolveErrorRecordingConfig } from './error-recording/config.js';
 
 /**
  * @typedef {object} CostTrackingOptions
@@ -84,6 +85,19 @@ import { resolveSchemaDriftConfig } from './schema-drift/config.js';
  *   `enabled: false` (or the default when this option is omitted) is a true no-op: tools/list is not
  *   wrapped at all, unlike thrashDetection/costTracking whose disabled state still wraps tools/call for
  *   other reasons and merely skips inner logic.
+ * @property {Partial<import('./error-recording/config.js').ErrorRecordingConfig>} [errorRecording] - Controls
+ *   what a THROWN exception (not a tool-level `isError: true` result, which never carries a JS Error and is
+ *   unaffected) puts on the mcp.tool.call / tools/list span (ADR 019, docs/adr/019-raw-content-on-spans.md
+ *   Part 1, v0.13.0): `{ mode: 'full' | 'normalized' | 'none' }`. Defaults to `{ mode: 'full' }` —
+ *   byte-identical to every release before v0.13.0 (span.recordException(err) plus setStatus({ message:
+ *   err.message }), uncapped). `'normalized'` reuses fingerprint/normalize/message.js's normalizeMessage()
+ *   for the exception message and fingerprint/normalize/stack.js's parseAndNormalizeStack() for the
+ *   stacktrace (cwd-stripped, node_modules-version-collapsed) — no new scrubbing pipeline. `'none'` sets
+ *   only the ERROR status code, no message, no exception event — the same pattern already used for a
+ *   tool-level isError: true failure. Also settable via the `OTEL_MCP_ERROR_RECORDING_MODE` environment
+ *   variable (lower precedence than this option), same OTEL_MCP_<FEATURE>_ prefix pattern as
+ *   OTEL_MCP_THRASH_ and OTEL_MCP_SCHEMA_DRIFT_; an unrecognized value from either source falls back to
+ *   'full' silently, never a throw.
  * @property {string} [instanceKey] - Host-supplied stable identifier for one logical service (ADR 012,
  *   docs/adr/012-tracker-lifecycle-and-shared-state.md, Option C — Phase 2: this option and its wiring).
  *   When provided, the four in-memory trackers this library keeps per instrumented server — budget
@@ -259,6 +273,7 @@ export function resolveOptions(options) {
     },
     thrashDetection: resolveThrashConfig(opts.thrashDetection),
     schemaDrift: resolveSchemaDriftConfig(opts.schemaDrift),
+    errorRecording: resolveErrorRecordingConfig(opts.errorRecording),
     instanceKey: resolveInstanceKey(opts.instanceKey, process.env[ENV_INSTANCE_KEY]),
   };
 }

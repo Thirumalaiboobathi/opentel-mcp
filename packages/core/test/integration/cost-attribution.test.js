@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { trace, context, metrics } from '@opentelemetry/api';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { trace, context, metrics, diag } from '@opentelemetry/api';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { MeterProvider, MetricReader } from '@opentelemetry/sdk-metrics';
@@ -12,6 +12,7 @@ import {
   ATTR_MCP_TOOL_TOKENS_OUTPUT,
   ATTR_MCP_TOOL_TOKENS_TOTAL,
   ATTR_MCP_TOOL_MODEL,
+  ATTR_GEN_AI_RESPONSE_MODEL,
   ATTR_MCP_TOOL_COST_USD,
   ATTR_MCP_TOOL_COST_CURRENCY,
   ATTR_MCP_TOOL_PRICING_STATUS,
@@ -22,7 +23,7 @@ import {
 } from '../../src/attributes.js';
 import { ATTRIBUTE_KEYS } from '../../src/fingerprint/attributes.js';
 import { DEFAULT_PRICING } from '../../src/cost/pricing.js';
-import { calculateCost } from '../../src/cost/calculator.js';
+import { calculateCost, MODEL_ID_MAX_LENGTH } from '../../src/cost/calculator.js';
 
 /** Fresh, unconnected low-level Server — every test builds its own (see test/instrument.fingerprint.test.js). */
 function createServer(name = 'test-server') {
@@ -652,6 +653,254 @@ describe('cost attribution integration', () => {
       const duration = findMetric(resourceMetrics, 'mcp.tool.duration');
       expect(findDataPoint(calls, 'ask').value).toBe(1);
       expect(findDataPoint(duration, 'ask').value.count).toBe(1);
+    });
+  });
+
+  // ADR 019 Part 2 (docs/adr/019-raw-content-on-spans.md, v0.13.0 Phase 2):
+  // mcp.tool.model / gen_ai.response.model is gated through a length/
+  // character allowlist before it reaches a span, since it's tool-RESULT
+  // content, not library-computed metadata.
+  describe('model field validation (ADR 019 Part 2)', () => {
+    it('every DEFAULT_PRICING model id passes through unchanged, cost attribution unaffected', async () => {
+      for (const model of Object.keys(DEFAULT_PRICING)) {
+        const server = createServer();
+        instrumentMcpServer(server, { serviceName: 'svc' });
+        registerTools(server, {
+          ask: () => ({
+            content: [{ type: 'text', text: 'hi' }],
+            model,
+            usage: { input_tokens: 1000, output_tokens: 500 },
+          }),
+        });
+
+        await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+        const [span] = spanExporter.getFinishedSpans();
+        expect(span.attributes[ATTR_MCP_TOOL_MODEL]).toBe(model);
+        expect(span.attributes[ATTR_GEN_AI_RESPONSE_MODEL]).toBe(model);
+        expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_KNOWN);
+        const expectedCost = calculateCost(1000, 500, model, DEFAULT_PRICING);
+        expect(span.attributes[ATTR_MCP_TOOL_COST_USD]).toBeCloseTo(expectedCost, 6);
+
+        spanExporter.reset();
+      }
+    });
+
+    it('a "provider/model" form passes and is priced exactly as before this gate existed', async () => {
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc' });
+      registerTools(server, {
+        ask: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: 'Anthropic/Claude-Sonnet-5',
+          usage: { input_tokens: 1000, output_tokens: 500 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+      const [span] = spanExporter.getFinishedSpans();
+      expect(span.attributes[ATTR_MCP_TOOL_MODEL]).toBe('Anthropic/Claude-Sonnet-5');
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_KNOWN);
+      expect(span.attributes[ATTR_MCP_TOOL_COST_USD]).toBeCloseTo(
+        calculateCost(1000, 500, 'Anthropic/Claude-Sonnet-5', DEFAULT_PRICING),
+        6,
+      );
+    });
+
+    it('an over-length model value is rejected: no model/cost attributes, pricing_status "unknown", tokens still recorded', async () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc' });
+      const hugeModel = 'x'.repeat(MODEL_ID_MAX_LENGTH + 1);
+      registerTools(server, {
+        ask: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: hugeModel,
+          usage: { input_tokens: 1000, output_tokens: 500 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+      const [span] = spanExporter.getFinishedSpans();
+      expect(span.attributes[ATTR_MCP_TOOL_TOKENS_TOTAL]).toBe(1500);
+      expect(span.attributes[ATTR_MCP_TOOL_MODEL]).toBeUndefined();
+      expect(span.attributes[ATTR_GEN_AI_RESPONSE_MODEL]).toBeUndefined();
+      expect(span.attributes[ATTR_MCP_TOOL_COST_USD]).toBeUndefined();
+      expect(span.attributes[ATTR_MCP_TOOL_COST_CURRENCY]).toBeUndefined();
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_UNKNOWN);
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const [message] = warnSpy.mock.calls[0];
+      expect(message).toMatch(/model field failed validation/);
+      expect(message).not.toContain(hugeModel);
+      warnSpy.mockRestore();
+    });
+
+    it('a value with a disallowed character is rejected the same way', async () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc' });
+      const badModel = 'jane@example.com is not a model but has spaces and <tags>';
+      registerTools(server, {
+        ask: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: badModel,
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+      const [span] = spanExporter.getFinishedSpans();
+      expect(span.attributes[ATTR_MCP_TOOL_MODEL]).toBeUndefined();
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_UNKNOWN);
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const [message] = warnSpy.mock.calls[0];
+      expect(message).not.toContain(badModel);
+      expect(message).not.toContain('jane@example.com');
+      warnSpy.mockRestore();
+    });
+
+    it('the rejection warning never contains the offending string, across a range of hostile values', async () => {
+      const hostileValues = [
+        'x'.repeat(5000),
+        '<script>alert(document.cookie)</script>',
+        'DROP TABLE users; --',
+        'jane.doe+secret@example.com',
+        'line1\nline2\nExfiltrated: true',
+      ];
+
+      for (const badModel of hostileValues) {
+        const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+        const server = createServer();
+        instrumentMcpServer(server, { serviceName: 'svc' });
+        registerTools(server, {
+          ask: () => ({
+            content: [{ type: 'text', text: 'hi' }],
+            model: badModel,
+            usage: { input_tokens: 10, output_tokens: 5 },
+          }),
+        });
+
+        await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        const [message] = warnSpy.mock.calls[0];
+        expect(message).not.toContain(badModel);
+
+        warnSpy.mockRestore();
+        spanExporter.reset();
+      }
+    });
+
+    it('warns only once per instrumentMcpServer() call across repeated rejected-model calls', async () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc' });
+      const badModel = 'not a valid model id';
+      registerTools(server, {
+        ask: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: badModel,
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      warnSpy.mockRestore();
+    });
+
+    it('with a budget configured, budgetTracker.recordUnpriced()\'s own (separate, pre-existing) warning also does not leak the rejected value', async () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc', costTracking: { budget: { perSessionUsd: 5 } } });
+      warnSpy.mockClear(); // drop the construction-time "budget won't see unpriced spend" warning (known-gaps entry 9)
+      const badModel = 'jane@example.com is not a model but has spaces and <tags>';
+      registerTools(server, {
+        ask: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: badModel,
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+      // Two independent warnings fire for this one call: this gate's own
+      // shape-only one (ADR 019 Part 2), and recordUnpriced()'s
+      // pre-existing "did not resolve to a price" one (known-gaps entry
+      // 9) — the latter is passed the VALIDATED model (undefined here),
+      // never the raw rejected usage.model, specifically so it can't
+      // undo this gate's own care by re-leaking the value through a
+      // different, older diag.warn() call. Neither call's message may
+      // contain the rejected string.
+      expect(warnSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      for (const [message] of warnSpy.mock.calls) {
+        expect(message).not.toContain(badModel);
+        expect(message).not.toContain('jane@example.com');
+      }
+      // recordUnpriced()'s own message renders an undefined model as
+      // "(no model detected)" — confirms it received the validated
+      // (undefined) value, not the raw rejected string.
+      expect(warnSpy.mock.calls.some(([message]) => message.includes('(no model detected)'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn at all when no model is detected — only a rejected (present-but-invalid) model triggers it', async () => {
+      const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc' });
+      registerTools(server, {
+        ask: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          usage: { input_tokens: 10, output_tokens: 5 }, // no model field at all
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+      const [span] = spanExporter.getFinishedSpans();
+      expect(span.attributes[ATTR_MCP_TOOL_PRICING_STATUS]).toBe(MCP_TOOL_PRICING_STATUS_UNKNOWN);
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('a rejected model does not become an mcp.tool.tokens.total / mcp.tool.cost.total metric label', async () => {
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc' });
+      const badModel = 'not a valid model id';
+      registerTools(server, {
+        ask: () => ({
+          content: [{ type: 'text', text: 'hi' }],
+          model: badModel,
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+      });
+
+      await invokeToolCall(server, { name: 'ask', arguments: {} });
+
+      const { resourceMetrics } = await metricReader.collect();
+      const tokens = findMetric(resourceMetrics, 'mcp.tool.tokens.total');
+      const dataPoint = findDataPoint(tokens, 'ask');
+      expect(dataPoint).toBeDefined();
+      expect(dataPoint.attributes[ATTR_MCP_TOOL_MODEL]).toBeUndefined();
+      // Confirms no data point anywhere carries the raw rejected string as
+      // a label value — the actual cardinality/leak hazard this gate
+      // exists to prevent.
+      for (const scope of resourceMetrics.scopeMetrics) {
+        for (const metric of scope.metrics) {
+          for (const dp of metric.dataPoints) {
+            expect(Object.values(dp.attributes)).not.toContain(badModel);
+          }
+        }
+      }
     });
   });
 });

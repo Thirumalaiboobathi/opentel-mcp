@@ -39,7 +39,14 @@ const DEFAULT_STACK_FRAMES = 5;
 // names sharing an identical first 128 characters colliding into the same
 // fingerprint is not a real-world scenario a normal class identifier ever
 // produces.
-const MAX_ERROR_CLASS_LENGTH = 128;
+//
+// Exported as of v0.13.0 (ADR 019 Part 1, docs/adr/019-raw-content-on-spans.md):
+// instrument.js's independent `error.type`/`exception.type` read of the
+// same underlying err.name (ATTR_ERROR_TYPE, and the 'normalized'
+// errorRecording.mode's exception event) reuses this exact constant
+// rather than a second, possibly-drifting copy of the number 128 — "one
+// shared, capped value," per that ADR's own wording.
+export const MAX_ERROR_CLASS_LENGTH = 128;
 
 /**
  * @param {FingerprintContext} [ctx]

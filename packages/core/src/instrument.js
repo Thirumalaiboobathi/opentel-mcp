@@ -12,11 +12,13 @@ import { resourceFromAttributes } from '@opentelemetry/resources';
 import { resolveOptions } from './config.js';
 import { StderrSpanExporter } from './exporters/stderr.js';
 import { setupMeter } from './metrics.js';
-import { computeFingerprint } from './fingerprint/compose.js';
+import { computeFingerprint, MAX_ERROR_CLASS_LENGTH } from './fingerprint/compose.js';
 import { toSpanAttributes, ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
 import { classifyFailureChannel } from './fingerprint/classify/channel.js';
 import { extractValidationPaths } from './fingerprint/classify/validation-paths.js';
-import { calculateCost, normalizeModelName } from './cost/calculator.js';
+import { normalizeMessage } from './fingerprint/normalize/message.js';
+import { parseAndNormalizeStack } from './fingerprint/normalize/stack.js';
+import { calculateCost, normalizeModelName, isValidModelId, describeInvalidModelId } from './cost/calculator.js';
 import { DEFAULT_PRICING_LAST_VERIFIED } from './cost/pricing.js';
 import { createBudgetTracker } from './cost/budget.js';
 import { extractTraceContext } from './tracecontext/extract.js';
@@ -464,6 +466,15 @@ export function instrumentMcpServer(input, options) {
   // resolveThrashSessionId() persist state across calls. See that
   // function's docblock for why this flag exists at all.
   const thrashSessionState = { hasSeenRealSessionId: false, hasWarnedFallbackUsed: false };
+  // Same "plain holder, not instanceKey-shared" reasoning as
+  // thrashSessionState immediately above (ADR 019 Part 2, v0.13.0 Phase
+  // 2): warnRejectedModel() (see applyCostAttribution()) is a low-stakes
+  // diagnostic, not correctness-critical accumulated state the way
+  // budgetTracker/thrashDetector are — firing again on a fresh instance
+  // under a fresh-Server-per-request deployment is the same known,
+  // accepted characteristic docs/known-gaps.md entry 6 already documents
+  // for thrashSessionState, not a new problem this introduces.
+  const costAttributionState = { warnedRejectedModel: false };
   // Additive to instrumentMcpServer()'s existing return contract (the same
   // input object, for chaining — see this function's own docblock): a
   // getThrashSummary() method attached the same way shutdown() is, just
@@ -563,9 +574,19 @@ export function instrumentMcpServer(input, options) {
           toolOutcomeCounter,
           server,
           kind,
+          resolved.errorRecording,
+          costAttributionState,
         );
       } else if (schema === v1.ListToolsRequestSchema && schemaDriftDetector) {
-        handler = wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftEmitter, SCHEMA_DRIFT_SCOPE, kind);
+        handler = wrapToolsListHandler(
+          handler,
+          tracer,
+          schemaDriftDetector,
+          schemaDriftEmitter,
+          SCHEMA_DRIFT_SCOPE,
+          kind,
+          resolved.errorRecording,
+        );
       }
       return originalSetRequestHandler(schema, handler);
     };
@@ -605,9 +626,19 @@ export function instrumentMcpServer(input, options) {
           toolOutcomeCounter,
           server,
           kind,
+          resolved.errorRecording,
+          costAttributionState,
         );
       } else if (maybeHandler === undefined && method === TOOLS_LIST_METHOD && schemaDriftDetector) {
-        handlerOrSchemas = wrapToolsListHandler(handlerOrSchemas, tracer, schemaDriftDetector, schemaDriftEmitter, SCHEMA_DRIFT_SCOPE, kind);
+        handlerOrSchemas = wrapToolsListHandler(
+          handlerOrSchemas,
+          tracer,
+          schemaDriftDetector,
+          schemaDriftEmitter,
+          SCHEMA_DRIFT_SCOPE,
+          kind,
+          resolved.errorRecording,
+        );
       }
       return maybeHandler === undefined
         ? originalSetRequestHandler(method, handlerOrSchemas)
@@ -749,6 +780,51 @@ function extractSessionAndRequestId(kind, extraOrCtx) {
 }
 
 /**
+ * One-time diagnostic for a tool result's `model` field that failed
+ * isValidModelId()'s length/shape gate (ADR 019 Part 2,
+ * docs/adr/019-raw-content-on-spans.md, v0.13.0 Phase 2). Distinct from
+ * budgetTracker.recordUnpriced()'s own warning (src/cost/budget.js):
+ * that one describes a LATER, different condition (a real, valid model
+ * name that just doesn't resolve to a price) and only fires when a
+ * budget is actually configured. This one fires for any
+ * `costTracking.enabled` deployment, budget or not — "your cost/token
+ * attribution is silently missing a model" is worth knowing regardless
+ * of whether a budget guardrail is in play.
+ *
+ * CRITICAL, and the entire reason this function exists rather than just
+ * inlining a `diag.warn()` call with `value` in it: reports SHAPE ONLY —
+ * via describeInvalidModelId() (src/cost/calculator.js), never the
+ * rejected value itself. `diag.warn()` output routinely gets piped into
+ * a deployment's own logging pipeline; printing the offending string
+ * here would relocate this whole gate's problem from spans into logs
+ * instead of closing it.
+ *
+ * Fires at most once per `state` object — see applyCostAttribution()'s
+ * own docblock for why `state` (costAttributionState) is constructed
+ * fresh per instrumentMcpServer() call rather than instanceKey-shared.
+ * Never throws, matching every other diagnostic in this codebase.
+ *
+ * @param {unknown} value - The rejected `usage.model` value. Read only for its shape (typeof, length) —
+ *   never logged, never returned, never otherwise observable outside this function.
+ * @param {{ warnedRejectedModel: boolean }} state
+ */
+function warnRejectedModel(value, state) {
+  if (state.warnedRejectedModel) return;
+  state.warnedRejectedModel = true;
+
+  try {
+    diag.warn(
+      `opentel-mcp: a tool result's model field failed validation (${describeInvalidModelId(value)}) and was ` +
+        "excluded from mcp.tool.model / gen_ai.response.model / cost attribution; mcp.tool.pricing_status was " +
+        "set to 'unknown'. This warning fires once per instrumentMcpServer() call and deliberately never logs " +
+        'the value itself — see docs/adr/019-raw-content-on-spans.md Part 2.',
+    );
+  } catch {
+    // Never throw — see this function's own docblock.
+  }
+}
+
+/**
  * Best-effort cost/token attribution for one tool call's result, added on
  * top of the span and metrics that always fire (see wrapToolCallHandler
  * below). Runs `costTracking.extractor` (defaultExtractor by default — see
@@ -794,6 +870,22 @@ function extractSessionAndRequestId(kind, extraOrCtx) {
  * directly instead of inferring it from an attribute's absence. Passed to
  * recordTokens/recordCost too, for the same metric-level visibility.
  *
+ * v0.13.0 (ADR 019 Part 2, docs/adr/019-raw-content-on-spans.md): `usage.model`
+ * is tool-RESULT content, not library-computed metadata — before it's used
+ * ANYWHERE below (span attributes, calculateCost(), pricingOverrideKeys
+ * lookup, metric labels), it's gated through isValidModelId()
+ * (src/cost/calculator.js): a length/character allowlist, never a
+ * pricing-table membership check. A value that fails this gate is treated
+ * exactly like "no model detected" for every downstream purpose — the
+ * existing mcp.tool.pricing_status: "unknown" / budgetTracker.recordUnpriced()
+ * machinery already handles that case correctly, so a rejected value is
+ * never a silent drop, just a redirection into a path this function
+ * already had. warnRejectedModel() below additionally fires a one-time,
+ * SHAPE-ONLY diagnostic (never the rejected value itself — see that
+ * function's own docblock) distinct from budgetTracker.recordUnpriced()'s
+ * own warning, which describes a different, later condition and is gated
+ * on a budget being configured; this one isn't.
+ *
  * @param {import('@opentelemetry/api').Span} span
  * @param {ReturnType<import('./metrics.js').setupMeter> | null} metricsRecorder
  * @param {string | undefined} toolName
@@ -801,9 +893,12 @@ function extractSessionAndRequestId(kind, extraOrCtx) {
  * @param {*} result
  * @param {import('./config.js').CostTrackingOptions & { pricingOverrideKeys: Set<string> }} costTracking
  * @param {ReturnType<import('./cost/budget.js').createBudgetTracker>} budgetTracker
+ * @param {{ warnedRejectedModel: boolean }} costAttributionState - ADR 019 Part 2: one-time-warning state
+ *   for warnRejectedModel() below, constructed once per instrumentMcpServer() call (same non-instanceKey-shared
+ *   granularity as thrashSessionState — see that variable's own comment in instrumentMcpServer()).
  * @returns {{ tokensIn: number, tokensOut: number, costUsd: number } | null}
  */
-function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker) {
+function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker, costAttributionState) {
   if (!costTracking.enabled) return null;
 
   try {
@@ -813,33 +908,55 @@ function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result
     span.setAttribute(ATTR_MCP_TOOL_TOKENS_INPUT, usage.inputTokens);
     span.setAttribute(ATTR_MCP_TOOL_TOKENS_OUTPUT, usage.outputTokens);
     span.setAttribute(ATTR_MCP_TOOL_TOKENS_TOTAL, usage.totalTokens);
-    if (usage.model) {
-      span.setAttribute(ATTR_MCP_TOOL_MODEL, usage.model);
-      span.setAttribute(ATTR_GEN_AI_RESPONSE_MODEL, usage.model);
+
+    // ADR 019 Part 2: usage.model is gated here, ONCE, before it reaches
+    // anything below — a rejected value (usage.model was present but
+    // isn't identifier-shaped) is treated identically to "no model
+    // detected" for every downstream purpose (validModel stays
+    // undefined), and warnRejectedModel() fires the one-time, shape-only
+    // diagnostic. usage.model === undefined (no model detected at all —
+    // the pre-existing, unrelated case) never calls warnRejectedModel:
+    // there's nothing rejected, just nothing found.
+    const modelIsValid = isValidModelId(usage.model);
+    if (usage.model !== undefined && !modelIsValid) {
+      warnRejectedModel(usage.model, costAttributionState);
+    }
+    const validModel = modelIsValid ? usage.model : undefined;
+
+    if (validModel) {
+      span.setAttribute(ATTR_MCP_TOOL_MODEL, validModel);
+      span.setAttribute(ATTR_GEN_AI_RESPONSE_MODEL, validModel);
     }
 
     let costUsd = null;
-    if (usage.model) {
-      costUsd = calculateCost(usage.inputTokens, usage.outputTokens, usage.model, costTracking.pricingTable);
+    if (validModel) {
+      costUsd = calculateCost(usage.inputTokens, usage.outputTokens, validModel, costTracking.pricingTable);
     }
 
     // ADR 016 point 4: provenance-based, computed against the same
     // normalized key calculateCost() itself looked up — 'unknown' covers
-    // both "no model detected at all" and "model detected but didn't
-    // resolve to a cost" (unrecognized, or a malformed override entry).
+    // "no model detected at all," "a rejected model field" (ADR 019 Part
+    // 2 — validModel is undefined either way), and "model detected but
+    // didn't resolve to a cost" (unrecognized, or a malformed override
+    // entry).
     const pricingStatus =
-      !usage.model || costUsd === null
+      !validModel || costUsd === null
         ? MCP_TOOL_PRICING_STATUS_UNKNOWN
-        : costTracking.pricingOverrideKeys.has(normalizeModelName(usage.model))
+        : costTracking.pricingOverrideKeys.has(normalizeModelName(validModel))
           ? MCP_TOOL_PRICING_STATUS_USER_OVERRIDE
           : MCP_TOOL_PRICING_STATUS_KNOWN;
     span.setAttribute(ATTR_MCP_TOOL_PRICING_STATUS, pricingStatus);
-    metricsRecorder?.recordTokens(toolName, usage.model, usage.totalTokens, pricingStatus);
+    // validModel, not usage.model: mcp.tool.model is also a metric LABEL
+    // here (metrics.js's recordTokens()/recordCost()), so a rejected
+    // value must never reach it either — an unvalidated string becoming a
+    // label is a cardinality hazard on top of the content-exposure one
+    // ADR 019 Part 2 is about.
+    metricsRecorder?.recordTokens(toolName, validModel, usage.totalTokens, pricingStatus);
 
     if (costUsd !== null) {
       span.setAttribute(ATTR_MCP_TOOL_COST_USD, costUsd);
       span.setAttribute(ATTR_MCP_TOOL_COST_CURRENCY, MCP_TOOL_COST_CURRENCY_USD);
-      metricsRecorder?.recordCost(toolName, usage.model, costUsd, pricingStatus);
+      metricsRecorder?.recordCost(toolName, validModel, costUsd, pricingStatus);
 
       const budgetResult = budgetTracker.recordAndCheck(sessionId, toolName, costUsd);
       if (budgetResult.exceeded) {
@@ -853,7 +970,21 @@ function applyCostAttribution(span, metricsRecorder, toolName, sessionId, result
       // never saw it. recordUnpriced() no-ops unless a budget is actually
       // configured, and warns at most once per tracker instance — see its
       // own docblock (src/cost/budget.js).
-      budgetTracker.recordUnpriced(usage.model);
+      //
+      // validModel, deliberately NOT usage.model: recordUnpriced()'s OWN
+      // pre-existing warning (cost/budget.js) names whatever `model` it's
+      // given verbatim (`isNonEmptyString(model) ? \`"${model}"\` : ...`)
+      // — it was written for "a real, short model name that just has no
+      // price," where that's safe. Passing the RAW rejected usage.model
+      // through unchanged here would let THAT warning re-leak the exact
+      // content warnRejectedModel() above was just careful not to —
+      // relocating ADR 019 Part 2's problem into a different diag.warn()
+      // call instead of closing it. validModel is undefined for a
+      // rejected value, which recordUnpriced() already renders as
+      // "(no model detected)" — an approximation ("rejected" collapses
+      // into "not detected"), accepted deliberately: warnRejectedModel()
+      // above is the one place that's supposed to say more, safely.
+      budgetTracker.recordUnpriced(validModel);
     }
 
     return { tokensIn: usage.inputTokens, tokensOut: usage.outputTokens, costUsd: costUsd ?? 0 };
@@ -1217,6 +1348,96 @@ function applyToolOutcomeThrown(toolOutcomeCounter) {
 }
 
 /**
+ * Records a thrown exception onto `span` per `errorRecordingConfig.mode`
+ * (ADR 019 Part 1, docs/adr/019-raw-content-on-spans.md, v0.13.0 Phase 1).
+ * The only two call sites are the thrown-exception catch blocks in
+ * wrapToolCallHandler()/wrapToolsListHandler() below — a tool-level
+ * `isError: true` result never carries a JS Error at all and is
+ * unaffected by this option (see its own `span.setStatus({ code:
+ * SpanStatusCode.ERROR })` with no message, a few lines above in
+ * wrapToolCallHandler — the exact pattern 'none' mode below reuses).
+ *
+ * - `'full'` (default): `span.recordException(err)` +
+ *   `setStatus({ message: err?.message })` — byte-identical to every
+ *   release before v0.13.0. This is the literal two-line call the
+ *   catch blocks used inline before this function existed; taken
+ *   unconditionally, with no new branching evaluated first, whenever
+ *   mode is `'full'`.
+ * - `'none'`: `setStatus({ code: ERROR })` only — no message, no
+ *   `exception` event.
+ * - `'normalized'`: a hand-built `exception` event carrying the same
+ *   three keys `recordException()` itself would set
+ *   (`exception.type`/`exception.message`/`exception.stacktrace`), but
+ *   with `exception.message` run through `normalizeMessage()` and
+ *   `exception.stacktrace` rebuilt from `parseAndNormalizeStack()`'s
+ *   frames (cwd-stripped, `node_modules`-version-collapsed) — never the
+ *   raw `err.stack`. `err` itself is never mutated: both call sites
+ *   rethrow the original object afterward, and `computeFingerprint()` a
+ *   few lines later (when fingerprinting is enabled) reads
+ *   `err.message`/`err.stack` independently, on the real, unmutated
+ *   object.
+ *
+ * `error.type` (`ATTR_ERROR_TYPE`, set by each call site immediately
+ * after this call returns) is capped at `MAX_ERROR_CLASS_LENGTH`
+ * regardless of mode — see each call site's own comment. The native
+ * `exception.type` a `'full'`-mode `span.recordException(err)` call sets
+ * internally is deliberately NOT capped here: `'full'` mode is defined
+ * as byte-identical to pre-v0.13.0 behavior, so the native OTel SDK call
+ * is left completely untouched, uncapped exception.type included. Only
+ * `'normalized'` mode's hand-built event applies the cap to
+ * `exception.type` too (mirroring `recordException()`'s own
+ * `err.code?.toString() ?? err.name` derivation for what goes in that
+ * field), since that event is already being constructed by hand either
+ * way — there is no "untouched native call" to preserve for that mode.
+ *
+ * Never throws — matches this library's fail-open discipline for
+ * everything downstream of a real thrown error, the same guarantee
+ * `fingerprint/compose.js`'s `computeFingerprint()` already makes for
+ * the exact same `err`.
+ *
+ * @param {import('@opentelemetry/api').Span} span
+ * @param {unknown} err
+ * @param {import('./error-recording/config.js').ErrorRecordingConfig} errorRecordingConfig
+ */
+function recordThrownException(span, err, errorRecordingConfig) {
+  try {
+    if (errorRecordingConfig.mode === 'none') {
+      span.setStatus({ code: SpanStatusCode.ERROR });
+      return;
+    }
+
+    if (errorRecordingConfig.mode === 'normalized') {
+      const rawMessage = err?.message;
+      const message = typeof rawMessage === 'string' ? normalizeMessage(rawMessage) : undefined;
+
+      const rawStack = err?.stack;
+      const { frames } = parseAndNormalizeStack(typeof rawStack === 'string' ? rawStack : undefined, {
+        cwd: process.cwd(),
+      });
+      const stacktrace =
+        frames.length > 0
+          ? frames.map((frame) => `${frame.fn || '<anonymous>'}@${frame.file}:${frame.line ?? '?'}`).join('\n')
+          : undefined;
+
+      const exceptionType = String(err?.code ?? err?.name ?? 'Error').slice(0, MAX_ERROR_CLASS_LENGTH);
+
+      const attrs = { 'exception.type': exceptionType };
+      if (message !== undefined) attrs['exception.message'] = message;
+      if (stacktrace !== undefined) attrs['exception.stacktrace'] = stacktrace;
+      span.addEvent('exception', attrs);
+      span.setStatus({ code: SpanStatusCode.ERROR, message });
+      return;
+    }
+
+    // 'full' (default) — byte-identical to pre-v0.13.0 behavior.
+    span.recordException(err);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
+  } catch {
+    // Never throw — see this function's own docblock.
+  }
+}
+
+/**
  * Wraps a tools/call handler in a span covering its execution, plus the
  * mcp.tool.* metrics (see src/metrics.js). This sits as the innermost layer
  * relative to Server's own request/response validation wrapping (see ADR
@@ -1309,6 +1530,11 @@ function applyToolOutcomeThrown(toolOutcomeCounter) {
  * @param {'v1' | 'v2'} kind - ADR 015 Phase 2: which SDK `server` came from, resolved once by
  *   detectServerKind() at instrument time — determines how `sessionId`/`requestId` are read off
  *   the handler's second argument (`extra` for v1, `ctx` for v2 — see extractSessionAndRequestId()).
+ * @param {import('./error-recording/config.js').ErrorRecordingConfig} errorRecordingConfig - ADR 019 Part 1
+ *   (v0.13.0): controls what the thrown-exception branch below puts on the span — see
+ *   recordThrownException()'s own docblock.
+ * @param {{ warnedRejectedModel: boolean }} costAttributionState - ADR 019 Part 2 (v0.13.0): threaded
+ *   through to applyCostAttribution() — see that function's own docblock and warnRejectedModel()'s.
  */
 function wrapToolCallHandler(
   handler,
@@ -1325,6 +1551,8 @@ function wrapToolCallHandler(
   toolOutcomeCounter,
   server,
   kind,
+  errorRecordingConfig,
+  costAttributionState,
 ) {
   return (request, extra) => {
     const toolName = request?.params?.name;
@@ -1417,7 +1645,16 @@ function wrapToolCallHandler(
               span.setAttribute(ATTRIBUTE_KEYS.VALIDATION_PATHS, validationPaths);
             }
           }
-          const usage = applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker);
+          const usage = applyCostAttribution(
+            span,
+            metricsRecorder,
+            toolName,
+            sessionId,
+            result,
+            costTracking,
+            budgetTracker,
+            costAttributionState,
+          );
           // ADR 007: a 'protocol.output' failure recovered above (a
           // McpServer-disguised output-schema bug) must not be counted as
           // thrash here either, same as the thrown branch below —
@@ -1446,7 +1683,7 @@ function wrapToolCallHandler(
           );
         } else {
           span.setStatus({ code: SpanStatusCode.OK });
-          applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker);
+          applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker, costAttributionState);
           if (thrashSessionId !== null) {
             applyThrashSuccessClear(thrashConfig, thrashDetector, thrashSessionId, toolName);
           }
@@ -1455,9 +1692,16 @@ function wrapToolCallHandler(
         return result;
       } catch (err) {
         applyToolOutcomeThrown(toolOutcomeCounter);
-        span.recordException(err);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
-        const errorType = err?.name ?? 'Error';
+        recordThrownException(span, err, errorRecordingConfig);
+        // ADR 019 Part 1: capped at MAX_ERROR_CLASS_LENGTH unconditionally,
+        // regardless of errorRecordingConfig.mode — a length cap on a
+        // class-identifier field costs a well-behaved tool nothing, so
+        // there's no default-behavior tension to gate it behind (contrast
+        // recordThrownException()'s own mode branching, which does gate
+        // message/stacktrace CONTENT). Same coercion compose.js's
+        // errorClass applies (a non-string .name is stringified, not
+        // thrown on) — see fingerprint/compose.js's rawErrorClass.
+        const errorType = String(err?.name ?? 'Error').slice(0, MAX_ERROR_CLASS_LENGTH);
         span.setAttribute(ATTR_ERROR_TYPE, errorType);
 
         let failureCategory = '';
@@ -1549,8 +1793,13 @@ function wrapToolCallHandler(
  * @param {string} schemaDriftScope - Fixed per instrumented server instance — see instrumentMcpServer().
  * @param {'v1' | 'v2'} kind - ADR 015 Phase 2: see wrapToolCallHandler's own `kind` param and
  *   extractSessionAndRequestId() — same requestId-only extraction, no sessionId use here.
+ * @param {import('./error-recording/config.js').ErrorRecordingConfig} errorRecordingConfig - ADR 019 Part 1
+ *   (v0.13.0): see wrapToolCallHandler's own param and recordThrownException()'s docblock. The thrown-
+ *   exception branch below is the only place this handler's own JS Error content reaches a span; a
+ *   schema-drift capture failure (caught separately just above) is diag.debug()-only and never reaches
+ *   the span at all, so it's unaffected by this option.
  */
-function wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftEmitter, schemaDriftScope, kind) {
+function wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftEmitter, schemaDriftScope, kind, errorRecordingConfig) {
   return (request, extra) => {
     return tracer.startActiveSpan(TOOLS_LIST_METHOD, { kind: SpanKind.SERVER }, async (span) => {
       span.setAttribute(ATTR_MCP_METHOD_NAME, TOOLS_LIST_METHOD);
@@ -1580,8 +1829,7 @@ function wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftE
         span.setStatus({ code: SpanStatusCode.OK });
         return result;
       } catch (err) {
-        span.recordException(err);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
+        recordThrownException(span, err, errorRecordingConfig);
         throw err;
       } finally {
         span.end();

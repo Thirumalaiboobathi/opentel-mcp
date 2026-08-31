@@ -1,6 +1,7 @@
 import type { CostTrackingOptions } from './cost/types.d.ts';
 import type { ThrashConfig, ThrashSummary } from './thrash/types.d.ts';
 import type { SchemaDriftConfig } from './schema-drift/types.d.ts';
+import type { ErrorRecordingConfig } from './error-recording/types.d.ts';
 import type { ObservationState } from './observation/types.d.ts';
 
 /**
@@ -112,6 +113,24 @@ export interface InstrumentOptions {
    * (`src/schema-drift/types.d.ts`) for the full field list and defaults.
    */
   schemaDrift?: Partial<SchemaDriftConfig>;
+
+  /**
+   * Controls what a THROWN exception (not a tool-level `isError: true` result, which never carries a JS
+   * `Error` and is unaffected by this option) puts on the `tools/call`/`tools/list` span (ADR 019,
+   * `docs/adr/019-raw-content-on-spans.md` Part 1, v0.13.0).
+   *
+   * Defaults to `{ mode: 'full' }` — byte-identical to every release before v0.13.0:
+   * `span.recordException(err)` plus `span.setStatus({ message: err.message })`, both uncapped.
+   * `'normalized'` reuses `normalizeMessage()` (`src/fingerprint/normalize/message.js`) for the exception
+   * message and `parseAndNormalizeStack()` (`src/fingerprint/normalize/stack.js`) for the stacktrace
+   * (cwd-stripped, `node_modules` version-collapsed) — no new scrubbing pipeline. `'none'` sets only the
+   * `ERROR` status code, no message, no `exception` event.
+   *
+   * Also settable via the `OTEL_MCP_ERROR_RECORDING_MODE` environment variable (lower precedence than this
+   * option); an unrecognized value from either source falls back to `'full'` silently, never a throw. See
+   * {@link ErrorRecordingConfig} (`src/error-recording/types.d.ts`).
+   */
+  errorRecording?: Partial<ErrorRecordingConfig>;
 
   /**
    * Host-supplied stable identifier for one logical service (ADR 012,
@@ -394,6 +413,18 @@ export type { ThrashConfig, ThrashDetectedEvent, ThrashSummary, ThrashOffender }
 // part of the public API.
 
 export type { SchemaDriftConfig, SchemaDriftKind, SchemaDriftEvent } from './schema-drift/types.d.ts';
+
+// --- Exception-recording mode (src/error-recording/) ---
+//
+// Re-exported here so TypeScript consumers get this type from the package
+// root instead of reaching into src/error-recording/* directly. See
+// src/error-recording/types.d.ts for the full shape documentation and ADR
+// 019 (docs/adr/019-raw-content-on-spans.md). Same posture as Agent
+// Thrash Detection / schema drift above — no runtime value re-exported:
+// resolveErrorRecordingConfig() is internal to src/config.js's wiring,
+// not part of the public API.
+
+export type { ErrorRecordingConfig } from './error-recording/types.d.ts';
 
 // --- Two-axis observation contract (src/observation/) ---
 //

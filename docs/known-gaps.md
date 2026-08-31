@@ -1201,3 +1201,43 @@ unchanged `'full'` behavior; and a length/character-allowlist gate for
 rejection can never become a silent drop. Design only, as of this update
 — no code has changed for either item. Recommended target: v0.13.0 for
 both, paired.
+
+## Update (2026-08-30): both items implemented in v0.13.0 — one still open by design, not by omission
+
+Both of ADR 019's designs have shipped in full:
+
+- **`errorRecording.mode`** (Part 1) is implemented exactly as designed —
+  `'full'` / `'normalized'` / `'none'`, threaded through both thrown paths
+  (`tools/call` and `tools/list`), `'normalized'` reusing
+  `normalizeMessage()`/`parseAndNormalizeStack()` rather than a new
+  scrubbing pipeline, `error.type`/`exception.type` now capped at 128
+  characters unconditionally in every mode. See the README's "Error
+  recording" section.
+- **`mcp.tool.model` validation** (Part 2) is implemented exactly as
+  designed — the `[A-Za-z0-9._:/@-]{1,256}` allowlist gates entry into
+  `applyCostAttribution()`'s model-bearing attributes and metric labels;
+  a rejected value sets `mcp.tool.pricing_status: 'unknown'` and fires a
+  one-time, shape-only `diag.warn()` (length and which check failed,
+  never the value); `budgetTracker.recordUnpriced()` now receives the
+  validated (possibly `undefined`) model rather than the raw tool-result
+  value, closing a second leak path through its own pre-existing warning
+  that the ADR's own pseudocode had not accounted for. See the README's
+  "Model identifier validation" section.
+
+**`errorRecording` still defaults to `'full'` — this entry's original
+exposure is unchanged for anyone who doesn't opt in.** ADR 019 Part 1
+deliberately kept the default unchanged for all of `0.x` (see its "Argue
+the default"); shipping the config surface is the fix landed this
+release, not a change to what a default-configuration deployment already
+sends. A deployment running with no `errorRecording` option set still
+puts raw `err.message`/`err.stack` on every thrown-exception span exactly
+as it did in every prior release — this is the intended, documented state
+of this entry until a future major version revisits the default, not an
+oversight. `mcp.tool.model`'s gate, by contrast, ships default-on with no
+opt-out, per ADR 019 Part 2's asymmetry argument (a shape gate costs a
+well-behaved tool nothing, unlike a content-scrubbing policy).
+
+Both items are still tracked here — not closed out — for exactly that
+reason: the underlying content-exposure this entry originally raised for
+`recordException`/`setStatus` remains real and reachable at the default
+configuration, by design, until 1.0.

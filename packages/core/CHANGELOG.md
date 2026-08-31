@@ -1,5 +1,92 @@
 # Changelog
 
+## 0.13.0
+
+Closes the two open items from `docs/known-gaps.md` entry 10 (a
+raw-content audit of every attribute/span event this package emits) that
+needed a design decision before a fix — raw exception content on
+`recordException`/`setStatus`, and an unvalidated tool-result model field
+reaching `mcp.tool.model`/`gen_ai.response.model` — plus the two
+lower-risk fixes from the same entry that didn't need one. Full design:
+ADR 019 (`docs/adr/019-raw-content-on-spans.md`). See the README's new
+"What this library records" and "Error recording" sections for the
+operator-facing consequence of each.
+
+### Added — `errorRecording.mode` config (ADR 019 Part 1)
+
+- New top-level `errorRecording` option, sibling to `fingerprinting` /
+  `costTracking` / `thrashDetection` / `schemaDrift`: `'full'` (default,
+  byte-for-byte unchanged from every prior release —
+  `recordException(err)` + `setStatus({ message: err.message })` with the
+  raw error), `'normalized'` (reuses the existing
+  `normalizeMessage()`/`parseAndNormalizeStack()` fingerprinting pipeline
+  — no new scrubbing logic — to strip known-sensitive-shaped substrings
+  from the message and the local `cwd` prefix from the stack, without
+  mutating the original `err`, which both call sites still rethrow), or
+  `'none'` (records neither — the same `setStatus({ code: ERROR })`
+  no-message pattern already used for tool-level `isError: true`
+  failures). Applies to both thrown-exception paths, `tools/call` and
+  `tools/list`.
+- New `OTEL_MCP_ERROR_RECORDING_MODE` env var — same
+  option-then-env-then-default precedence, and the same silent fallback
+  to the default on an unrecognized value, as every other `OTEL_MCP_*`
+  config.
+- `error.type`/`exception.type` (both read from `err.name`) are now
+  capped at 128 characters unconditionally, in every mode — the same cap
+  `mcp.failure.error_class` uses below, reusing its exported constant
+  rather than a second, possibly-drifting copy.
+- Default stays `'full'` for all of `0.x`; ADR 019 Part 1 records the
+  intent to flip it to `'normalized'` at `1.0`, not before — not decided
+  in this release.
+
+### Added — `mcp.tool.model` / `gen_ai.response.model` validation (ADR 019 Part 2)
+
+**This is new behavior that can change what a call reports, not just a
+new diagnostic.** Before this release, a tool result's `model` field
+reached the span completely unvalidated, whatever it was. If you have a
+provider/deployment whose model identifiers use a character outside
+`[A-Za-z0-9._:/@-]`, or that (implausibly, but possibly) exceed 256
+characters, upgrading will make `mcp.tool.model`/`gen_ai.response.model`
+disappear from those calls' spans and `mcp.tool.pricing_status` flip from
+whatever it was to `"unknown"` — even for an otherwise-legitimate, real
+model id. The allowlist was deliberately built generous (see below) and
+verified against known provider conventions, but it's still new, and a
+one-time `diag.warn()` names when this happens (shape only, never the
+value) so it's discoverable rather than a silent metric/span change.
+
+- A tool result's declared model field is now checked against a 256-
+  character length cap and a `[A-Za-z0-9._:/@-]` allowlist — verified
+  against every `DEFAULT_PRICING` key and `normalizeModelName()`'s
+  documented `provider/model` input contract, deliberately generous —
+  before it can reach `mcp.tool.model`, `gen_ai.response.model`,
+  `calculateCost()`, or either metric label
+  (`mcp.tool.tokens.total`/`mcp.tool.cost.total`).
+- A rejected value is never a silent drop: `mcp.tool.pricing_status` is
+  set to `"unknown"` (the same status a legitimately unrecognized model
+  already produces), and a one-time `diag.warn()` fires per
+  `instrumentMcpServer()` call, reporting shape only — length, and which
+  check failed — never the rejected value itself.
+- `budgetTracker.recordUnpriced()` now receives the validated (possibly
+  `undefined`) model rather than the raw tool-result value, closing a
+  second leak path through its own pre-existing warning that would
+  otherwise have echoed a rejected value verbatim.
+- `costTracking.pricing`/`pricingTable` override keys are unaffected —
+  operator-authored config, never subject to this gate.
+
+### Fixed — `mcp.failure.error_class` uncapped length, `mcp.failure.validation_paths` dynamic-key leak (known-gaps entry 10)
+
+- `mcp.failure.error_class` is now capped at 128 characters
+  (`fingerprint/compose.js`'s new `MAX_ERROR_CLASS_LENGTH`) — length-
+  bounded only, not pattern-scrubbed; a non-string `.name` is coerced to
+  a string before capping rather than thrown. ADR 004's note calling the
+  underlying value "low-cardinality" is updated to flag that as an
+  assumption, not an enforced property.
+- `mcp.failure.validation_paths` format 1 (the raw Zod issues array, SDK
+  ≤1.29.0) now redacts a non-identifier-shaped path segment — a
+  `z.record()` schema's runtime key — to the placeholder `<KEY>` instead
+  of surfacing it verbatim, matching the identifier-only gate formats 2/3
+  already applied. Numeric (array-index) segments are never redacted.
+
 ## 0.12.0
 
 Agent Thrash Detection gains a new, narrower session-identity fallback for
