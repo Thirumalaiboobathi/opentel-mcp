@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { resolveErrorRecordingConfig } from '../../src/error-recording/config.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { diag } from '@opentelemetry/api';
+import { resolveErrorRecordingConfig, __resetRedactorNoOpWarnedForTests } from '../../src/error-recording/config.js';
 
 const ENV_KEYS = ['OTEL_MCP_ERROR_RECORDING_MODE'];
 
@@ -81,6 +82,89 @@ describe('resolveErrorRecordingConfig', () => {
     it('an empty-string env var value falls back to "full"', () => {
       process.env.OTEL_MCP_ERROR_RECORDING_MODE = '';
       expect(resolveErrorRecordingConfig().mode).toBe('full');
+    });
+  });
+
+  // ADR 020 (docs/adr/020-redactor-hook.md), v0.14.0 Phase 1.
+  describe('redactor', () => {
+    beforeEach(() => {
+      __resetRedactorNoOpWarnedForTests();
+    });
+
+    it('is undefined by default', () => {
+      expect(resolveErrorRecordingConfig().redactor).toBeUndefined();
+      expect(resolveErrorRecordingConfig({}).redactor).toBeUndefined();
+    });
+
+    it('accepts a function under mode "normalized"', () => {
+      const redactor = () => ({ message: 'x', stack: undefined });
+      expect(resolveErrorRecordingConfig({ mode: 'normalized', redactor }).redactor).toBe(redactor);
+    });
+
+    describe('invalid values degrade silently to undefined, never throw', () => {
+      it.each([
+        ['a string', 'not-a-function'],
+        ['a number', 42],
+        ['null', null],
+        ['true', true],
+        ['a plain object', { message: 'x' }],
+      ])('%s falls back to no redactor', (_label, value) => {
+        const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+        expect(() => resolveErrorRecordingConfig({ mode: 'normalized', redactor: value })).not.toThrow();
+        expect(resolveErrorRecordingConfig({ mode: 'normalized', redactor: value }).redactor).toBeUndefined();
+        // An invalid redactor is treated as absent — never triggers the
+        // separate "configured but mode isn't normalized" warning below.
+        expect(warnSpy).not.toHaveBeenCalled();
+        warnSpy.mockRestore();
+      });
+    });
+
+    describe('mode-mismatch warning (Decision 6)', () => {
+      it('warns once when a valid redactor is configured alongside the default "full" mode', () => {
+        const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+        resolveErrorRecordingConfig({ redactor: () => ({ message: 'x', stack: undefined }) });
+        const matches = warnSpy.mock.calls.filter(([msg]) => /errorRecording\.redactor is configured/.test(msg));
+        expect(matches).toHaveLength(1);
+        expect(matches[0][0]).toMatch(/mode is 'full'/);
+        warnSpy.mockRestore();
+      });
+
+      it('warns once when configured alongside mode "none"', () => {
+        const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+        resolveErrorRecordingConfig({ mode: 'none', redactor: () => ({ message: 'x', stack: undefined }) });
+        const matches = warnSpy.mock.calls.filter(([msg]) => /errorRecording\.redactor is configured/.test(msg));
+        expect(matches).toHaveLength(1);
+        expect(matches[0][0]).toMatch(/mode is 'none'/);
+        warnSpy.mockRestore();
+      });
+
+      it('does not warn when configured alongside mode "normalized"', () => {
+        const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+        resolveErrorRecordingConfig({ mode: 'normalized', redactor: () => ({ message: 'x', stack: undefined }) });
+        const matches = warnSpy.mock.calls.filter(([msg]) => /errorRecording\.redactor is configured/.test(msg));
+        expect(matches).toHaveLength(0);
+        warnSpy.mockRestore();
+      });
+
+      it('does not warn when no redactor is configured, regardless of mode', () => {
+        const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+        resolveErrorRecordingConfig({ mode: 'full' });
+        resolveErrorRecordingConfig({ mode: 'none' });
+        const matches = warnSpy.mock.calls.filter(([msg]) => /errorRecording\.redactor is configured/.test(msg));
+        expect(matches).toHaveLength(0);
+        warnSpy.mockRestore();
+      });
+
+      it('fires only once per process across multiple resolveErrorRecordingConfig() calls', () => {
+        const warnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
+        const redactor = () => ({ message: 'x', stack: undefined });
+        resolveErrorRecordingConfig({ mode: 'full', redactor });
+        resolveErrorRecordingConfig({ mode: 'full', redactor });
+        resolveErrorRecordingConfig({ mode: 'none', redactor });
+        const matches = warnSpy.mock.calls.filter(([msg]) => /errorRecording\.redactor is configured/.test(msg));
+        expect(matches).toHaveLength(1);
+        warnSpy.mockRestore();
+      });
     });
   });
 });

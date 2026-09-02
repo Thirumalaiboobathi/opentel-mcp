@@ -1,6 +1,106 @@
 # Changelog
 
-## Unreleased
+## 0.14.0
+
+Adds `errorRecording.redactor`: a host-supplied hook for content
+`normalizeMessage()`/`parseAndNormalizeStack()` don't recognize — a
+proprietary API key format, an internal account id shape, a customer name
+in prose or in a multi-tenant stack frame path. Full design: ADR 020
+(`docs/adr/020-redactor-hook.md`). Ships in the same release as the
+0.13.1 fix/docs items below (0.13.1 itself was never tagged/published —
+see that section's own note), but is a logically separate, purely
+additive change from both of them; kept in its own section here rather
+than folded into 0.13.1's for that reason.
+
+### Added — `errorRecording.redactor` hook (ADR 020)
+
+- New optional `errorRecording.redactor` field: a synchronous
+  `(input: { message, stack }) => { message, stack }` function, consulted
+  only under `mode: 'normalized'`, that runs on the raw, uncoerced
+  `message`/`stack` — via the same coercion this library's own pipeline
+  already uses — **before** `normalizeMessage()`/`parseAndNormalizeStack()`
+  ever see them, never the reverse. This library's own scrubbing still
+  runs second, over your redactor's output, as a defense-in-depth
+  backstop.
+- Configuring a redactor alongside `mode: 'full'` or `'none'` is accepted
+  but never invoked — those two modes' entire meaning is "byte-identical,
+  regardless of what else is configured" — and produces a one-time
+  `diag.warn()` at `instrumentMcpServer()` setup naming the no-op, since
+  forgetting to also flip `mode` is an easy, otherwise-silent
+  misconfiguration.
+- A redactor that throws, returns a non-string `message`, or returns a
+  `stack` that's neither a string nor `undefined` falls back to
+  `'none'`-equivalent span output for that one event — status set, no
+  `exception` event — **never** to raw/unredacted content, plus a
+  one-time, content-free `diag.warn()` naming the failure shape (never
+  the message/stack content itself). The returned `message`/`stack` are
+  also length-capped defensively before use (reusing
+  `normalizeMessage()`'s existing 2048-character limit).
+- **Never reaches `computeFingerprint()`'s hash input, in any
+  configuration.** `mcp.failure.fingerprint`/`signature` are computed
+  from the real, unmodified thrown error, identically whether or not a
+  redactor is configured — a deliberate, non-negotiable design decision
+  (ADR 020 Decision 3): the fingerprint is a SHA-256 hash, never a
+  plaintext channel, so redacting it would buy no privacy while tying
+  fingerprint stability to unversioned host code. Any existing dashboard
+  filter or alert keyed on `mcp.failure.fingerprint` keeps working
+  unchanged after adding a redactor.
+- **Timing caveat, not just a telemetry one:** the redactor runs
+  synchronously, inline, on the error path, before the span ends — there
+  is no timeout, and JavaScript's single-threaded execution model means
+  one can't be added without a `worker_threads`/`vm.Script` boundary this
+  feature deliberately doesn't pay for. A slow redactor (catastrophic
+  regex backtracking, an accidental blocking call) adds directly to that
+  tool call's own response latency, not just to what shows up in traces.
+  See the README's "The redactor hook" section, "Timing," for the full
+  writeup, and ADR 020's own "Timing" section for why this is an accepted
+  risk rather than a solved one.
+- No environment-variable equivalent — a function can't be expressed as
+  an `OTEL_MCP_*` string, same as `costTracking.extractor`/
+  `thrashDetection`'s classifier-shaped options already are.
+- New exported types `ErrorRecordingRedactor` and
+  `ErrorRecordingRedactorFields` (`src/error-recording/types.d.ts`,
+  re-exported from the package root) — a consumer can type a redactor
+  function on its own, the same way `UsageExtractor`/`Classifier` already
+  let a consumer type an extractor/classifier independently of the option
+  object that carries it.
+- Purely additive and default-off: a deployment that never sets
+  `errorRecording.redactor` observes zero behavior change.
+
+## 0.13.1
+
+Never tagged or published as its own release — ships bundled into
+0.14.0 above instead, since the redactor work started before this patch
+went out the door. Kept as its own section here (rather than merged into
+0.14.0's) because both items below are logically independent of the
+redactor: one's a bug fix to existing `'normalized'`-mode behavior, the
+other's a documentation-only correction, and neither has anything to do
+with the new hook.
+
+### Fixed — `'normalized'` mode dropped `exception.message`/status message for non-`Error` throws
+
+- Before this fix, `recordThrownException()`'s `'normalized'` branch
+  independently re-derived `message`/`stack` via a plain `err?.message`/
+  `err?.stack` read — which silently returned `undefined` for a thrown
+  **string** or a plain non-`Error` object (neither has a `.message`
+  property the way a real `Error` instance does), while
+  `computeFingerprint()`'s own, richer `coerceError()` correctly
+  recognized those same shapes and still produced a real
+  `mcp.failure.fingerprint`. Net effect: a thrown string or non-`Error`
+  throw got real fingerprinting but a completely empty `exception.message`
+  / status message on the span under `'normalized'` mode — same `err`,
+  two independent readers, two different answers, silently.
+- Fixed by extracting the shared `normalizeException()`/`coerceError()`
+  pair into their own module (`src/fingerprint/normalize/exception.js`)
+  and routing **both** `computeFingerprint()` and `recordThrownException()`
+  through the same one computation for the same `err` — the span's
+  exception content and the fingerprint's hashed inputs can no longer
+  independently drift apart, by construction, not by convention. This is
+  the same consolidation ADR 020 (the redactor's own design doc, above)
+  repeatedly cites as precedent for keeping the fingerprint path
+  structurally isolated from the span-writing path going forward.
+- `'full'` and `'none'` modes were never affected — this bug was specific
+  to `'normalized'` mode's own inline coercion.
 
 ### Documentation — `errorRecording.mode` scoping correction
 

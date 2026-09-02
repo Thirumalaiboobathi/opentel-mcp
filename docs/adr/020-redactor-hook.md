@@ -25,7 +25,7 @@ fixed, versioned pipelines this library ships and tests. They're good at
 what they were built for — the same eight structured shapes fingerprinting
 already trusts for hashing — and, by the README's own admission, that is
 where their competence ends. A host who knows their proprietary API key
-format is `sk_live_[a-z0-9]{32}`, or that their internal account ids look
+format is `ACME_KEY_[a-f0-9]{8}`, or that their internal account ids look
 like `ACCT-\d{9}`, or that customer names appear in prose their own tool
 authors write, has no way to extend `normalizeMessage()`'s coverage today
 short of forking this library or accepting the exposure `'none'` mode's

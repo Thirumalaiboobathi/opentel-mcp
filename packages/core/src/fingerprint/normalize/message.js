@@ -8,7 +8,11 @@
 
 import { NORMALIZE_STEPS } from './patterns.js';
 
-const MAX_INPUT_LENGTH = 2048;
+// Exported as of v0.14.0 (ADR 020, docs/adr/020-redactor-hook.md, Decision
+// 5): errorRecording.redactor's own defensive output cap reuses this exact
+// value rather than inventing a second magic number — see
+// src/error-recording/redactor.js's MAX_REDACTOR_OUTPUT_LENGTH.
+export const MAX_INPUT_LENGTH = 2048;
 
 /**
  * Normalizes a raw error message for fingerprinting.

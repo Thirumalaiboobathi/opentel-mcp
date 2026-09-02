@@ -87,6 +87,26 @@ workflow's `id-token: write` permission is what provenance itself needs;
 `NPM_TOKEN` is the separate, still-required credential that authenticates
 the publish — provenance doesn't replace it.
 
+## Dependency updates
+
+`.github/dependabot.yml` configures Dependabot **version updates** —
+scheduled pull requests bumping `package.json`/`package-lock.json` (npm,
+one entry covering the whole workspace) and the pinned action versions in
+`.github/workflows/*.yml` (github-actions). Weekly, grouped
+dev-dependency bumps, and `@opentelemetry/*`/`@modelcontextprotocol/*`
+majors excluded from the schedule (see that file's own comments for the
+full reasoning).
+
+**This does not enable Dependabot alerts** — the separate, always-on
+background scanning that flags dependencies with known vulnerabilities
+(CVEs) via GitHub's advisory database. Alerts are a repository setting,
+not something a `dependabot.yml` file turns on: **Settings → Code
+security → Dependabot alerts**, toggle it on manually (and "Dependabot
+security updates" alongside it, if you also want an automatic PR opened
+per alert — that one bypasses this file's `open-pull-requests-limit`
+entirely, per GitHub's own docs: security-update PRs have a separate,
+non-configurable cap). Neither is enabled by adding this file.
+
 ## PR checklist
 
 - [ ] `npm test` passes

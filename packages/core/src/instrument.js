@@ -16,7 +16,8 @@ import { computeFingerprint, MAX_ERROR_CLASS_LENGTH } from './fingerprint/compos
 import { toSpanAttributes, ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
 import { classifyFailureChannel } from './fingerprint/classify/channel.js';
 import { extractValidationPaths } from './fingerprint/classify/validation-paths.js';
-import { normalizeException } from './fingerprint/normalize/exception.js';
+import { normalizeException, coerceError } from './fingerprint/normalize/exception.js';
+import { applyRedactor } from './error-recording/redactor.js';
 import { calculateCost, normalizeModelName, isValidModelId, describeInvalidModelId } from './cost/calculator.js';
 import { DEFAULT_PRICING_LAST_VERIFIED } from './cost/pricing.js';
 import { createBudgetTracker } from './cost/budget.js';
@@ -474,6 +475,13 @@ export function instrumentMcpServer(input, options) {
   // accepted characteristic docs/known-gaps.md entry 6 already documents
   // for thrashSessionState, not a new problem this introduces.
   const costAttributionState = { warnedRejectedModel: false };
+  // ADR 020 (docs/adr/020-redactor-hook.md), v0.14.0 Phase 2: same "plain
+  // holder, not instanceKey-shared" reasoning as thrashSessionState/
+  // costAttributionState above — applyRedactor()'s one-time failure
+  // warning (src/error-recording/redactor.js) is a low-stakes diagnostic,
+  // not correctness-critical state, so a fresh instrumented server simply
+  // gets a fresh warning budget rather than sharing one process-wide.
+  const errorRecordingState = { warnedFailed: false };
   // Additive to instrumentMcpServer()'s existing return contract (the same
   // input object, for chaining — see this function's own docblock): a
   // getThrashSummary() method attached the same way shutdown() is, just
@@ -575,6 +583,7 @@ export function instrumentMcpServer(input, options) {
           kind,
           resolved.errorRecording,
           costAttributionState,
+          errorRecordingState,
         );
       } else if (schema === v1.ListToolsRequestSchema && schemaDriftDetector) {
         handler = wrapToolsListHandler(
@@ -585,6 +594,7 @@ export function instrumentMcpServer(input, options) {
           SCHEMA_DRIFT_SCOPE,
           kind,
           resolved.errorRecording,
+          errorRecordingState,
         );
       }
       return originalSetRequestHandler(schema, handler);
@@ -627,6 +637,7 @@ export function instrumentMcpServer(input, options) {
           kind,
           resolved.errorRecording,
           costAttributionState,
+          errorRecordingState,
         );
       } else if (maybeHandler === undefined && method === TOOLS_LIST_METHOD && schemaDriftDetector) {
         handlerOrSchemas = wrapToolsListHandler(
@@ -637,6 +648,7 @@ export function instrumentMcpServer(input, options) {
           SCHEMA_DRIFT_SCOPE,
           kind,
           resolved.errorRecording,
+          errorRecordingState,
         );
       }
       return maybeHandler === undefined
@@ -1401,11 +1413,34 @@ function applyToolOutcomeThrown(toolOutcomeCounter) {
  * `fingerprint/compose.js`'s `computeFingerprint()` already makes for
  * the exact same `err`.
  *
+ * v0.14.0 Phase 2 (ADR 020, docs/adr/020-redactor-hook.md): when
+ * `errorRecordingConfig.redactor` is configured, the `'normalized'`
+ * branch below runs it — via `applyRedactor()` (src/error-recording/
+ * redactor.js) — on `err`'s raw, uncoerced message/stack (the same
+ * `coerceError()` this library's own pipeline already uses), BEFORE
+ * `normalizeException()`'s `normalizeMessage()`/`parseAndNormalizeStack()`
+ * ever see them (Decision 2). `applyRedactor()`'s output — not `err`
+ * itself — is what `normalizeException()` then normalizes; a redactor
+ * that throws or returns an invalid shape makes this event fall back to
+ * `'none'`-equivalent output (Decision 4), never to raw content.
+ * CRITICAL and non-negotiable (Decision 3): this function only ever
+ * touches what lands on the SPAN. `err` itself is never mutated or
+ * replaced by a redacted copy, so `computeFingerprint()` — called
+ * separately, later, by this function's caller, for the same `err` —
+ * still hashes the real, unmodified content, identically whether or not
+ * a redactor is configured. `'full'` and `'none'` modes don't reach this
+ * code at all, so a redactor never runs (and is never even referenced)
+ * under either — see resolveErrorRecordingConfig()'s own Decision 6
+ * warning for the config-time half of that guarantee.
+ *
  * @param {import('@opentelemetry/api').Span} span
  * @param {unknown} err
  * @param {import('./error-recording/config.js').ErrorRecordingConfig} errorRecordingConfig
+ * @param {{ warnedFailed: boolean }} errorRecordingState - ADR 020: caller-owned, one-time-warning
+ *   state for applyRedactor()'s failure diagnostic — see that function's own docblock for what
+ *   "once" means here (mirrors costAttributionState's granularity, not a process-wide flag).
  */
-function recordThrownException(span, err, errorRecordingConfig) {
+function recordThrownException(span, err, errorRecordingConfig, errorRecordingState) {
   try {
     if (errorRecordingConfig.mode === 'none') {
       span.setStatus({ code: SpanStatusCode.ERROR });
@@ -1421,9 +1456,34 @@ function recordThrownException(span, err, errorRecordingConfig) {
       // of — the same edge case computeFingerprint() guards against
       // before ever calling coerceError(). Skip straight to "type only,"
       // matching this branch's own pre-consolidation behavior for that
-      // case.
+      // case — and skip the redactor too, for the same reason: there is
+      // no message/stack content for it to act on.
       if (err !== null && err !== undefined) {
-        const { normalizedMessage, frames } = normalizeException(err, { cwd: process.cwd() });
+        // ADR 020 Decision 2: the redactor (if any) runs first, on raw
+        // content, and its (validated, capped) output is what feeds
+        // normalizeException() below — never the reverse. `err` itself is
+        // untouched either way; only `normalizeInput` may be a redacted
+        // stand-in for it.
+        let normalizeInput = err;
+
+        if (errorRecordingConfig.redactor) {
+          const { message, stack } = coerceError(err);
+          const redacted = applyRedactor({ message, stack }, errorRecordingConfig.redactor, errorRecordingState);
+
+          if (redacted === null) {
+            // Decision 4: a misbehaving redactor falls back to
+            // 'none'-equivalent output for THIS event only — status set,
+            // no exception event, never raw/unredacted content.
+            // applyRedactor() has already fired the one-time,
+            // content-free failure warning via errorRecordingState.
+            span.setStatus({ code: SpanStatusCode.ERROR });
+            return;
+          }
+
+          normalizeInput = redacted;
+        }
+
+        const { normalizedMessage, frames } = normalizeException(normalizeInput, { cwd: process.cwd() });
         attrs['exception.message'] = normalizedMessage;
         if (frames.length > 0) {
           attrs['exception.stacktrace'] = frames
@@ -1440,7 +1500,8 @@ function recordThrownException(span, err, errorRecordingConfig) {
       return;
     }
 
-    // 'full' (default) — byte-identical to pre-v0.13.0 behavior.
+    // 'full' (default) — byte-identical to pre-v0.13.0 behavior. Never
+    // references errorRecordingConfig.redactor at all (Decision 6).
     span.recordException(err);
     span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
   } catch {
@@ -1546,6 +1607,8 @@ function recordThrownException(span, err, errorRecordingConfig) {
  *   recordThrownException()'s own docblock.
  * @param {{ warnedRejectedModel: boolean }} costAttributionState - ADR 019 Part 2 (v0.13.0): threaded
  *   through to applyCostAttribution() — see that function's own docblock and warnRejectedModel()'s.
+ * @param {{ warnedFailed: boolean }} errorRecordingState - ADR 020 (v0.14.0 Phase 2): threaded through
+ *   to recordThrownException()/applyRedactor() — see redactor.js's own docblock for what "once" means here.
  */
 function wrapToolCallHandler(
   handler,
@@ -1564,6 +1627,7 @@ function wrapToolCallHandler(
   kind,
   errorRecordingConfig,
   costAttributionState,
+  errorRecordingState,
 ) {
   return (request, extra) => {
     const toolName = request?.params?.name;
@@ -1703,7 +1767,7 @@ function wrapToolCallHandler(
         return result;
       } catch (err) {
         applyToolOutcomeThrown(toolOutcomeCounter);
-        recordThrownException(span, err, errorRecordingConfig);
+        recordThrownException(span, err, errorRecordingConfig, errorRecordingState);
         // ADR 019 Part 1: capped at MAX_ERROR_CLASS_LENGTH unconditionally,
         // regardless of errorRecordingConfig.mode — a length cap on a
         // class-identifier field costs a well-behaved tool nothing, so
@@ -1809,8 +1873,19 @@ function wrapToolCallHandler(
  *   exception branch below is the only place this handler's own JS Error content reaches a span; a
  *   schema-drift capture failure (caught separately just above) is diag.debug()-only and never reaches
  *   the span at all, so it's unaffected by this option.
+ * @param {{ warnedFailed: boolean }} errorRecordingState - ADR 020 (v0.14.0 Phase 2): see
+ *   wrapToolCallHandler's own param of the same name.
  */
-function wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftEmitter, schemaDriftScope, kind, errorRecordingConfig) {
+function wrapToolsListHandler(
+  handler,
+  tracer,
+  schemaDriftDetector,
+  schemaDriftEmitter,
+  schemaDriftScope,
+  kind,
+  errorRecordingConfig,
+  errorRecordingState,
+) {
   return (request, extra) => {
     return tracer.startActiveSpan(TOOLS_LIST_METHOD, { kind: SpanKind.SERVER }, async (span) => {
       span.setAttribute(ATTR_MCP_METHOD_NAME, TOOLS_LIST_METHOD);
@@ -1840,7 +1915,7 @@ function wrapToolsListHandler(handler, tracer, schemaDriftDetector, schemaDriftE
         span.setStatus({ code: SpanStatusCode.OK });
         return result;
       } catch (err) {
-        recordThrownException(span, err, errorRecordingConfig);
+        recordThrownException(span, err, errorRecordingConfig, errorRecordingState);
         throw err;
       } finally {
         span.end();

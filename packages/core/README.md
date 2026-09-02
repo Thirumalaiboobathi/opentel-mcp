@@ -520,6 +520,122 @@ The stack trace scrubs the same way: `'full'` keeps every frame's
 absolute path; `'normalized'` keeps every frame (function name, file,
 line) but strips the local `cwd` prefix.
 
+### The redactor hook (v0.14.0+)
+
+Caveat 1 above is the reason this exists: `normalizeMessage()` matches
+eight specific, structured shapes (UUIDs, emails, URLs, IPv4/IPv6,
+timestamps, paths, hex runs, quoted ids), and that is where its
+competence ends. An API key in your own proprietary format
+(`ACME_KEY_[a-f0-9]{8}`), an internal account id shape
+(`ACCT-\d{9}`), or a customer's name embedded in ordinary prose are not
+structurally distinguishable from ordinary text by any pattern this
+library could ship — no ninth built-in pattern fixes that. Only the host
+running the tool knows what their own data looks like.
+`errorRecording.redactor` is a synchronous function you supply that runs
+as part of `mode: 'normalized'`, so you can close that gap without
+forking this library or falling back to `'none'`'s blunt "drop
+everything." See ADR 020 (`docs/adr/020-redactor-hook.md`) for the full
+design rationale; the operator-facing behavior is summarized below.
+
+**Worked example:**
+
+```js
+instrumentMcpServer(server, {
+  errorRecording: {
+    mode: 'normalized',
+    redactor: ({ message, stack }) => ({
+      message: message
+        .replace(/ACME_KEY_[a-f0-9]{8}/g, '[API_KEY]')
+        .replace(/ACCT-\d{9}/g, '[ACCOUNT_ID]'),
+      stack, // unchanged — this redactor only needs to touch the message
+    }),
+  },
+});
+```
+
+```js
+throw new Error(
+  'auth failed for ACME_KEY_7f3a9c2e, ' +
+  'account ACCT-123456789, contact jane.doe@example.com',
+);
+```
+
+| Step | `exception.message` |
+|---|---|
+| Raw, as thrown | `auth failed for ACME_KEY_7f3a9c2e, account ACCT-123456789, contact jane.doe@example.com` |
+| After your redactor (runs first, on the raw text) | `auth failed for [API_KEY], account [ACCOUNT_ID], contact jane.doe@example.com` |
+| After this library's own patterns (run second, on YOUR output) | `auth failed for [API_KEY], account [ACCOUNT_ID], contact <EMAIL>` |
+
+**Ordering matters, and it's fixed, not configurable:** your redactor
+always runs first, on the raw, uncoerced `message`/`stack` — before
+`normalizeMessage()`/`parseAndNormalizeStack()` ever see them, never the
+reverse. Two consequences follow directly: (1) this library's own
+scrubbing is still the last thing that touches the content before it
+reaches the span — a defense-in-depth backstop if your redactor misses a
+shape its own patterns don't cover (see the API key example above:
+notice `<EMAIL>` still gets scrubbed even though your redactor never
+mentioned email addresses), and (2) your redactor sees the full,
+untruncated original message — `normalizeMessage()`'s 2048-character
+truncation applies afterward, to your output, not before you ever see the
+content.
+
+**Only consulted under `mode: 'normalized'`.** Configure a redactor
+alongside `'full'` or `'none'` and it's accepted but never called — those
+two modes' entire meaning is "byte-identical to their own fixed
+behavior, regardless of what else is configured." Since forgetting to
+also flip `mode` away from its `'full'` default is an easy way to end up
+with a redactor that's silently never invoked, `instrumentMcpServer()`
+logs a one-time `diag.warn()` at setup naming exactly that.
+
+**Failure never falls back to raw content.** If your redactor throws,
+returns a non-string `message`, or returns a `stack` that's neither a
+string nor `undefined`, that one event falls back to `'none'`-equivalent
+output — `span.setStatus({ code: ERROR })` only, no `exception` event at
+all — never to `'full'`-equivalent (raw, unredacted) content. A redactor
+you configured specifically to keep something off the span must never
+silently fail open; the safe direction here is *more* redacted, not
+less. This fires a one-time, content-free `diag.warn()` naming the
+failure shape (`threw` / `returned a non-string message` / `returned an
+invalid stack`) — never the message/stack content that triggered it,
+so the warning itself can't become a second, undocumented leak channel.
+Your redactor's returned `message`/`stack` are also length-capped
+defensively before use (reusing `normalizeMessage()`'s own 2048-character
+limit), regardless of what a well-behaved redactor is expected to
+return.
+
+**Timing — read this before you write a regex.** The redactor runs
+*synchronously*, inline, on the error path — inside the still-open
+span's own callback, before `span.end()` is called. There is no timeout,
+and there cannot be one: JavaScript is single-threaded, and nothing in
+this library (or in Node itself, short of a `worker_threads` boundary
+this feature deliberately doesn't pay for) can interrupt a synchronous
+function that's already running. **This means a slow redactor doesn't
+just delay telemetry — it delays the tool call's own response to
+whoever's waiting on it.** Catastrophic backtracking in a regex (the
+classic `(a+)+$`-shaped footgun), an accidental synchronous file read, or
+any blocking call inside your redactor adds directly to that tool call's
+latency, on every single call that throws under `'normalized'` mode,
+for as long as the redactor stays slow. Test your redactor's regexes
+against adversarial input the same way you would for any other
+user-facing regex, not just against the examples you had in mind when
+you wrote it.
+
+**The fingerprint is completely unaffected — on purpose, always.**
+`mcp.failure.fingerprint`/`mcp.failure.signature` and the values hashed
+into them are computed from the real, unmodified thrown error, identically
+whether or not a redactor is configured. A redactor has no way to reach
+that computation at all — it only ever touches what lands on the span.
+This is deliberate: the fingerprint is a SHA-256 hash, never a plaintext
+channel, so redacting it would buy no privacy while tying fingerprint
+stability to your own, unversioned redactor code. Practically, this means
+any saved dashboard filter or alert keyed on `mcp.failure.fingerprint`
+keeps working exactly as before the moment you add a redactor — nothing
+about adding or changing one ever reshuffles a fingerprint value.
+
+The redactor is still scoped to this library's own span, the same as
+every other `mode` value — see Caveat 2 below for what that does and
+doesn't cover; nothing about the redactor changes that boundary.
+
 **Caveat 2 — every mode is scoped to the span this library creates, not
 to your trace as a whole.** No mode mutates the original `err` — both
 call sites rethrow it afterward, so `'normalized'`/`'none'` build the
@@ -578,6 +694,7 @@ for the full argument, including why the default is expected to flip to
 | Option | Env var | Type | Default | Description |
 |---|---|---|---|---|
 | `mode` | `OTEL_MCP_ERROR_RECORDING_MODE` | `'full'` \| `'normalized'` \| `'none'` | `'full'` | See table above. An unrecognized value falls back to `'full'` silently, same as every other `OTEL_MCP_*` env var |
+| `redactor` | *(none — a function can't be expressed as an env var string)* | `(input: { message: string, stack: string \| undefined }) => { message: string, stack: string \| undefined }` | `undefined` | See "The redactor hook" above. Only consulted when `mode` is `'normalized'`; a non-function value is treated as absent, silently |
 
 ## Cost & Token Attribution (v0.5.0)
 
@@ -1953,6 +2070,119 @@ This is a data-handling property of an observability library, not a
 security control opentel-mcp is claiming to provide — it doesn't
 authenticate, encrypt, or restrict who can read your traces; that's your
 tracing backend's job.
+
+### Full attribute provenance
+
+The paragraphs above cover the three channels with real content risk;
+the table below is the complete picture — every attribute this library
+sets, anywhere, classified by where its value actually comes from. It was
+produced by tracing every `span.setAttribute()`/`setAttributes()`/
+`addEvent()` call site back to its source, generalizing the manual audits
+`docs/known-gaps.md` entries 10 and 11 already did by hand for the
+riskiest subset.
+
+**Why a table instead of a runtime "audit mode":** provenance here is a
+property of which code path sets an attribute, not of any particular
+call's runtime state — it's the same answer on every call, for a given
+release, until the code setting that attribute changes. A live inspection
+feature can't tell you anything about *category* this table doesn't
+already say, for free, with no new code and no new place for a value to
+leak. Where a table genuinely falls short — "what's the *actual* value
+landing in this attribute for my traffic" — the fix isn't a new library
+feature; it's the extension hooks documented below, which already exist
+and were built for exactly this. "Only the host knows what's safe to look
+at in their own deployment" is the same principle `errorRecording.redactor`
+itself is built around (ADR 020) — reused here, not re-solved.
+
+Four categories: **library-computed** (a hash, count, enum, or fixed
+constant — the safe majority), **host-supplied** (an `instrumentMcpServer()`
+config value), **SDK-supplied** (a transport/protocol id — session,
+request, span, trace), and **tool-controlled** (content from a tool's own
+result or the caller's own arguments — the category every raw-content
+finding in `docs/known-gaps.md` traces back to). Eight rows below are
+genuine **blends** — a single word would mislead for these specifically,
+so they're spelled out instead of forced into one bucket.
+
+| Attribute | Surface | Provenance | Note |
+|---|---|---|---|
+| `mcp.method.name` | span attr | library-computed | fixed string per handler |
+| `gen_ai.operation.name` | span attr | library-computed | fixed string `"execute_tool"` |
+| `gen_ai.tool.name` | span attr, metric label | **blend — tool-controlled** | `request.params.name`, unvalidated against the registered tool set (`docs/known-gaps.md` entry 11) |
+| `jsonrpc.request.id` | span attr | SDK-supplied | transport/protocol correlation id |
+| `mcp.tool.argument_count` | span attr | tool-controlled | a *count* of `request.params.arguments` keys, deliberately — never the argument values themselves |
+| `error.type` | span attr | **blend — depends on code path** | the tool's own `err.name` on a thrown failure; the fixed constant `tool_error` on an `isError: true` failure — same key, two different sources depending on which failure path fired. See "Two keys whose provenance changes by code path" below |
+| `gen_ai.response.model` | span attr | tool-controlled | co-emitted from the same value as `mcp.tool.model`, for dashboard compatibility |
+| `mcp.tool.tokens.input` / `.output` | span attr | tool-controlled | the tool result's own usage numbers |
+| `mcp.tool.tokens.total` | span attr | library-computed | sum of the two tool-controlled values above |
+| `mcp.tool.model` | span attr, metric label | tool-controlled | a tool result's own declared model field, echoed verbatim (`docs/known-gaps.md` entry 10, item 2 — still open) |
+| `mcp.tool.cost.usd` | span attr | **blend — library-computed over tool-controlled × config** | tool-controlled token counts, multiplied by a pricing table that's either this library's default or a host override |
+| `mcp.tool.cost.currency` | span attr | library-computed | fixed constant `"USD"` |
+| `mcp.tool.cost.budget_exceeded` / `.budget_scope` | span attr | library-computed | comparison against a host-supplied budget threshold |
+| `mcp.tool.pricing_status` | span attr, metric label | **blend — library-computed, depends on tool + host** | which of three enum values depends on a tool-controlled model name resolving (or not) in a library-default-or-host-overridden pricing table |
+| `mcp.failure.fingerprint` / `.signature` / `.category` / `.origin` / `.channel` | span attr (2 also metric labels) | library-computed | hashes/enums — the governed core this project has kept clean since v0.4.0 |
+| `mcp.failure.error_class` | span attr | **blend — tool-controlled, capped only** | `err.name`, length-capped at 128 characters but, unlike everything hashed into the fingerprint, *not* pattern-scrubbed — a documented, deliberate tradeoff (`docs/known-gaps.md` entry 10) |
+| `mcp.failure.validation_paths` | span attr | mostly library-computed (gated) | one legacy Zod-issue-rendering path can still carry a tool-controlled dynamic object key, now redacted to a `<KEY>` placeholder rather than closed structurally (`docs/known-gaps.md` entry 10, item 3) |
+| `exception.type` (event) | event attr | tool-controlled | length-capped only under `'normalized'` mode; uncapped under `'full'` (the native SDK call) |
+| `exception.message` / `.stacktrace` (event), status message | event attr + status | **blend — layered** | raw tool content under `'full'`; this library's `normalizeMessage()`/`parseAndNormalizeStack()` transform of that same content under `'normalized'`; optionally a host-supplied `errorRecording.redactor`'s output feeding *that*, first (v0.14.0) — the most layered-provenance attribute in the system |
+| `mcp.tool.schema_drift_detected` / `mcp.tool.thrash_detected` | boolean span attr | library-computed | only ever set to `true`; omitted on a clean call |
+| `mcp.tool.schema_drift.type` | event attr, metric label | library-computed | classifier enum |
+| `mcp.tool.schema_drift.previous_hash` / `.current_hash` | event attr | library-computed | a hash *of* tool-controlled content (the tool's own `inputSchema`), not the schema itself |
+| `mcp.tool.schema_drift.added_fields` / `.removed_fields` / `.changed_fields` | event attr | **blend — tool-controlled, unbounded** | literal property names from a tool's own schema — unbounded across every tool anyone registers, unlike `argument_count` above, which is deliberately reduced to a number for exactly this reason |
+| `mcp.loop.length` / `.duration_ms` | event attr | library-computed | count / timestamp arithmetic |
+| `mcp.loop.wasted_tokens_in` / `_out` / `.wasted_cost_usd` | event attr | library-computed over tool-controlled | same aggregation/pricing chain as `mcp.tool.tokens.*`/`mcp.tool.cost.usd` above |
+| `mcp.loop.first_span_id` / `.first_trace_id` | event attr | SDK-supplied | OTel SDK-generated span/trace ids |
+| `mcp.loop.session_id` | event attr | **blend — depends on code path** | a real transport session id when one exists; a library-generated fallback UUID when it doesn't. See "Two keys whose provenance changes by code path" below |
+| `service.name` | resource attr | host-supplied | the `serviceName` config option (`setupNodeSdk: true` only) |
+| `mcp.pricing.default_table_last_verified` | resource attr | library-computed | constant, attached only when using the unmodified default pricing table |
+| `mcp.tool.outcome` | metric label only | library-computed | never a span attribute — `mcp.tool.duration`'s own outcome dimension |
+
+**Two keys whose provenance changes by code path, not just by
+configuration:**
+
+- **`error.type`** carries the tool's own `err.name` when the failure was
+  a thrown exception, but a fixed library constant (`tool_error`) when
+  the failure was a successful JSON-RPC response with `isError: true` —
+  same attribute key, genuinely different source depending on which of
+  the two failure paths produced it.
+- **`mcp.loop.session_id`** carries a real transport-assigned session id
+  under a session-oriented transport, but a library-generated fallback
+  UUID (`resolveThrashSessionId()`, `src/instrument.js`) under a
+  transport this library can't positively confirm is session-oriented —
+  see "Agent Thrash Detection" → sessionId fallback resolution above. The
+  value is a real id either way; only *who* generated it differs.
+
+**`mcp.server.name` / `mcp.server.version`** are defined in
+`src/attributes.js` but are not currently set anywhere in this codebase —
+dead constants, not a real attribute this library records today. Left
+out of the table above for that reason.
+
+**Want to see the actual value landing in an attribute for your own
+traffic, not just its category?** Don't reach for a new debugging mode —
+the hooks that let you do this safely already exist, because *you*, not
+this library, know what's safe to look at in your own deployment:
+
+- **`errorRecording.redactor`** (ADR 020, `docs/adr/020-redactor-hook.md`)
+  sees the raw `message`/`stack` before this library's own scrubbing runs
+  — a temporary, local redactor that copies what it receives to wherever
+  *you've* decided is safe (your own log line, a breakpoint, a counter)
+  shows you exactly what's landing in `exception.message`/`.stacktrace`
+  for real calls, without this library needing to add a second channel
+  for the same content.
+- **`costTracking.extractor`** (a `UsageExtractor`) sees the full tool
+  result before token/model/cost attribution runs — the same trick works
+  for `mcp.tool.tokens.*`/`mcp.tool.model`/`mcp.tool.cost.*`.
+- **A custom `Classifier`** (`opts.classifiers` on `computeFingerprint()`,
+  `src/fingerprint/compose.js` — see "Deep-failure fingerprinting" →
+  "Extending it" above) sees the coerced error before classification.
+  Unlike the two hooks above, this one isn't yet wired through
+  `instrumentMcpServer()`'s own options — using it today means calling
+  `computeFingerprint()` directly rather than relying on the automatic
+  per-call wrapping.
+
+Each hook is scoped to exactly the content it already has access to; none
+of them create a new place for that content to reach — they're extension
+points this library already ships and already documents, not a bespoke
+audit feature.
 
 ## Configuration
 

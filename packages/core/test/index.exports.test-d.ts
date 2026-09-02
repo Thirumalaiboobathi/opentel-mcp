@@ -15,6 +15,9 @@ import type {
   ObservationState,
   DuckTypedServer,
   DuckTypedMcpServer,
+  ErrorRecordingConfig,
+  ErrorRecordingRedactor,
+  ErrorRecordingRedactorFields,
 } from '../src/index.js';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 
@@ -406,3 +409,104 @@ expectTypeOf(v2McpServerInstrumented.getObservationState).toEqualTypeOf<(() => O
 // accepting arbitrary objects.
 // @ts-expect-error -- {} has neither setRequestHandler nor a .server property
 instrumentMcpServer({});
+
+// errorRecording.redactor (ADR 020, docs/adr/020-redactor-hook.md,
+// v0.14.0 Phase 3): a consumer can write a typed redactor as a STANDALONE
+// value, via the exported ErrorRecordingRedactor function type, then pass
+// it straight into config — the same ergonomics UsageExtractor/Classifier
+// already give their own function-shaped hooks (rather than only being
+// typeable inline on ErrorRecordingConfig.redactor itself).
+const myRedactor: ErrorRecordingRedactor = ({ message, stack }) => ({
+  message: message.replace('SECRET', '[REDACTED]'),
+  stack,
+});
+const withRedactor: InstrumentOptions = {
+  errorRecording: { mode: 'normalized', redactor: myRedactor },
+};
+expectTypeOf(withRedactor).toMatchTypeOf<InstrumentOptions>();
+
+// A redactor that spreads its input and only overrides `message` is also
+// valid — confirms the required `stack` key (see the negative check
+// below) doesn't burden ordinary idiomatic code, just code that forgets
+// the field entirely.
+const spreadRedactor: ErrorRecordingRedactor = (input) => ({
+  ...input,
+  message: input.message.toUpperCase(),
+});
+expectTypeOf(spreadRedactor).toMatchTypeOf<ErrorRecordingRedactor>();
+
+// errorRecording.redactor is optional — omitting it (or the whole
+// errorRecording option) is still valid, matching
+// resolveErrorRecordingConfig()'s actual runtime default (no redactor
+// configured).
+const noRedactor: InstrumentOptions = { errorRecording: { mode: 'normalized' } };
+expectTypeOf(noRedactor).toMatchTypeOf<InstrumentOptions>();
+
+// A fully-specified ErrorRecordingConfig (as resolveErrorRecordingConfig()
+// returns) is assignable where a Partial<ErrorRecordingConfig> is
+// expected — same pattern as fullThrashConfig/fullSchemaDriftConfig
+// above. `redactor` may legitimately be omitted even in this "resolved"
+// shape (see ErrorRecordingConfig's own docblock — there's no default
+// function to fall back to).
+const fullErrorRecordingConfig: ErrorRecordingConfig = { mode: 'full' };
+expectTypeOf(fullErrorRecordingConfig).toMatchTypeOf<Partial<ErrorRecordingConfig>>();
+
+const fullErrorRecordingConfigWithRedactor: ErrorRecordingConfig = { mode: 'normalized', redactor: myRedactor };
+expectTypeOf(fullErrorRecordingConfigWithRedactor).toMatchTypeOf<Partial<ErrorRecordingConfig>>();
+
+// ErrorRecordingRedactorFields is the exact { message, stack } shape a
+// redactor both receives and must return (ADR 020 Decision 1: one hook,
+// one call, both fields together) — importable and usable on its own,
+// e.g. for a consumer's own helper function's parameter/return type.
+const fields: ErrorRecordingRedactorFields = { message: 'boom', stack: undefined };
+expectTypeOf(fields).toEqualTypeOf<ErrorRecordingRedactorFields>();
+expectTypeOf<ErrorRecordingRedactor>().toEqualTypeOf<(input: ErrorRecordingRedactorFields) => ErrorRecordingRedactorFields>();
+
+// Negative check: a redactor returning a non-string message must NOT
+// type-check — guards against ErrorRecordingRedactor silently widening to
+// accept `any`/`unknown` return shapes.
+const invalidRedactorReturn: ErrorRecordingRedactor = ({ message, stack }) => ({
+  // @ts-expect-error -- message must be a string, not a number
+  message: 42,
+  stack,
+});
+void invalidRedactorReturn;
+
+// Negative check: a redactor missing the `stack` key on its return value
+// must NOT type-check — the required (non-optional) key forces explicit
+// handling (pass it through, or deliberately set it to `undefined`)
+// rather than silently dropping stack content by omission. ADR 020's own
+// "a message-only redactor can just return `stack` unchanged" guidance
+// means passthrough, not omission — see ErrorRecordingRedactorFields'
+// own docblock.
+// @ts-expect-error -- return value is missing the required `stack` key
+const missingStackRedactor: ErrorRecordingRedactor = ({ message }) => ({ message: message.toUpperCase() });
+void missingStackRedactor;
+
+// Negative check: a redactor with the wrong parameter shape (a bare
+// string instead of { message, stack }) must NOT type-check.
+// @ts-expect-error -- parameter must be { message, stack }, not a bare string
+const wrongParamRedactor: ErrorRecordingRedactor = (rawMessage: string) => ({ message: rawMessage, stack: undefined });
+void wrongParamRedactor;
+
+// Negative check: an async (Promise-returning) redactor must NOT
+// type-check — ADR 020's Constraints section explicitly rejects
+// async/Promise support (no motivating use case needs I/O, and every
+// other step in this pipeline is synchronous by design; see the ADR's
+// "Timing" section on why a synchronous hook has no enforceable timeout
+// either).
+// @ts-expect-error -- ErrorRecordingRedactor must return synchronously, not a Promise
+const asyncRedactor: ErrorRecordingRedactor = async ({ message, stack }) => {
+  return { message, stack };
+};
+void asyncRedactor;
+
+// Negative check: an unknown field on errorRecording must NOT type-check —
+// guards against this suite silently passing if ErrorRecordingConfig's
+// fields ever stop being enforced. Same discipline as invalidThrash/
+// invalidSchemaDrift above.
+const invalidErrorRecording: InstrumentOptions = {
+  // @ts-expect-error -- "notARealField" is not a key of ErrorRecordingConfig
+  errorRecording: { notARealField: true },
+};
+void invalidErrorRecording;

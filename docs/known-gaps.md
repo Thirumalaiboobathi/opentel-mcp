@@ -1522,3 +1522,63 @@ this project's own established practice for exactly this class of
 tradeoff (ADR 011, ADR 016, ADR 018, ADR 019, ADR 020 were all argued
 through an ADR before implementation) — not something to patch inline
 alongside this entry.
+
+## Update (2026-09-02): ADR 021 resolves this entry — document only for values, mechanism gap closed
+
+`docs/adr/021-tool-name-cardinality.md` is the scoped decision this
+entry's "Possible directions" section said was needed, argued through
+all six of the questions that section and the surrounding body raise.
+Two separate conclusions, not one:
+
+- **Value-validation for `gen_ai.tool.name` (the "Validate..."/"Bucket
+  an unrecognized..." directions above): document only, the option
+  already in effect.** ADR 021 Decision 1 confirms, against both
+  installed SDKs' actual source, that a registered-tool registry is
+  reachable for neither server shape uniformly — unavailable by
+  construction for a low-level `Server`, available only via an
+  undocumented private field (`_registeredTools`) for `McpServer`. The
+  one mechanism that works for both, passively observing real
+  `tools/list` responses, is unavoidably cached rather than live; ADR
+  021 Decision 2 finds two of the three staleness directions that
+  follow from that produce **false positives against legitimate
+  traffic** (a newly-registered tool called before any re-list; the very
+  first `tools/call` a server ever receives, before any `tools/list`).
+  That false-positive cost, not the amount of code either alternative
+  would take, is why Decision 3 recommends leaving this as documented
+  behavior rather than validating or bucketing. `mcp.tool.model` and
+  `error.type` — flagged above as sharing the same root cause — are
+  each explicitly left to their own future, separately-scoped decision
+  (ADR 021 Decision 5), not resolved here, matching this file's own
+  anti-bundling precedent (entry 10).
+- **The allowlist mechanism gap — "`METRIC_SAFE_ATTRIBUTES` never gets
+  consulted for this value at all" above — is real, and is fixed.**
+  ADR 021 Decision 5 confirms directly against `src/metrics.js` that no
+  call site in that file, `src/thrash/emitter.js`, or
+  `src/schema-drift/emitter.js` ever actually checked any
+  `METRIC_SAFE_ATTRIBUTES`-shaped list before attaching a label — every
+  existing list was governance documentation for a human to consult,
+  never a runtime or test-time gate. A new `METRIC_SAFE_ATTRIBUTES`
+  export in `src/attributes.js` (covering `gen_ai.tool.name`,
+  `mcp.method.name`, `mcp.tool.outcome` — internal governance, not
+  re-exported as public API, mirroring `COST_METRIC_SAFE_ATTRIBUTES`'s
+  own visibility) plus a new dev-time cross-check test
+  (`test/metrics.test.js`, `describe('metric-label allowlist
+  cross-check (ADR 021)')`) now statically enforce that every attribute
+  key actually attached as a metric label across those three files is a
+  member of an explicit, reviewed allowlist. Run against the tree as it
+  stood before this update, that test immediately failed on exactly the
+  two attributes this entry's body already named as sharing the gap —
+  `error.type` and `mcp.tool.model` — neither of which was added to the
+  new list to force a pass; each remains an open, separately-decided
+  question, now enforced as a visible, named test failure instead of a
+  silent gap a future self-review pass might or might not notice again.
+
+Both existing ADR passages this entry found asserting `gen_ai.tool.name`
+was already bounded (`docs/adr/010-schema-drift.md`,
+`docs/adr/012-tracker-lifecycle-and-shared-state.md`) remain uncorrected
+in their own text, per this file's established convention — this update,
+like the entry above it, is the correction of record.
+
+Versioning: no dedicated release — ADR 021's own conclusion is that this
+folds into whatever ships next (patch or minor), since none of it changes
+public API, runtime behavior, or emitted telemetry.

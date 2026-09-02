@@ -129,8 +129,16 @@ export interface InstrumentOptions {
    * code, no message, no `exception` event.
    *
    * Also settable via the `OTEL_MCP_ERROR_RECORDING_MODE` environment variable (lower precedence than this
-   * option); an unrecognized value from either source falls back to `'full'` silently, never a throw. See
-   * {@link ErrorRecordingConfig} (`src/error-recording/types.d.ts`).
+   * option); an unrecognized value from either source falls back to `'full'` silently, never a throw.
+   *
+   * `redactor` (ADR 020, `docs/adr/020-redactor-hook.md`, v0.14.0): an optional host-supplied function,
+   * consulted only under `mode: 'normalized'`, that runs on raw `message`/`stack` BEFORE
+   * `normalizeMessage()`/`parseAndNormalizeStack()` — for content this library's own built-in patterns
+   * don't recognize (a proprietary API key format, an internal account id, a customer name in prose). Never
+   * reaches `computeFingerprint()`'s hash input, so `mcp.failure.fingerprint` is unaffected whether or not
+   * one is configured. See {@link ErrorRecordingConfig.redactor} for the complete contract (failure
+   * fallback, length capping, the `'full'`/`'none'` no-op) and {@link ErrorRecordingRedactor} for the
+   * standalone function type. See {@link ErrorRecordingConfig} (`src/error-recording/types.d.ts`).
    */
   errorRecording?: Partial<ErrorRecordingConfig>;
 
@@ -418,15 +426,22 @@ export type { SchemaDriftConfig, SchemaDriftKind, SchemaDriftEvent } from './sch
 
 // --- Exception-recording mode (src/error-recording/) ---
 //
-// Re-exported here so TypeScript consumers get this type from the package
-// root instead of reaching into src/error-recording/* directly. See
-// src/error-recording/types.d.ts for the full shape documentation and ADR
-// 019 (docs/adr/019-raw-content-on-spans.md). Same posture as Agent
-// Thrash Detection / schema drift above — no runtime value re-exported:
-// resolveErrorRecordingConfig() is internal to src/config.js's wiring,
-// not part of the public API.
+// Re-exported here so TypeScript consumers get these types from the
+// package root instead of reaching into src/error-recording/* directly.
+// See src/error-recording/types.d.ts for the full shape documentation,
+// ADR 019 (docs/adr/019-raw-content-on-spans.md), and ADR 020's
+// `redactor` hook (docs/adr/020-redactor-hook.md, v0.14.0). Same posture
+// as Agent Thrash Detection / schema drift above — no runtime value
+// re-exported: resolveErrorRecordingConfig() and applyRedactor() are
+// internal to src/config.js's/src/instrument.js's wiring, not part of the
+// public API. ErrorRecordingRedactor/ErrorRecordingRedactorFields are
+// exported as standalone types (not just inline on
+// ErrorRecordingConfig.redactor) so a consumer can type a redactor
+// function on its own, the same way UsageExtractor/Classifier already let
+// a consumer type an extractor/classifier independently of the option
+// object that carries it.
 
-export type { ErrorRecordingConfig } from './error-recording/types.d.ts';
+export type { ErrorRecordingConfig, ErrorRecordingRedactor, ErrorRecordingRedactorFields } from './error-recording/types.d.ts';
 
 // --- Two-axis observation contract (src/observation/) ---
 //

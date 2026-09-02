@@ -202,14 +202,87 @@ export const MCP_TOOL_PRICING_STATUS_USER_OVERRIDE = 'user_override';
  * either of those (mixing an unrelated domain's cardinality reasoning in
  * here would obscure which ADR covers which attribute). Not re-exported
  * from index.js, same as schema-drift's — internal governance, not public
- * API. mcp.tool.model remains governed the way it already was, an inline
- * cardinality comment in metrics.js, not a list entry here — see ADR 016
- * point 4 for why that attribute's boundedness argument doesn't fit a
- * fixed-enum list cleanly the way this one does.
+ * API. mcp.tool.model is not a member of THIS list — it isn't a
+ * cost/pricing-domain attribute — see METRIC_SAFE_ATTRIBUTES below, where
+ * it's now a documented (not silently ungoverned) entry.
  *
  * @type {readonly string[]}
  */
 export const COST_METRIC_SAFE_ATTRIBUTES = Object.freeze([ATTR_MCP_TOOL_PRICING_STATUS]);
+
+/**
+ * Attribute keys from THIS file (spec + custom, non-cost) safe to attach to
+ * mcp.tool.calls / mcp.tool.errors / mcp.tool.silent_failures /
+ * mcp.tool.duration metric labels. Added by docs/adr/021-tool-name-cardinality.md
+ * to close a mechanism gap that ADR found: none of this file's own
+ * governance lists (this one, COST_METRIC_SAFE_ATTRIBUTES above,
+ * fingerprint/attributes.js's and schema-drift/attributes.js's
+ * same-named exports) were ever actually consulted by any metric
+ * call site — src/metrics.js, src/thrash/emitter.js, and
+ * src/schema-drift/emitter.js each attached labels without checking
+ * against any list. A dev-time cross-check test now enforces membership
+ * here for every future attribute; see that test for the current file
+ * list it covers.
+ *
+ * ATTR_GEN_AI_TOOL_NAME's presence here is a deliberate, documented
+ * acceptance of the status quo ADR 021 Decision 3 argues for (document
+ * only, do not validate or bucket unrecognized tool names) — NOT a fresh
+ * safety claim that the value space is bounded. It isn't: see ADR 021's
+ * Context section and docs/known-gaps.md entry 11, which corrects two
+ * earlier ADR passages (010, 012) that asserted this attribute was
+ * already a bounded, metric-safe value without having verified the value
+ * space itself, only that the label mechanism worked.
+ *
+ * ATTR_ERROR_TYPE's presence here is a documented, explicit call, made
+ * after ADR 021 Decision 5 surfaced it as "the one genuinely awkward
+ * entry" — not an oversight and not a precedent for adding a value
+ * without checking its boundedness first. Its value space is bounded by
+ * construction, not by an enforced runtime check: on the isError path
+ * it's the fixed constant ERROR_TYPE_TOOL_ERROR; on the thrown path it's
+ * `err?.name`, capped at MAX_ERROR_CLASS_LENGTH (128 characters) in
+ * src/instrument.js. That cap bounds the length and shape of any ONE
+ * value; it does not bound the SIZE of the set of distinct values a
+ * codebase's own error class names can produce — the same "well-behaved
+ * code, not an enforced property" framing ADR 004 already applies to this
+ * attribute. Tellingly, the identical underlying value — err.name,
+ * length-capped the same way — is mcp.failure.error_class
+ * (ATTRIBUTE_KEYS.ERROR_CLASS, fingerprint/attributes.js), and THAT
+ * attribute is deliberately excluded from fingerprint/attributes.js's own
+ * METRIC_SAFE_ATTRIBUTES for exactly this reason. error.type reaching a
+ * label here is that same value arriving by a different route (spec
+ * attribute governance in this file, not fingerprint domain governance) —
+ * recorded here, not silently allowed, per docs/known-gaps.md entry 11
+ * and ADR 021 Decision 5.
+ *
+ * ATTR_MCP_TOOL_MODEL's presence here is likewise a documented call, not
+ * a default. It passes isValidModelId() (src/cost/calculator.js, ADR 019
+ * Part 2) before ever reaching a label — a shape/length gate
+ * (`/^[A-Za-z0-9._:/@-]{1,256}$/`) — but that gate bounds what any ONE
+ * value can look like, not how many distinct values a deployment can
+ * produce; a 256-character identifier pattern still admits an effectively
+ * unbounded set. See ADR 016 and ADR 019 Part 2 for this attribute's own
+ * mitigation lineage, and docs/known-gaps.md entry 11 for the
+ * unbounded-set caveat this list is recording, not re-deciding — nothing
+ * about those documents' conclusions changes here.
+ *
+ * Neither entry above is evidence that an unbounded value is fine on a
+ * metric label. Both are shape/length-bounded, not set-bounded, and both
+ * are here because that specific gap was weighed and accepted
+ * (gen_ai.tool.name: ADR 021 Decision 3; error.type and mcp.tool.model:
+ * this docblock), not because listing two imperfect entries makes a
+ * third easier to wave through. A genuinely unbounded value — arbitrary
+ * request or response content with no cap at all — belongs on a span,
+ * never here, regardless of what's already in this array.
+ *
+ * @type {readonly string[]}
+ */
+export const METRIC_SAFE_ATTRIBUTES = Object.freeze([
+  ATTR_GEN_AI_TOOL_NAME,
+  ATTR_MCP_METHOD_NAME,
+  ATTR_MCP_TOOL_OUTCOME,
+  ATTR_ERROR_TYPE,
+  ATTR_MCP_TOOL_MODEL,
+]);
 
 /** Resource attribute (setupNodeSdk: true only) naming DEFAULT_PRICING's lastVerified date. See ADR 016 point 3. */
 export const ATTR_MCP_PRICING_DEFAULT_TABLE_LAST_VERIFIED = 'mcp.pricing.default_table_last_verified';

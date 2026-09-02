@@ -1,0 +1,115 @@
+version: 2
+
+updates:
+  # --- npm (this repo is an npm-workspaces monorepo) ---
+  #
+  # One lockfile (package-lock.json) at the repo root covers every
+  # workspace member: packages/core, packages/ui, examples/hello-server,
+  # examples/hello-mcpserver (see root package.json's "workspaces" list).
+  #
+  # Investigated rather than assumed: Dependabot has native npm/yarn
+  # workspace detection — pointing `directory` at the workspace ROOT
+  # (where the root package.json + the one shared lockfile live) is the
+  # correct, sufficient config; a `directory` entry per packages/*
+  # subdirectory is the pattern for a DIFFERENT monorepo shape (several
+  # independent projects, each with its own separate lockfile), which
+  # isn't this repo — packages/core and packages/ui have no lockfile of
+  # their own for Dependabot to act on individually. A real-world report
+  # confirms the mechanics: dependabot/dependabot-core#7157 shows a
+  # dependabot.yml pointed at the workspace root correctly detecting and
+  # bumping a dependency declared inside one nested workspace package.
+  #
+  # Caveat found during that same investigation, not just theoretical:
+  # even with one root entry, the SAME dependency declared in more than
+  # one workspace's own package.json (this repo has several — typescript,
+  # vitest, and multiple @opentelemetry/* packages are devDependencies of
+  # BOTH packages/core and packages/ui) can still surface as separate
+  # pull requests if left ungrouped (github.com/orgs/community/
+  # discussions/176055 reports this producing 20-30 PRs on an unrelated
+  # repo). The `groups` block below is the long-established, GA
+  # mitigation for that — group membership is evaluated across every
+  # manifest this ONE ecosystem entry scans, i.e. across every workspace
+  # package, not per-directory. (Not used here: the newer,
+  # February-2026 `group-by: dependency-name` + plural `directories`
+  # feature — that one is for the OTHER monorepo shape, several
+  # independent per-directory lockfiles; it doesn't apply to a single
+  # shared-lockfile npm-workspaces setup like this one, and would be the
+  # wrong tool here.)
+  #
+  # Also surfaced: a historical bug specific to npm-workspaces +
+  # lockfileVersion 3 (this repo's own lockfile format) once left the
+  # root package-lock.json stale after a workspace-scoped bump
+  # (dependabot-core#6270) — closed and fixed via dependabot-core#6518,
+  # not an open concern today, noted here only because it's exactly this
+  # repo's configuration and worth knowing existed.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Default is 5. This repo's actual ungrouped-PR surface is small —
+    # only a handful of production dependencies across every workspace
+    # package (@opentelemetry/exporter-trace-otlp-http, @opentelemetry/
+    # resources, @opentelemetry/sdk-trace-node, @modelcontextprotocol/sdk,
+    # zod) — and the dev-dependency churn (vitest, vite, typescript,
+    # @opentelemetry/* dev copies, @types/*, ...) is consolidated by the
+    # group below into one weekly PR instead of one-per-package. 10 gives
+    # headroom without inviting the pile-up a much higher number would.
+    open-pull-requests-limit: 10
+    groups:
+      # Routine dev-tool bumps (vitest, vite, typescript, @types/*, the
+      # @opentelemetry/* copies used only for testing, ...) land as ONE
+      # weekly PR instead of one per package. Scoped to minor/patch only
+      # — a major in vite/vitest/typescript can carry real breaking
+      # changes worth seeing on its own, not buried in a batch, so those
+      # bypass the group and open individually.
+      dev-dependencies:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Runtime dependencies this library wraps and re-exports through
+      # its own public API (see docs/adr/001-wrapping-strategy.md) — a
+      # major here can change behavior for every consumer of THIS
+      # package, not just this repo's own build. @opentelemetry/api is
+      # also a declared peerDependency (packages/core/package.json): a
+      # major changing what satisfies that range is exactly the kind of
+      # change that needs a human reading the OTel changelog first, not
+      # an auto-mergeable bump. Applies wherever these names appear
+      # (dependencies/devDependencies/peerDependencies alike) — the
+      # devDependency copies exist to test against the same major the
+      # peer range promises, so they need to move in lockstep with that
+      # decision, not ahead of it.
+      - dependency-name: "@opentelemetry/*"
+        update-types: ["version-update:semver-major"]
+      # Same reasoning, for the MCP SDKs this library's entire wrapping/
+      # detection strategy (ADR 001, ADR 015) is duck-typed and
+      # instanceof-checked against — a major protocol revision is a
+      # "read the release notes first" event, not a routine bump.
+      - dependency-name: "@modelcontextprotocol/*"
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+
+  # --- GitHub Actions ---
+  #
+  # Keeps the two pinned action versions (actions/checkout,
+  # actions/setup-node — see .github/workflows/ci.yml and release.yml)
+  # current. `directory: "/"` here isn't a workspace-related decision
+  # (unlike the npm entry above) — for this ecosystem it's simply what
+  # Dependabot scans .github/workflows/*.yml relative to, regardless of
+  # repo layout.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Only two distinct actions are pinned today; the default of 5 is
+    # already more than this ecosystem will ever need here, kept
+    # explicit rather than implicit for the same reason the npm entry
+    # above states its number rather than relying on the default.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
