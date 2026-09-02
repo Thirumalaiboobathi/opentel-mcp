@@ -463,12 +463,26 @@ per-call-site wrapping; tracked in the roadmap below.
 
 ## Error recording (v0.13.0+)
 
-Every thrown `tools/call`/`tools/list` error goes through
-`span.recordException(err)` (an OpenTelemetry SDK method, not one of this
-library's own attributes) plus `span.setStatus({ code: ERROR, message:
-err.message })` — unconditionally, whether or not `fingerprinting` is
-enabled. By default that means `err.message` and `err.stack` land on the
-span exactly as thrown. `errorRecording.mode` controls this:
+**What this controls, and who needs it.** Whenever a `tools/call`/
+`tools/list` handler throws, this library records the thrown error's
+message and stack trace onto the span it creates for that call — by
+default, exactly as the tool wrote them, no redaction. If your tools call
+third-party services, wrap unaudited dependencies, or you otherwise don't
+control every string a tool might throw, that's a real channel for
+whatever those errors happen to contain (an email address, an internal
+hostname, a connection string a driver embedded in its own error message)
+to reach wherever your traces get exported. `errorRecording.mode` lets
+you scrub or drop that content instead of recording it verbatim — read
+both caveats below before treating it as a privacy control, though: it
+has two distinct limits, and neither is obvious from the option name
+alone.
+
+Mechanically: every thrown error goes through `span.recordException(err)`
+(an OpenTelemetry SDK method, not one of this library's own attributes)
+plus `span.setStatus({ code: ERROR, message: err.message })` —
+unconditionally, whether or not `fingerprinting` is enabled.
+`errorRecording.mode` controls what those two calls actually put on the
+span:
 
 | Mode | `exception.message` / status message | `exception.stacktrace` | When to use |
 |---|---|---|---|
@@ -476,30 +490,81 @@ span exactly as thrown. `errorRecording.mode` controls this:
 | `'normalized'` | `normalizeMessage(err.message)` — the exact scrubbing pipeline (`src/fingerprint/normalize/message.js`) fingerprinting already runs before hashing: UUIDs, emails, URLs, IPs, timestamps, filesystem paths, hex runs, quoted ids | Reconstructed from `parseAndNormalizeStack()` (`src/fingerprint/normalize/stack.js`) — keeps every function name/file/line, strips only the local `cwd` prefix (and collapses `node_modules` package versions) | Tool results come from third-party or unaudited MCP servers and you want the same scrubbing fingerprinting already trusts, applied to the raw exception content too |
 | `'none'` | Not set — `span.setStatus({ code: ERROR })` with no message, the same pattern already used for tool-level `isError: true` failures | Not set | You rely entirely on `mcp.failure.*` (category/fingerprint/signature — already hashed/normalized) and don't want any free-text exception content on the span at all |
 
-No mode mutates the original `err` — both call sites rethrow it
-afterward, so `'normalized'`/`'none'` build the exception event
-independently rather than editing `err.message`/`err.stack` in place.
+**Caveat 1 — `'normalized'` is targeted scrubbing, not general-purpose
+redaction. Do not treat it as a PII filter.** `normalizeMessage()`
+matches specific, structured shapes only: UUIDs, email addresses, URLs,
+IPv4/IPv6 addresses, ISO-8601/Unix timestamps, filesystem paths, long hex
+runs, and quoted alphanumeric ids (8–64 chars, mixed letters/digits). It
+does not recognize sensitive content in general — an API key in a format
+none of those patterns match (a bare, unquoted token with no digit in it,
+or a custom prefix scheme), or a customer's name embedded in ordinary
+prose ("could not process request for Jane Smith"), passes through
+`'normalized'` mode completely unchanged, identical to what `'full'`
+would put on the span. Treat `'normalized'` as "the same scrubbing
+fingerprinting already trusts for hashing," not as a guarantee that
+whatever a tool's error messages contain is safe to record.
+
+**Example — the same thrown error, `'full'` vs. `'normalized'`:**
+
+```js
+throw new Error('upstream lookup failed for user jane.doe@example.com');
+```
+
+| Mode | `exception.message` on the span |
+|---|---|
+| `'full'` | `upstream lookup failed for user jane.doe@example.com` |
+| `'normalized'` | `upstream lookup failed for user <EMAIL>` |
+| `'none'` | *(not set — only the ERROR status code is)* |
+
+The stack trace scrubs the same way: `'full'` keeps every frame's
+absolute path; `'normalized'` keeps every frame (function name, file,
+line) but strips the local `cwd` prefix.
+
+**Caveat 2 — every mode is scoped to the span this library creates, not
+to your trace as a whole.** No mode mutates the original `err` — both
+call sites rethrow it afterward, so `'normalized'`/`'none'` build the
+exception event independently rather than editing `err.message`/
+`err.stack` in place. The consequence: the unmodified, fully raw `err` is
+exactly what propagates to whatever called this handler. If any other
+instrumentation further out in the call stack — an APM agent, HTTP or
+framework auto-instrumentation, anything else wrapping this handler —
+independently calls `recordException(err)`/`setStatus({ message:
+err.message })` on its OWN span when it observes the rethrow, the raw,
+unscrubbed message and stack land in the SAME TRACE as this library's
+(scrubbed) span, one span up, not on it. `'none'` buys no more protection
+here than `'normalized'`: neither mutates `err`, so an outer recorder
+sees the identical raw content either way. Someone choosing `'none'`
+specifically to keep sensitive content out of their tracing backend needs
+to know that protection stops at this library's own span, not at the
+trace boundary.
+
+Confirmed directly, not just reasoned about: an instrumented server run
+under a real ambient context manager (`AsyncLocalStorageContextManager` —
+the propagation mechanism production deployments actually use, unlike
+this project's own test suite, which registers most test files with
+`contextManager: null` and therefore can't exercise this path — see
+`docs/known-gaps.md` entry 10's latest update for why that's fine for
+those specific tests), wrapped in an outer span that calls
+`recordException(err)` on catch, with `errorRecording.mode: 'normalized'`
+set and an `InMemorySpanExporter` attached: the tool span's exception
+event carries the scrubbed message, and the ancestor span's exception
+event and status message both carry the original, raw one — same trace
+ID, parent/child span relationship confirmed, no mutation anywhere in
+between.
+
+**This is not fixable from inside this library.** The only way to close
+it here would be mutating `err.message`/`err.stack` in place before
+rethrowing — which would corrupt whatever error-handling the host
+application does with that same object afterward, a correctness hazard
+this library isn't willing to trade for a telemetry one. It has authority
+over one span; it has no visibility into, and no control over, what other
+instrumentation attached to the same process does with the error once
+rethrown. See `docs/known-gaps.md` entry 10 for the full writeup.
+
 `error.type`/`exception.type` (`err.name`) is capped at 128 characters
 unconditionally in every mode — the same cap `mcp.failure.error_class`
 uses — since a length cap on a class-identifier field costs a
 well-behaved tool nothing, unlike message/stack content.
-
-**`'normalized'` is targeted scrubbing, not general-purpose redaction —
-read this before treating it as a PII filter.** `normalizeMessage()`
-matches specific, structured shapes: UUIDs, email addresses, URLs,
-IPv4/IPv6 addresses, ISO-8601/Unix timestamps, filesystem paths, long hex
-runs, and quoted alphanumeric ids (8–64 chars, mixed letters/digits). It
-does not recognize sensitive content in general. An API key in a format
-none of those patterns match (a bare, unquoted token with no digit in it,
-or a custom prefix scheme), or a customer's name embedded in ordinary
-prose ("could not process request for Jane Smith"), passes through
-`'normalized'` mode completely unchanged — identical to what `'full'`
-mode would put on the span. Treat `'normalized'` as "the same scrubbing
-fingerprinting already trusts for hashing," not as a guarantee that
-whatever a tool's error messages contain is safe to record; if a tool's
-errors routinely carry sensitive free text these patterns don't happen to
-match, `'none'` is the only mode that keeps message/stack content off the
-span entirely.
 
 **Default stays `'full'` through all of `0.x`.** Changing it would alter
 what every trace backend renders for the single highest-traffic failure
@@ -1863,17 +1928,26 @@ sensitive information" and still specify recording it by default —
 every other OTel-instrumented library sharing the same trace (an HTTP
 client, a DB driver, a queue consumer) records `err.message`/`err.stack`
 the same way, unscrubbed, through the same `recordException()` call.
-opentel-mcp matches that ecosystem default rather than silently diverging
-from it. What it adds on top: `errorRecording.mode` lets you choose
-`'normalized'` (targeted scrubbing — the same structured patterns
-fingerprinting matches: UUIDs, emails, URLs, IPs, timestamps, paths,
-quoted ids; **not** a general-purpose PII filter, so freeform sensitive
-text — a customer's name in prose, an API key in a format none of those
-patterns match — still reaches the span unchanged, see "Error recording"
-above) or `'none'` (record neither) instead of `'full'` — a level of
-operator control most peer instrumentations don't offer for this path.
-Full reasoning, including why the default doesn't change in this
-release: ADR 019 (`docs/adr/019-raw-content-on-spans.md`).
+That covers a sharper case than "different libraries recording their own,
+separate operations," too: an outer wrapper — an APM agent's own request
+span, or HTTP/framework auto-instrumentation sitting further out in the
+call stack — independently recording the very same error this library
+just scrubbed. No `errorRecording.mode` mutates the original `err` (see
+"Error recording" above), so a rethrown error is exactly what such a
+wrapper sees; if it calls `recordException(err)` on its own span, the raw
+content lands one span up in the identical trace, regardless of which
+mode is set here. opentel-mcp matches that ecosystem default rather than
+silently diverging from it. What it adds on top: `errorRecording.mode`
+lets you choose `'normalized'` (targeted scrubbing — the same structured
+patterns fingerprinting matches: UUIDs, emails, URLs, IPs, timestamps,
+paths, quoted ids; **not** a general-purpose PII filter, so freeform
+sensitive text — a customer's name in prose, an API key in a format none
+of those patterns match — still reaches the span unchanged, see "Error
+recording" above) or `'none'` (record neither) instead of `'full'` — a
+level of operator control most peer instrumentations don't offer for this
+path, scoped to the span this library creates, not a trace-wide
+guarantee. Full reasoning, including why the default doesn't change in
+this release: ADR 019 (`docs/adr/019-raw-content-on-spans.md`).
 
 This is a data-handling property of an observability library, not a
 security control opentel-mcp is claiming to provide — it doesn't

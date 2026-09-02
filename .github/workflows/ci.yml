@@ -52,3 +52,35 @@ jobs:
 
       - name: Verify the packed tarball is consumable under strict TypeScript
         run: npm run verify:tarball
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # --omit=dev: this is a library (packages/core, the only published
+      # workspace) with three runtime dependencies — everything else in the
+      # tree (vitest, vite, typescript, react, ...) is test/build tooling
+      # that never reaches a consumer's install. A full audit fails on
+      # devDependency transitives no `opentel-mcp` user is ever exposed to,
+      # which trains reviewers to ignore this job; --omit=dev checks what
+      # actually ships.
+      #
+      # --audit-level=high: `npm audit` prints every finding regardless of
+      # this flag — it only controls the exit code. Gating on `high` means
+      # routine low/moderate transitive advisories (common, usually not
+      # meaningfully exploitable through this library's own usage) don't
+      # block an unrelated PR, while a genuinely serious finding still
+      # fails the build instead of sitting in a log nobody reads.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high

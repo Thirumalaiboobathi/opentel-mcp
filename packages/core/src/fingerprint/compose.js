@@ -12,8 +12,7 @@
  */
 
 import { hashInputs } from './hash.js';
-import { normalizeMessage } from './normalize/message.js';
-import { parseAndNormalizeStack } from './normalize/stack.js';
+import { normalizeException } from './normalize/exception.js';
 import { DEFAULT_CLASSIFIERS, runClassifiers } from './classify/index.js';
 
 /** @typedef {import('./types.d.ts').FingerprintResult} FingerprintResult */
@@ -72,48 +71,6 @@ function buildFallback(ctx) {
 }
 
 /**
- * Reduces any failure value into a normalized `{ name, message, stack,
- * code, status }` shape that the rest of the pipeline can rely on.
- *
- * @param {unknown} err Never null/undefined — callers filter that case.
- * @returns {{ name: string, message: string, stack: string | undefined, code: unknown, status: unknown }}
- */
-function coerceError(err) {
-  if (typeof err === 'string') {
-    return { name: 'Error', message: err, stack: undefined, code: undefined, status: undefined };
-  }
-
-  if (err instanceof Error) {
-    return {
-      name: err.name,
-      message: err.message,
-      stack: err.stack,
-      code: err.code,
-      status: err.status ?? err.statusCode,
-    };
-  }
-
-  if (err && typeof err === 'object' && err.isError === true && Array.isArray(err.content)) {
-    return {
-      name: 'MCPToolError',
-      message: err.content[0]?.text ?? '',
-      stack: undefined,
-      code: undefined,
-      status: undefined,
-    };
-  }
-
-  const obj = err ?? {};
-  return {
-    name: obj.name ?? 'Error',
-    message: obj.message ?? String(obj),
-    stack: obj.stack,
-    code: obj.code,
-    status: obj.status ?? obj.statusCode,
-  };
-}
-
-/**
  * Computes a stable identity fingerprint for a failure: same underlying
  * bug -> same fingerprint, regardless of high-cardinality noise (ids,
  * timestamps, addresses, ...) embedded in the message or stack.
@@ -129,15 +86,18 @@ export function computeFingerprint(err, ctx, opts = {}) {
       return buildFallback(ctx);
     }
 
-    const coerced = coerceError(err);
-    const classifiers = opts.classifiers ?? DEFAULT_CLASSIFIERS;
-    let category = runClassifiers(coerced, ctx, classifiers);
-
-    const normalizedMessage = normalizeMessage(coerced.message);
-    const { frames, signature: stackSignature } = parseAndNormalizeStack(coerced.stack, {
+    // normalizeException() (normalize/exception.js) is the single shared
+    // coercion + normalization step — the same one errorRecording.mode's
+    // 'normalized' span-writing path (instrument.js's
+    // recordThrownException()) calls for the SAME err, so the fingerprint
+    // hashed below and the exception content that lands on the span can't
+    // independently drift apart. See that module's own docblock.
+    const { coerced, normalizedMessage, frames, stackSignature } = normalizeException(err, {
       cwd: ctx.cwd,
       maxFrames: opts.stackFrames ?? DEFAULT_STACK_FRAMES,
     });
+    const classifiers = opts.classifiers ?? DEFAULT_CLASSIFIERS;
+    let category = runClassifiers(coerced, ctx, classifiers);
 
     // Deferred from Phase 4: only overrides when the classifiers had no
     // signal at all, never a category a classifier actually committed to.

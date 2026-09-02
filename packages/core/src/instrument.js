@@ -16,8 +16,7 @@ import { computeFingerprint, MAX_ERROR_CLASS_LENGTH } from './fingerprint/compos
 import { toSpanAttributes, ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
 import { classifyFailureChannel } from './fingerprint/classify/channel.js';
 import { extractValidationPaths } from './fingerprint/classify/validation-paths.js';
-import { normalizeMessage } from './fingerprint/normalize/message.js';
-import { parseAndNormalizeStack } from './fingerprint/normalize/stack.js';
+import { normalizeException } from './fingerprint/normalize/exception.js';
 import { calculateCost, normalizeModelName, isValidModelId, describeInvalidModelId } from './cost/calculator.js';
 import { DEFAULT_PRICING_LAST_VERIFIED } from './cost/pricing.js';
 import { createBudgetTracker } from './cost/budget.js';
@@ -1367,15 +1366,22 @@ function applyToolOutcomeThrown(toolOutcomeCounter) {
  *   `exception` event.
  * - `'normalized'`: a hand-built `exception` event carrying the same
  *   three keys `recordException()` itself would set
- *   (`exception.type`/`exception.message`/`exception.stacktrace`), but
- *   with `exception.message` run through `normalizeMessage()` and
- *   `exception.stacktrace` rebuilt from `parseAndNormalizeStack()`'s
- *   frames (cwd-stripped, `node_modules`-version-collapsed) — never the
- *   raw `err.stack`. `err` itself is never mutated: both call sites
- *   rethrow the original object afterward, and `computeFingerprint()` a
- *   few lines later (when fingerprinting is enabled) reads
- *   `err.message`/`err.stack` independently, on the real, unmutated
- *   object.
+ *   (`exception.type`/`exception.message`/`exception.stacktrace`), built
+ *   from `normalizeException()` (`fingerprint/normalize/exception.js`) —
+ *   the SAME coercion + `normalizeMessage()`/`parseAndNormalizeStack()`
+ *   step `computeFingerprint()` (`fingerprint/compose.js`) calls for the
+ *   same `err` a few lines later, when fingerprinting is enabled. Before
+ *   this consolidation, this branch re-derived message/stack from a raw
+ *   `err?.message`/`err?.stack` read independently of
+ *   `computeFingerprint()`'s own (richer) coercion — same inputs, two
+ *   call sites, free to drift apart on the next edit to either one: a
+ *   thrown string or a plain non-Error object got a real `mcp.failure.*`
+ *   fingerprint but silently NO `exception.message` on the span, since
+ *   the old inline read only handled real `Error` instances.
+ *   `normalizeException()` closes that by construction — one
+ *   computation, two consumers — not by keeping two implementations in
+ *   sync by hand. `err` itself is still never mutated: both call sites
+ *   rethrow the original object afterward.
  *
  * `error.type` (`ATTR_ERROR_TYPE`, set by each call site immediately
  * after this call returns) is capped at `MAX_ERROR_CLASS_LENGTH`
@@ -1407,25 +1413,30 @@ function recordThrownException(span, err, errorRecordingConfig) {
     }
 
     if (errorRecordingConfig.mode === 'normalized') {
-      const rawMessage = err?.message;
-      const message = typeof rawMessage === 'string' ? normalizeMessage(rawMessage) : undefined;
-
-      const rawStack = err?.stack;
-      const { frames } = parseAndNormalizeStack(typeof rawStack === 'string' ? rawStack : undefined, {
-        cwd: process.cwd(),
-      });
-      const stacktrace =
-        frames.length > 0
-          ? frames.map((frame) => `${frame.fn || '<anonymous>'}@${frame.file}:${frame.line ?? '?'}`).join('\n')
-          : undefined;
-
       const exceptionType = String(err?.code ?? err?.name ?? 'Error').slice(0, MAX_ERROR_CLASS_LENGTH);
-
       const attrs = { 'exception.type': exceptionType };
-      if (message !== undefined) attrs['exception.message'] = message;
-      if (stacktrace !== undefined) attrs['exception.stacktrace'] = stacktrace;
+
+      // err == null (a thrown `null`/`undefined`) has nothing for
+      // normalizeException()/coerceError() to coerce a real message out
+      // of — the same edge case computeFingerprint() guards against
+      // before ever calling coerceError(). Skip straight to "type only,"
+      // matching this branch's own pre-consolidation behavior for that
+      // case.
+      if (err !== null && err !== undefined) {
+        const { normalizedMessage, frames } = normalizeException(err, { cwd: process.cwd() });
+        attrs['exception.message'] = normalizedMessage;
+        if (frames.length > 0) {
+          attrs['exception.stacktrace'] = frames
+            .map((frame) => `${frame.fn || '<anonymous>'}@${frame.file}:${frame.line ?? '?'}`)
+            .join('\n');
+        }
+        span.addEvent('exception', attrs);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: normalizedMessage });
+        return;
+      }
+
       span.addEvent('exception', attrs);
-      span.setStatus({ code: SpanStatusCode.ERROR, message });
+      span.setStatus({ code: SpanStatusCode.ERROR });
       return;
     }
 

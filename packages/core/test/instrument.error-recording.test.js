@@ -5,6 +5,7 @@ import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-tr
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { instrumentMcpServer } from '../src/instrument.js';
+import { computeFingerprint } from '../src/fingerprint/compose.js';
 import { ATTR_ERROR_TYPE, MCP_METHOD_NAME_TOOLS_LIST } from '../src/attributes.js';
 
 /** Fresh, unconnected low-level Server — every test builds its own. */
@@ -204,6 +205,40 @@ describe('errorRecording.mode — ADR 019 Part 1 (docs/adr/019-raw-content-on-sp
       const [span] = memoryExporter.getFinishedSpans();
       expect(span.status.code).toBe(SpanStatusCode.ERROR);
       expect(exceptionEvent(span)).toBeDefined();
+    });
+
+    it('the span\'s exception.message and computeFingerprint()\'s normalizedMessage come from the same computation — cannot drift apart', async () => {
+      // A thrown STRING, not an Error instance, is exactly the shape the
+      // pre-consolidation `recordThrownException()` mishandled: its old,
+      // independent `err?.message` read returned undefined (a string has
+      // no `.message` property), silently omitting `exception.message`
+      // from the span, while `computeFingerprint()`'s own `coerceError()`
+      // already special-cased a thrown string and hashed real content
+      // into `mcp.failure.fingerprint` regardless — same `err`, two call
+      // sites, two different answers. Both now go through
+      // `normalizeException()` (fingerprint/normalize/exception.js), so
+      // this asserts they can't disagree: not "happen to produce the
+      // same string today," but literally the same computation.
+      const server = createServer();
+      instrumentMcpServer(server, { serviceName: 'svc', errorRecording: { mode: 'normalized' } });
+      const thrown = 'upstream lookup failed for user jane.doe@example.com';
+      server.setRequestHandler(CallToolRequestSchema, async () => {
+        throw thrown;
+      });
+
+      await invokeToolCall(server, { name: 'echo', arguments: {} }).catch(() => {});
+
+      const [span] = memoryExporter.getFinishedSpans();
+      const spanMessage = exceptionEvent(span).attributes['exception.message'];
+      expect(spanMessage).toBeDefined();
+      expect(spanMessage).not.toContain('jane.doe@example.com');
+
+      // The exact err value the handler threw, run through the real
+      // fingerprint pipeline directly — must be byte-identical to what
+      // landed on the span above.
+      const fingerprintResult = computeFingerprint(thrown, { toolName: 'echo', origin: 'thrown' });
+      expect(fingerprintResult.inputs.normalizedMessage).toBe(spanMessage);
+      expect(fingerprintResult.inputs.normalizedMessage).toBe('upstream lookup failed for user <EMAIL>');
     });
   });
 

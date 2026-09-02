@@ -121,10 +121,12 @@ export interface InstrumentOptions {
    *
    * Defaults to `{ mode: 'full' }` — byte-identical to every release before v0.13.0:
    * `span.recordException(err)` plus `span.setStatus({ message: err.message })`, both uncapped.
-   * `'normalized'` reuses `normalizeMessage()` (`src/fingerprint/normalize/message.js`) for the exception
-   * message and `parseAndNormalizeStack()` (`src/fingerprint/normalize/stack.js`) for the stacktrace
-   * (cwd-stripped, `node_modules` version-collapsed) — no new scrubbing pipeline. `'none'` sets only the
-   * `ERROR` status code, no message, no `exception` event.
+   * `'normalized'` reuses `normalizeException()` (`src/fingerprint/normalize/exception.js`) — the same
+   * coercion + `normalizeMessage()`/`parseAndNormalizeStack()` step `computeFingerprint()`
+   * (`src/fingerprint/compose.js`) uses for `mcp.failure.*` on the same `err` — for the exception message
+   * and stacktrace (cwd-stripped, `node_modules` version-collapsed): one computation feeds both the span
+   * and the fingerprint, so they can't independently drift apart. `'none'` sets only the `ERROR` status
+   * code, no message, no `exception` event.
    *
    * Also settable via the `OTEL_MCP_ERROR_RECORDING_MODE` environment variable (lower precedence than this
    * option); an unrecognized value from either source falls back to `'full'` silently, never a throw. See

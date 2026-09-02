@@ -1241,3 +1241,284 @@ Both items are still tracked here — not closed out — for exactly that
 reason: the underlying content-exposure this entry originally raised for
 `recordException`/`setStatus` remains real and reachable at the default
 configuration, by design, until 1.0.
+
+## Update (2026-09-01): `errorRecording.mode` is scoped to this library's own span, not the trace — a documentation gap, not a new code gap
+
+**Raised by:** external review (r/mcp), prompted by the observation that
+`errorRecording.mode` only controls what THIS library puts on a span,
+with no way to stop other instrumentation in the same process from adding
+its own, unscrubbed exception content to a different span in the same
+trace.
+
+**Confirmed live, not just reasoned about.** Built a minimal reproduction:
+an `instrumentMcpServer()`-wrapped server with `errorRecording: {
+mode: 'normalized' }`, run under a real ambient context manager
+(`AsyncLocalStorageContextManager` — the propagation mechanism production
+deployments actually use for context to survive an `await`; this
+project's own test suite registers `contextManager: null` instead, which
+disables ambient propagation entirely — see this update's second half
+below for what that means for existing test coverage), wrapped in an
+outer span standing in for a generic APM agent or HTTP/framework
+auto-instrumentation. The tool handler throws an `Error` whose message
+contains an email address. The outer span catches the rethrown error and
+calls a plain, standard-library `span.recordException(err)` on itself —
+nothing exotic, exactly what that class of instrumentation commonly does
+around a request handler. Result, read directly off an
+`InMemorySpanExporter`: both spans share one trace ID, with the tool span
+correctly parented under the outer span; the tool span's `exception`
+event carries the scrubbed message (`"...for <EMAIL>"`); the outer span's
+`exception` event AND its `status.message` both carry the original, raw
+email, unscrubbed.
+
+**Why this isn't a bug in `errorRecording.mode` itself.** The mode does
+exactly what the README always said it does — governs what
+`recordThrownException()` (`src/instrument.js`) puts on the span
+`wrapToolCallHandler`/`wrapToolsListHandler` create for the current call.
+The README's "No mode mutates the original `err`" sentence
+(`packages/core/README.md`, "Error recording" section) already disclosed
+the mechanism: both call sites rethrow the untouched `err` afterward.
+What the README did not say plainly is the consequence — that the
+unmodified, fully raw `err` is exactly what reaches anything further out
+in the call stack, and if that code independently records it (its own
+`recordException()` call on its own, ancestor span — reachable because
+this library's span is a child of whatever span was already active when
+the request handler ran, via ordinary OTel context propagation, not
+anything this library does deliberately), the raw content lands in the
+same trace regardless of `errorRecording.mode`. `'none'` provides no more
+protection here than `'normalized'`: neither mode mutates `err`, so an
+outer recorder sees the identical raw content either way.
+
+**Not fixable from inside this library.** The only way to close this from
+here would be mutating `err.message`/`err.stack` in place before
+rethrowing — which the README already argues against for a different,
+still-valid reason (silently rewriting a thrown error's content out from
+under whatever the host application's own error handling does with that
+same object afterward is a correctness hazard, not just a telemetry
+one). This library controls one span; it has no visibility into, and no
+authority over, what any other instrumentation attached to the same
+process does with the error it rethrows. Treated as a documentation gap,
+not a code gap: `packages/core/README.md`'s "Error recording" and "What
+this library records" sections are updated (same release as this update)
+to state the span-vs-trace scoping explicitly, rather than proposing a
+code change here.
+
+**Separate finding surfaced by writing the reproduction: this project's
+own test suite cannot see this class of issue at all, by construction.**
+`test/instrument.error-recording.test.js` and every other span-emitting
+test in `packages/core/test/` register their `NodeTracerProvider` with
+`contextManager: null` (see each file's `beforeEach`). Directly checked:
+with `contextManager: null`, no context manager is installed at all, so
+there is no ambient-context propagation across an `await` boundary — an
+outer `tracer.startActiveSpan()`'s span does NOT become the active
+context inside an inner `await`ed call the way it does in every real
+deployment (which needs a working context manager, typically
+`AsyncLocalStorageContextManager` via `@opentelemetry/sdk-trace-node`'s
+`NodeTracerProvider.register()` default, or whatever the host's own SDK
+setup installs). Concretely reproduced: the same repro above, first run
+with `contextManager: null` exactly as the existing suite configures it,
+produced two spans with **different, unrelated trace IDs** — not a
+parent/child relationship at all — even though the outer span was
+demonstrably still "active" by every synchronous measure at the point the
+inner span was created. Only re-registering with a real
+`AsyncLocalStorageContextManager` produced the correct, single-trace,
+parent/child result reported above. This means: any existing or future
+test in this suite that asserts on parent/child span structure, trace ID
+continuity across an `await`, or "is this the active span" behavior is
+implicitly running in a configuration that cannot represent how context
+actually propagates in a deployed instance. Scoped separately, not fixed
+here: see the follow-up investigation into exactly which existing tests
+depend on this and whether they can be moved to a real context manager
+without breaking (tracked outside this file, as a test-infrastructure
+question rather than a content-exposure one).
+
+---
+
+## 11. `gen_ai.tool.name` (and two related attributes) carry unvalidated, unbounded values onto metric labels
+
+**Target:** Unscheduled — the real options each have a genuine cost and
+need their own decision, per this entry's own "Possible directions" below.
+**Found by:** internal self-review — an audit of whether
+`METRIC_SAFE_ATTRIBUTES` (`src/fingerprint/attributes.js`) bounds metric
+label *values*, not just which attribute *keys* are allowed onto a label —
+not an external report.
+
+### Body
+
+**`gen_ai.tool.name`'s value is `request.params.name` — incoming request
+content, never validated against the server's registered tool set.**
+`src/instrument.js:1569`: `const toolName = request?.params?.name;`, inside
+`wrapToolCallHandler()`. Nothing between that line and any of the sinks
+below checks `toolName` against what the server actually has registered.
+
+**This makes reachability much broader than "a server that registers
+tools dynamically."** `metricsRecorder?.recordCall(toolName)`
+(`src/instrument.js:1617`, immediately after span-attribute setup) fires
+unconditionally, *before* `await handler(request, extra)`
+(`src/instrument.js:1618` onward) — i.e., before the underlying MCP SDK
+handler has had any chance to look `toolName` up and fail with "tool not
+found." **The call fails; the label is recorded first.** Any caller —
+not an operator's own dynamic registration, not an unusual deployment
+shape, just an ordinary `tools/call` request naming a tool that doesn't
+exist — puts an arbitrary string on a metric label. Dynamic tool
+registration (real, and confirmed live against both installed SDKs —
+`notifications/tools/list_changed` is spec-level wire protocol, and
+`registerTool()`/`.update()` are callable post-`connect()` in both
+`@modelcontextprotocol/sdk` and `@modelcontextprotocol/server`) is a
+*second*, additive path to the same problem, not the only one.
+
+**Twelve metric instruments across three files carry this value as a
+label, all traced directly to `toolName`/`event.toolName`:**
+
+- `src/metrics.js` — `recordCall()` → `mcp.tool.calls` (line 110),
+  `recordError()` → `mcp.tool.errors` (116), `recordSilentFailure()` →
+  `mcp.tool.silent_failures` (123), `recordDuration()` →
+  `mcp.tool.duration` (129), `recordTokens()` → `mcp.tool.tokens.total`
+  (136), `recordCost()` → `mcp.tool.cost.total` (143) — six instruments,
+  one shared `ATTR_GEN_AI_TOOL_NAME` key.
+- `src/thrash/emitter.js:100-105` — one `metricAttrs` object,
+  `{ [ATTR_GEN_AI_TOOL_NAME]: event.toolName }`, shared across five
+  instruments: `detected`, `length`, `wastedTokens`, `wastedCostUsd`,
+  `duration`. That module's own docblock (lines 16-20) already excludes
+  `mcp.failure.fingerprint`/`mcp.loop.session_id` from every metric here
+  as "unbounded, per-caller values" — the same reasoning this entry
+  applies to `gen_ai.tool.name`, which the docblock does not apply it to.
+- `src/schema-drift/emitter.js:83-88` — the `detected` counter,
+  `{ [ATTR_GEN_AI_TOOL_NAME]: event.toolName, ... }`, one instrument.
+  `event.toolName` here comes from a `tools/list` response's own
+  registered-tool entries (not a `tools/call` request), so this one
+  instance genuinely does depend on how many tools are registered, not on
+  arbitrary request content — worth distinguishing from the other eleven.
+
+**`mcp.tool.model` shares the same root cause, and its own docblock says
+so.** `readModel()` (`src/cost/extractor.js:83-97`) returns the first
+non-empty string found at `result.model`/`result.usage.model`/
+`result._meta.model` — a tool's own response content, not checked against
+`DEFAULT_PRICING`'s keys or any other closed list. `src/metrics.js:60-62`'s
+docblock states the justification explicitly: *"Model names are bounded in
+practice by how many distinct models a deployment actually calls, the
+same cardinality argument this package already relies on for
+`gen_ai.tool.name` on every other counter."* If that argument doesn't
+hold for `gen_ai.tool.name` — and the request-content reachability above
+says it doesn't — it doesn't hold here either, by the docblock's own
+citation. One real difference, not present for `gen_ai.tool.name` at all:
+`mcp.tool.model` does pass through a shape gate, `isValidModelId()`
+(`src/cost/calculator.js:46,61-62` — `/^[A-Za-z0-9._:/@-]{1,256}$/`),
+wired into `applyCostAttribution()` at `src/instrument.js:919-923` (ADR
+019 Part 2). That bounds the *length and character set* of any one value,
+the same way `error.type` is bounded below — it does not bound the *size
+of the set* of distinct values a generous 256-character identifier
+pattern still admits, so the cardinality concern stands even though the
+"zero validation" framing that's accurate for `gen_ai.tool.name` isn't
+quite accurate here.
+
+**`error.type` reaches `mcp.tool.errors` despite `mcp.failure.error_class`
+being deliberately excluded from `METRIC_SAFE_ATTRIBUTES` for exactly this
+reason — a gap in the mechanism, not just this value.**
+`METRIC_SAFE_ATTRIBUTES` (`src/fingerprint/attributes.js:87`) is
+`Object.freeze([ATTRIBUTE_KEYS.CATEGORY, ATTRIBUTE_KEYS.ORIGIN])` —
+`ERROR_CLASS` is pointedly not in that list, and that file's own docblock
+(lines 24-33) explains why: `err.name`, capped at 128 characters but "not
+pattern-scrubbed... a class name isn't expected to contain structured PII
+shapes, but nothing enforces that." Yet the *identical underlying value*
+still reaches a metric label: `error.type` (`ATTR_ERROR_TYPE = 'error.type'`,
+`src/attributes.js:37`) is computed at `src/instrument.js:1715` —
+`String(err?.name ?? 'Error').slice(0, MAX_ERROR_CLASS_LENGTH)`, the same
+128-character cap `error_class` uses, via the same shared constant — and
+passed straight into `recordError()` (`src/instrument.js:1762`) →
+`mcp.tool.errors`. `METRIC_SAFE_ATTRIBUTES` never gets consulted for this
+value at all, because `ATTR_ERROR_TYPE` is tracked in `src/attributes.js`
+as a spec-defined OTel semantic-convention attribute, a separate
+governance surface from `src/fingerprint/attributes.js`'s
+fingerprint-specific one. The allowlist's protection only covers
+attributes that flow through the module it lives in — it has no way to
+stop a spec attribute, set directly by `instrument.js`/`metrics.js`, from
+carrying the exact value the allowlist was built to keep off a label.
+`error.type` is length-bounded, same as `error_class` — it is not
+*set*-bounded, and `METRIC_SAFE_ATTRIBUTES` was never in a position to
+apply its judgment to it either way.
+
+**The actual consequence: silent loss of per-tool granularity, not a
+memory leak or a crash — and the protection is entirely the host's, not
+this library's.** This library never constructs a `MeterProvider`
+(`src/metrics.js`'s `setupMeter()` resolves whatever the host application
+registered, or a no-op). The installed `@opentelemetry/sdk-metrics@2.9.0`
+implements the OTel spec's default cardinality limit — 2000 distinct
+attribute-combinations per instrument
+(`node_modules/@opentelemetry/sdk-metrics/build/src/state/DeltaMetricProcessor.js`,
+`MetricCollector.js:68`'s `?? 2000` default). The 2001st+ distinct
+combination on any one instrument collapses into a shared
+`{'otel.metric.overflow': true}` bucket rather than growing without
+bound. So the mechanical failure mode, once a deployment crosses that
+threshold on any one of the twelve instruments above, is: every
+additional distinct `gen_ai.tool.name` (or `mcp.tool.model`, or
+`error.type`) value's calls/errors/duration/etc. silently merge into one
+undifferentiated overflow series — a real observability degradation
+(exactly the per-tool signal these metrics exist to provide, lost,
+silently), but bounded memory, not a leak. Two caveats this library
+cannot control or verify: (1) that protection depends entirely on the
+host's own `@opentelemetry/sdk-metrics` version and reader actually
+implementing the spec's cardinality-limit feature — an older SDK, or a
+non-compliant custom reader, has no equivalent backstop; (2) this library
+applies **no cap of its own** on `gen_ai.tool.name` (nothing — no length
+limit, no character allowlist, no dedup ceiling), unlike the 128-character
+cap it does apply to `error_class`/`error.type`. The self-imposed
+mitigation this codebase already uses elsewhere for exactly this class of
+risk was simply never applied to the attribute this entry is about.
+
+**This has not been previously investigated, and two existing ADRs assert
+the opposite as settled fact — both need to be read as superseded by this
+entry, not as still-current.**
+
+- `docs/adr/012-tracker-lifecycle-and-shared-state.md:580-584`: *"`mcp.tool.cost.total`
+  is already exported today with exactly `gen_ai.tool.name` +
+  `mcp.tool.model` — both metric-safe, bounded labels (verified directly
+  against a running exporter while building
+  `dashboards/grafana-mcp-health.json`...)."* What was verified there is
+  that the label mechanism exports correctly, not that the underlying
+  value space is bounded — this entry is the first place that assumption
+  is actually tested, and it doesn't hold.
+- `docs/adr/010-schema-drift.md:280-284`: *"attributes `gen_ai.tool.name`
+  (the existing attribute already used as a metric label on every other
+  `mcp.tool.*` counter... so this isn't a new cardinality precedent, it's
+  reusing one already accepted)."* That ADR explicitly built a thirteenth
+  consumer of this value on the strength of it having been "already
+  accepted" — a precedent this entry finds was never actually established,
+  only assumed and then propagated forward.
+
+Neither passage should be treated as a live justification for
+`gen_ai.tool.name`'s cardinality safety going forward; this entry is that
+re-examination, and the correction lives here rather than by rewriting
+either ADR's original text, matching this file's own established
+convention (entries 6, 7, 8 above all carry forward corrections as
+appended updates, not edits to the original reasoning).
+
+**Possible directions, not decided — each has a real cost, and this entry
+takes none of them:**
+
+- **Validate `toolName` against the server's live registered-tool set
+  before it reaches any sink** (span attribute, metric label, or the span
+  name itself) — closes the gap at the source, but needs a decision about
+  what happens to a genuinely unknown name: reject the call outright
+  (a behavior change on the JSON-RPC error path this project has
+  historically been careful about — see entry 3's own "Pre-handler
+  parse-failure gap" for how sensitive that path already is), or record it
+  differently (see below) while still letting the call fail normally.
+- **Bucket an unrecognized tool name to a fixed placeholder (e.g.
+  `"unknown"`) on metric labels specifically, while leaving the span
+  attribute untouched** — bounds cardinality without touching the
+  JSON-RPC error path at all, but loses per-unknown-tool metric signal
+  entirely (every bad tool name, or every not-yet-registered dynamic one,
+  collapses into one bucket — indistinguishable from every other one, the
+  same shape of loss the SDK's own overflow bucket already produces once
+  cardinality crosses 2000, just triggered deliberately and much earlier).
+- **Do nothing beyond documenting it** — the failure mode is real but
+  bounded (per-instrument overflow, not unbounded memory), and a
+  deployment with genuinely low tool-name cardinality (the common case)
+  is unaffected regardless. This is the option already in effect as of
+  this entry.
+
+Any of the above needs its own scoped decision before code changes, per
+this project's own established practice for exactly this class of
+tradeoff (ADR 011, ADR 016, ADR 018, ADR 019, ADR 020 were all argued
+through an ADR before implementation) — not something to patch inline
+alongside this entry.

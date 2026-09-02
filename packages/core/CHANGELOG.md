@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Documentation — `errorRecording.mode` scoping correction
+
+- Clarified that `errorRecording.mode` controls only the span this
+  library creates for the current `tools/call`/`tools/list` — it has no
+  effect on exception content any other instrumentation in the same
+  process (an APM agent, HTTP or framework auto-instrumentation, anything
+  else wrapping the handler) independently records onto its own span for
+  the same rethrown error. Since no mode mutates the original `err`, that
+  raw content can still land in the same trace, one span up, regardless
+  of mode — including `'none'`, which was previously worded in a way that
+  could read as a trace-wide guarantee rather than a span-scoped one.
+  Confirmed empirically (a real ambient context manager, an outer span
+  recording the rethrown error, `InMemorySpanExporter`) — see
+  `docs/known-gaps.md` entry 10's 2026-09-01 update for the full
+  reproduction and reasoning. README's "Error recording" and "What this
+  library records" sections updated accordingly. No code changed — the
+  underlying behavior (and the exposure at the default `'full'` mode) was
+  already accurate and unchanged; only the description of what
+  `errorRecording.mode` scopes to was incomplete.
+
 ## 0.13.0
 
 Closes the two open items from `docs/known-gaps.md` entry 10 (a

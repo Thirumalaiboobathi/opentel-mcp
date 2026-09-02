@@ -1,0 +1,67 @@
+name: Release
+
+# Triggered by `git push --tags` (CONTRIBUTING.md's "Release checklist",
+# step 5) — `npm version <bump>` already creates a `vX.Y.Z` tag from the
+# exact commit whose package.json carries that version, so publishing off
+# the tag publishes the version that's actually in the tree, atomically.
+# No change to steps 1-5 of that checklist; this replaces step 6 (`npm
+# publish`, previously run by hand) with the same command run here instead,
+# plus `--provenance` — which npm can only generate inside a supported CI
+# provider's OIDC context (GitHub Actions), never from a local machine.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm to obtain the OIDC token `--provenance` signs the
+      # published package against — the attestation links this exact run
+      # and commit to what gets published.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Re-verified here, not merely trusted from whatever ran before the
+      # tag was pushed: a tag pushed without following the local checklist
+      # (or pushed from a stale branch) must not reach npm just because a
+      # human meant to run these first. `verify:tarball` is also wired into
+      # packages/core's own `prepublishOnly`, so `npm publish` below fails
+      # closed on it regardless — this is a second, earlier checkpoint, not
+      # the only one, so a bad release fails before the publish attempt.
+      - name: Run tests
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Verify the packed tarball is consumable under strict TypeScript
+        run: npm run verify:tarball
+
+      # Only packages/core is published — the workspace root and
+      # packages/ui are both "private": true. --provenance requires the
+      # id-token: write permission above and a supported CI provider;
+      # authentication itself still comes from NODE_AUTH_TOKEN (an npm
+      # automation token stored as the NPM_TOKEN repo secret), which
+      # provenance does not replace.
+      - name: Publish packages/core to npm
+        run: npm publish --workspace=packages/core --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
