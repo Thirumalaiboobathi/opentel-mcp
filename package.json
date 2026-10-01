@@ -32,5 +32,8 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Thirumalaiboobathi/opentel-mcp.git"
+  },
+  "dependencies": {
+    "rollup": "^4.62.2"
   }
 }
