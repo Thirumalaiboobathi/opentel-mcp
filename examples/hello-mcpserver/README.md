@@ -28,8 +28,8 @@ stdout carries only the JSON-RPC response:
 {"result":{"content":[{"type":"text","text":"{\"echoed\":\"hello from McpServer\"}"}]},"jsonrpc":"2.0","id":1}
 ```
 
-stderr carries the span (both captured from a real run of the command
-above):
+stderr carries the span, then the metrics (all captured from a real run
+of the command above):
 
 ```
 {
@@ -50,6 +50,8 @@ above):
   status: { code: 1 },
   events: []
 }
+[opentel-mcp metrics] mcp.tool.calls{gen_ai.tool.name=echo,mcp.method.name=tools/call} = 1
+[opentel-mcp metrics] mcp.tool.duration{gen_ai.tool.name=echo,mcp.tool.outcome=success} count=1 avg=3.7ms
 ```
 
 `kind: 1` is `SpanKind.SERVER`. Identical shape to `examples/hello-server`'s
@@ -58,3 +60,10 @@ which MCP server API you build on. Attribute names follow the [MCP semantic conv
 (Development-stage spec) — see the main README's "Semantic conventions"
 section and ADR 004. `mcp.tool.argument_count` is opentel-mcp's own
 custom addition, not part of the spec.
+
+The metrics lines (v0.15.0+, ADR 023) are a forced flush, not the normal
+5-second periodic export — this one-shot piped-input run exits as soon
+as stdin closes, long before that interval, so `server.js` flushes once
+via `process.on('beforeExit', ...)` right before exiting. A real,
+long-running server sees the same lines appear on their own, repeating
+every 5 seconds, with no equivalent code needed.

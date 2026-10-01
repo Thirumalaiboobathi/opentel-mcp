@@ -89,10 +89,19 @@ async function getUiVersion() {
  *   collector: import('./collector-span-processor.js').CollectorSpanProcessor,
  *   statelessTransport?: boolean | 'auto',
  *   spaHtml?: string,
- * }} options
+ *   demo?: boolean,
+ * }} options `demo` (ADR 022, v0.1.0 publish): passed through to `/api/meta`'s detector reasons and its own
+ *   `demo` field — set only by the standalone CLI's `--demo` flag, never by `withUI()`. See
+ *   `describeInMemoryTrackerAvailability()`'s own docblock (`meta.js`) for why it's scoped that way.
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void}
  */
-export function createRequestHandler({ instrumentedServer, collector, statelessTransport = 'auto', spaHtml = PLACEHOLDER_HTML }) {
+export function createRequestHandler({
+  instrumentedServer,
+  collector,
+  statelessTransport = 'auto',
+  spaHtml = PLACEHOLDER_HTML,
+  demo = false,
+}) {
   const buffer = collector.buffer;
 
   return function handleRequestSync(req, res) {
@@ -141,12 +150,13 @@ export function createRequestHandler({ instrumentedServer, collector, statelessT
     if (url.pathname === '/api/meta') {
       const [coreVersion, uiVersion] = await Promise.all([getCoreVersion(), getUiVersion()]);
       const { shape } = inspectTransport(instrumentedServer);
-      const detectorOptions = { instrumentedServer, statelessTransport };
+      const detectorOptions = { instrumentedServer, statelessTransport, demo };
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
           coreVersion,
           uiVersion,
+          demo,
           transport: { shape },
           buffer: { capacity: buffer.capacity, size: buffer.size, totalPushed: buffer.totalPushed },
           detectors: {

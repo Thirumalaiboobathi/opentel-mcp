@@ -18,6 +18,26 @@ to your tools' code.
 opentel-mcp is the only Node.js MCP instrumentation library that ties
 tool calls to LLM cost.
 
+## See it locally
+
+```bash
+npx opentel-mcp-ui --demo
+```
+
+Opens a dashboard at `http://127.0.0.1:4319` — no MCP server, no
+Prometheus, no Collector to stand up first. It's seeded with realistic
+fixture data showing exactly what this README is about: tool calls that
+returned `isError: true` inside a successful response, rendered as the
+clean spans a standard OTel setup would show, side by side with what
+opentel-mcp actually caught.
+
+<!-- TODO: screenshot/GIF of the dashboard here -->
+
+Drop `--demo` and point your own instrumented server's `exporterUrl` at
+it to see real traffic instead — see
+[`opentel-mcp-ui`'s README](https://www.npmjs.com/package/opentel-mcp-ui)
+for the two-minute walkthrough.
+
 ## The problem
 
 Your AI agent calls 15 MCP tools across 3 servers this turn. One tool
@@ -38,6 +58,15 @@ npm install opentel-mcp @opentelemetry/api
 
 opentel-mcp is an ES module — add `"type": "module"` to package.json.
 
+If you're starting from a blank project to try the quickstart below
+(rather than adding opentel-mcp to an MCP server you already have), you
+also need the MCP SDK and `zod` — the quickstart's own server and tool
+definitions, not opentel-mcp's dependencies:
+
+```bash
+npm install @modelcontextprotocol/sdk zod
+```
+
 ## 30-second quickstart
 
 ```js
@@ -50,7 +79,7 @@ const server = new McpServer({ name: 'my-server', version: '1.0.0' });
 
 // Wraps every tool registered below. Must run BEFORE server.tool() —
 // see "Ordering constraint" below for why.
-instrumentMcpServer(server, {
+const instrumented = instrumentMcpServer(server, {
   serviceName: 'my-mcp-server', // shows up on your traces
   setupNodeSdk: true, // dev mode: prints traces to your terminal
 });
@@ -62,6 +91,17 @@ server.tool('echo', { text: z.string() }, async ({ text }) => ({
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// Only needed to see metrics (below) immediately when piping ONE request
+// in and exiting right after, like the "See it working" example does —
+// a real, long-running server sees the same lines on their own, every 5
+// seconds, with no extra code.
+let flushed = false;
+process.on('beforeExit', () => {
+  if (flushed) return;
+  flushed = true;
+  instrumented.shutdown();
+});
 ```
 
 That's it. Every tool call now emits a trace. Wire an exporter to see them
@@ -86,6 +126,21 @@ attributes: {
 
 No dashboard needed — `setupNodeSdk: true`'s dev exporter printed this
 directly. Point it at a real backend later; see "Two modes" below.
+
+**Metrics print too (v0.15.0+)** — within 5 seconds (not the default
+60-second export interval), a compact one-line-per-metric summary follows
+on stderr, reusing the exact `mcp.tool.*` instruments documented in
+"Metrics" below:
+
+```
+[opentel-mcp metrics] mcp.tool.calls{gen_ai.tool.name=echo,mcp.method.name=tools/call} = 1
+[opentel-mcp metrics] mcp.tool.duration{gen_ai.tool.name=echo,mcp.tool.outcome=success} count=1 avg=0.4ms
+```
+
+No extra configuration, no `@opentelemetry/sdk-metrics` setup of your
+own — `setupNodeSdk: true` now does for metrics what it's always done for
+traces. See "Dev-mode metrics" below for exactly what this does and
+doesn't change.
 
 ---
 
@@ -240,7 +295,17 @@ Runnable end-to-end coverage lives in `test/instrument.v2.test.js` and
 
 An MCP tool can fail two ways: it can throw, or it can return
 `isError: true` on an otherwise-successful response (the case from "The
-problem" above). opentel-mcp treats both the same way — span marked
+problem" above) — exactly like the quickstart's `echo` tool, but with
+`isError: true` added and no `throw` involved:
+
+```js
+server.tool('fetch_weather', { city: z.string() }, async ({ city }) => ({
+  isError: true,
+  content: [{ type: 'text', text: `couldn't reach the weather service for ${city}` }],
+}));
+```
+
+opentel-mcp treats both failure shapes the same way — span marked
 `ERROR`, nothing thrown, the result returned to the caller unchanged:
 
 ```
@@ -273,11 +338,17 @@ success/failure through span status, not an attribute. Source of truth:
 
 ### Metrics
 
-Four `mcp.tool.*` metrics via `@opentelemetry/api`'s Metrics API — same
-API-only pattern as tracing (see "Two modes" below): nothing is recorded
-until a `MeterProvider` is registered. Set `enableMetrics: false` to opt
-out even when one is; tracing is unaffected either way. Source of truth:
-`src/metrics.js`.
+The four base `mcp.tool.*` call/duration metrics below, via
+`@opentelemetry/api`'s Metrics API — same API-only pattern as tracing
+(see "Two modes" below): nothing is recorded until a `MeterProvider` is
+registered — **except under `setupNodeSdk: true`, which registers one for
+you (v0.15.0+); see "Dev-mode metrics" below.** Set `enableMetrics: false`
+to opt out even when one is (dev-mode included); tracing is unaffected
+either way. Source of truth: `src/metrics.js`. Twelve metrics exist
+across the library in total — this section's four, plus two cost/token
+metrics ("Cost & Token Attribution" below), five Agent Thrash Detection
+metrics ("Agent Thrash Detection" below), and one schema-drift metric
+("Tool schema drift detection" below).
 
 | Metric | Type | Unit | Attributes | Emitted when |
 |---|---|---|---|---|
@@ -332,12 +403,61 @@ instrumentMcpServer(server, {});
 
 `http://localhost:4318` is SigNoz's default local OTLP/HTTP (OpenTelemetry
 Protocol — the wire format traces/metrics travel over) endpoint; point it
-at your own collector in production. `@opentelemetry/sdk-metrics` and
-`@opentelemetry/exporter-metrics-otlp-http` are host-app dependencies —
-opentel-mcp doesn't bundle them (see `package.json`'s `peerDependencies`).
-`@opentelemetry/sdk-trace-node` and `@opentelemetry/exporter-trace-otlp-http`
-are already runtime dependencies of opentel-mcp itself (its `setupNodeSdk:
-true` dev path uses them), so no extra install is needed for those two.
+at your own collector in production. `@opentelemetry/exporter-metrics-otlp-http`
+is a host-app dependency — opentel-mcp doesn't bundle it. `@opentelemetry/sdk-metrics`,
+`@opentelemetry/sdk-trace-node`, and `@opentelemetry/exporter-trace-otlp-http`
+are already runtime dependencies of opentel-mcp itself (`@opentelemetry/sdk-metrics`
+as of v0.15.0, for the dev-mode metrics path below; the other two for
+`setupNodeSdk: true`'s dev tracing path, same as before), so no extra
+install is needed for those three — only the OTLP metrics exporter above
+needs installing yourself.
+
+#### Dev-mode metrics (v0.15.0+)
+
+`setupNodeSdk: true` now also stands up an owned `MeterProvider` — the
+same dev-friendly, zero-config posture tracing has always had under this
+flag, extended to metrics (ADR 023, `docs/adr/023-dev-mode-metrics.md`).
+This is a dev-mode-only exception to the API-only framing above, the same
+way `StderrSpanExporter` (ADR 003) is a dev-mode-only exception for
+tracing — `setupNodeSdk: false` (the default, and the production posture)
+is completely unaffected; metrics stay exactly as API-only as they are
+today.
+
+What it does, under `setupNodeSdk: true` and `enableMetrics` (default
+`true`, same flag that already opts out of metrics generally):
+
+- Builds a `MeterProvider` with a `PeriodicExportingMetricReader` exporting
+  to stderr every 5 seconds (not the SDK's own 60-second default — a
+  quickstart user making a few tool calls should see output in a few
+  seconds, not up to a minute later), via a small custom exporter
+  (`src/exporters/stderr-metrics.js`) — same "stderr, never stdout"
+  reasoning as `StderrSpanExporter` (ADR 003): a `StdioServerTransport`
+  server's JSON-RPC stream lives on stdout, so diagnostic output of any
+  kind must go to stderr instead.
+- Prints one line per instrument × attribute-set, not a JSON dump:
+  counters as `name{attrs} = <value>`, histograms as
+  `name{attrs} count=<n> avg=<sum/count><unit>` — see the quickstart's
+  "See it working" section above for a real example.
+- Shares the exact same `Resource` (service.name, and the pricing-staleness
+  attribute when applicable) the dev `TracerProvider` already builds, so
+  the two signals can never carry different `service.name` values in dev
+  mode.
+- **If a `MeterProvider` is already registered globally** — your own, or
+  anything else's — this is a complete no-op: nothing is overridden, no
+  exception is thrown, and a single `diag.warn` (once per process) says
+  so. `setupMeter()` immediately afterward continues to use whatever was
+  already registered, exactly as it does today.
+- Extends `server.shutdown()` (already attached under `setupNodeSdk: true`)
+  to also flush and shut down the `MeterProvider` it registered, alongside
+  the existing `TracerProvider` shutdown — call it during your process's
+  shutdown sequence, same as before, to avoid losing buffered metric data.
+
+`@opentelemetry/sdk-metrics` is a real (non-dev) dependency of opentel-mcp
+as of this feature — not an optional peer, not a dynamic import with a
+fallback path. See ADR 023's "Dependency strategy" section for the full
+reasoning: its own transitive dependencies were already in this package's
+tree via `@opentelemetry/resources`/`@opentelemetry/sdk-trace-node`, so
+this adds no new package beyond itself.
 
 #### Using the Prometheus exporter instead of OTLP — `service.name` needs an extra option
 
@@ -2621,7 +2741,7 @@ pragmatic choice rather than a spec-pure one.
   revision 2026-07-28, v0.10.0+; see "MCP v2 support" above for what's
   covered and `docs/known-gaps.md` entries 6 and 8 for what isn't yet)
 - @opentelemetry/api ^1.9.0
-- 948 tests, 944 passing + 4 intentionally skipped (`npm test`) — see `test/`
+- 1017 tests, 1013 passing + 4 intentionally skipped (`npm test`) — see `test/`
 - `npm run typecheck` (`tsc --noEmit`) type-checks the public `.d.ts`
   surface (`src/index.d.ts` and friends) — see CONTRIBUTING.md
 
@@ -2701,6 +2821,17 @@ pragmatic choice rather than a spec-pure one.
   narrower thing still open, tracked in `docs/known-gaps.md` entry 6:
   `thrashSessionState`'s session-awareness memory isn't shared across v2's
   per-request calls yet, only the fallback id itself.
+- v0.15.0: "Make it visible" ✓ — a recent audit found that this library's
+  real depth (12 metrics, two-SDK support, a working local dashboard) was
+  mostly invisible to a first-time user. Two fixes, no instrumentation
+  changes: publishing `opentel-mcp-ui` (ADR 022,
+  `docs/adr/022-publish-ui.md`) — previously a working but unpublished,
+  `"private": true` scaffold, now `npx opentel-mcp-ui --demo`-able from a
+  clean machine — and dev-mode metrics under `setupNodeSdk: true` (ADR
+  023, `docs/adr/023-dev-mode-metrics.md`, see "Dev-mode metrics" above),
+  closing the gap where the documented 30-second quickstart emitted
+  stderr spans but none of the 12 `mcp.tool.*`/`mcp.tool.loop.*`/
+  `mcp.tool.schema_drift.*` metrics it leads with.
 - Future: failure clustering + regression detection; recovery hints;
   root-cause chaining across parent spans; alignment with the OTel GenAI
   SIG's MCP semantic conventions when published

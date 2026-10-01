@@ -50,7 +50,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify the packed tarball is consumable under strict TypeScript
+      # packages/ui's own verify:tarball (ADR 022,
+      # docs/adr/022-publish-ui.md) needs dist/index.html already built.
+      - name: Build
+        run: npm run build
+
+      - name: Verify the packed tarball is consumable under strict TypeScript (core) and installs/runs cleanly (ui)
         run: npm run verify:tarball
 
   dependency-audit:
@@ -68,13 +73,24 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # --omit=dev: this is a library (packages/core, the only published
-      # workspace) with three runtime dependencies — everything else in the
-      # tree (vitest, vite, typescript, react, ...) is test/build tooling
-      # that never reaches a consumer's install. A full audit fails on
-      # devDependency transitives no `opentel-mcp` user is ever exposed to,
-      # which trains reviewers to ignore this job; --omit=dev checks what
-      # actually ships.
+      # This job must audit only what packages/core and packages/ui
+      # (ADR 022, docs/adr/022-publish-ui.md) actually ship — not this
+      # monorepo's own dev tooling, and not examples/* (real npm
+      # workspaces with their own real, non-dev @modelcontextprotocol/sdk
+      # dependency, pulling in express/hono/ajv transitively). `npm audit`,
+      # even with `--omit=dev` and even run from inside packages/core/,
+      # scans the ENTIRE installed tree regardless of cwd or `--workspace`
+      # (confirmed empirically — both still report examples/*'s findings);
+      # there is no flag that actually scopes the scan itself, only ones
+      # that filter which project's package.json is treated as "the root"
+      # for reporting, which doesn't change what gets scanned. So each
+      # package is packed and installed into its own clean, throwaway
+      # project below — the exact dependency tree a real `npm install
+      # opentel-mcp` / `npm install opentel-mcp-ui` produces, nothing
+      # hoisted in from a sibling workspace — and audited there instead.
+      # Same two-package split `verify:tarball` already makes, for the
+      # same underlying reason (packages/core and packages/ui are the
+      # only two workspaces anyone actually installs).
       #
       # --audit-level=high: `npm audit` prints every finding regardless of
       # this flag — it only controls the exit code. Gating on `high` means
@@ -82,5 +98,24 @@ jobs:
       # meaningfully exploitable through this library's own usage) don't
       # block an unrelated PR, while a genuinely serious finding still
       # fails the build instead of sitting in a log nobody reads.
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Audit packages/core's actual published dependency tree
+        run: |
+          set -e
+          pack_dir=$(mktemp -d)
+          consumer_dir=$(mktemp -d)
+          npm pack --workspace=packages/core --pack-destination "$pack_dir"
+          cd "$consumer_dir"
+          npm init -y >/dev/null
+          npm install "$pack_dir"/opentel-mcp-*.tgz
+          npm audit --omit=dev --audit-level=high
+
+      - name: Audit packages/ui's actual published dependency tree
+        run: |
+          set -e
+          pack_dir=$(mktemp -d)
+          consumer_dir=$(mktemp -d)
+          npm pack --workspace=packages/ui --pack-destination "$pack_dir"
+          cd "$consumer_dir"
+          npm init -y >/dev/null
+          npm install "$pack_dir"/opentel-mcp-ui-*.tgz
+          npm audit --omit=dev --audit-level=high

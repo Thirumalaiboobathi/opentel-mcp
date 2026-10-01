@@ -16,7 +16,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
     "bench": "npm run bench --workspace=packages/core",
-    "verify:tarball": "npm run verify:tarball --workspace=packages/core"
+    "verify:tarball": "npm run verify:tarball --workspace=packages/core && npm run verify:tarball --workspace=packages/ui"
   },
   "engines": {
     "node": ">=20"

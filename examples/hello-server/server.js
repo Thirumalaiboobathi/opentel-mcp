@@ -16,6 +16,10 @@
  * response on stdout, untouched. setupNodeSdk's exporter writes to stderr
  * specifically so it's safe to run alongside StdioServerTransport — see
  * ADR 003. Span shape follows the MCP semantic conventions — see ADR 004.
+ * Metrics (v0.15.0+, ADR 023) print to stderr too, every 5 seconds while
+ * the process stays alive — this one-shot piped run exits before that,
+ * so the beforeExit hook below flushes once, same shutdown() a real
+ * long-lived server's own exit sequence would make anyway.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -26,7 +30,7 @@ import { instrumentMcpServer } from 'opentel-mcp';
 const server = new Server({ name: 'hello-server', version: '0.1.0' }, { capabilities: { tools: {} } });
 
 // Must run before any tools/call handler is registered — see ADR 002.
-instrumentMcpServer(server, {
+const instrumented = instrumentMcpServer(server, {
   serviceName: 'hello-server',
   setupNodeSdk: true,
 });
@@ -40,3 +44,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+let flushed = false;
+process.on('beforeExit', () => {
+  if (flushed) return;
+  flushed = true;
+  instrumented.shutdown();
+});
