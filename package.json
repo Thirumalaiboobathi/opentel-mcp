@@ -22,7 +22,10 @@
     "node": ">=20"
   },
   "overrides": {
-    "jsdom": "^29.1.1"
+    "jsdom": "^29.1.1",
+    "vitest": {
+      "jsdom": "^29.1.1"
+    }
   },
   "author": "Thirumalaiboobathi B",
   "license": "MIT",
