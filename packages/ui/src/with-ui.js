@@ -108,7 +108,9 @@ export function withUI(instrumentedServer, options = {}) {
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, () => {
+    // ADR 022 (v0.1.0 publish): loopback only by default -- see bin/opentel-mcp-ui.js's
+    // identical comment for why this has no host override.
+    server.listen(port, '127.0.0.1', () => {
       const address = server.address();
       const actualPort = typeof address === 'object' && address ? address.port : port;
       const url = `http://localhost:${actualPort}`;

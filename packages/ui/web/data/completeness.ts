@@ -34,6 +34,18 @@ export function computeCompleteness(meta: MetaResponse | null): Completeness {
     return { level: 'unknown', message: 'Completeness unknown — waiting for /api/meta.' };
   }
 
+  // ADR 022 (v0.1.0 publish): --demo mode has no live server at all, so the
+  // "session-oriented transport, tracker state unconfirmed" wording below
+  // would be actively wrong here — there is no transport to be unconfirmed
+  // about. Checked before the detector-status logic, same short-circuit
+  // describeInMemoryTrackerAvailability() (meta.js) applies server-side.
+  if (meta.demo) {
+    return {
+      level: 'unknown',
+      message: 'Demo mode — fixture spans, not live detector output. Point a real instrumented server at this dashboard to see tracker completeness.',
+    };
+  }
+
   const unavailable = namesWithStatus(meta.detectors, 'unavailable');
   const unknown = namesWithStatus(meta.detectors, 'unknown');
 

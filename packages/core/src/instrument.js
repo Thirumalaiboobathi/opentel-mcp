@@ -4,13 +4,15 @@
 
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
-import { trace, diag, SpanStatusCode, SpanKind } from '@opentelemetry/api';
+import { trace, metrics, diag, SpanStatusCode, SpanKind } from '@opentelemetry/api';
 import { getV1Sdk, getV2Sdk } from './sdk/detect.js';
 import { NodeTracerProvider, SimpleSpanProcessor, BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import { MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { resolveOptions } from './config.js';
 import { StderrSpanExporter } from './exporters/stderr.js';
+import { StderrMetricExporter } from './exporters/stderr-metrics.js';
 import { setupMeter } from './metrics.js';
 import { computeFingerprint, MAX_ERROR_CLASS_LENGTH } from './fingerprint/compose.js';
 import { toSpanAttributes, ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
@@ -697,9 +699,31 @@ function assertInstrumentFirst(server, resolved) {
   }
 }
 
+// ADR 023 (v0.15.0): dev-mode metrics' export interval under
+// setupNodeSdk: true — 5s, not @opentelemetry/sdk-metrics'
+// PeriodicExportingMetricReader's own 60s default. A quickstart user
+// making a few tool calls and watching their terminal should see output
+// within a few seconds, not up to a minute later. Not currently exposed
+// as a configurable option — same "no configurable knobs" posture
+// StderrSpanExporter already takes.
+const DEV_METRICS_EXPORT_INTERVAL_MS = 5000;
+
+// Guards the "a MeterProvider is already registered, dev metrics skipped"
+// diagnostic below (ADR 023) so it fires once per process, same
+// once-per-process pattern config.js's warnedServiceNameIgnored/
+// warnedPricingStale already establish.
+let warnedMeterProviderAlreadyRegistered = false;
+
+// Test-only, same purpose as config.js's __resetServiceNameWarnedForTests/
+// __resetPricingStaleWarnedForTests. Not part of the public API.
+export function __resetMeterProviderWarnedForTests() {
+  warnedMeterProviderAlreadyRegistered = false;
+}
+
 /**
  * Resolves the Tracer to use for this server, optionally standing up an
- * owned NodeTracerProvider first.
+ * owned NodeTracerProvider (and, per ADR 023, an owned dev-mode
+ * MeterProvider) first.
  *
  * @param {import('@modelcontextprotocol/sdk/server/index.js').Server} server
  * @param {Required<import('./config.js').InstrumentOptions>} resolved
@@ -724,13 +748,73 @@ function setupTracer(server, resolved) {
         ? { [ATTR_MCP_PRICING_DEFAULT_TABLE_LAST_VERIFIED]: DEFAULT_PRICING_LAST_VERIFIED }
         : {};
 
-    const provider = new NodeTracerProvider({
-      resource: resourceFromAttributes({ 'service.name': resolved.serviceName, ...pricingResourceAttributes }),
-      spanProcessors,
-    });
+    // ADR 023: shared between the dev TracerProvider below and the dev
+    // MeterProvider further down, so service.name (and the pricing
+    // resource attribute) can never drift between the two signals in dev
+    // mode — one Resource construction, not two independently-built ones.
+    const resource = resourceFromAttributes({ 'service.name': resolved.serviceName, ...pricingResourceAttributes });
+
+    const provider = new NodeTracerProvider({ resource, spanProcessors });
     provider.register();
 
-    server.shutdown = () => provider.shutdown();
+    // ADR 023 (v0.15.0): dev-mode metrics. Only attempted when metrics
+    // aren't separately opted out via enableMetrics: false — a host who's
+    // already said "no metrics from this library" via that flag gets
+    // exactly that, with no new interaction between the two options to
+    // reason about.
+    let meterProvider = null;
+    if (resolved.enableMetrics) {
+      const candidateMeterProvider = new MeterProvider({
+        resource,
+        readers: [
+          new PeriodicExportingMetricReader({
+            exporter: new StderrMetricExporter(),
+            exportIntervalMillis: DEV_METRICS_EXPORT_INTERVAL_MS,
+          }),
+        ],
+      });
+
+      // metrics.setGlobalMeterProvider() returns false (documented,
+      // public .d.ts return type — not an internal detail) when a
+      // MeterProvider is already globally registered. In that case the
+      // ALREADY-registered provider — whoever's it is — keeps being what
+      // setupMeter() resolves to immediately below; candidateMeterProvider
+      // is never used for anything and must be shut down immediately
+      // rather than merely left unreferenced: @opentelemetry/sdk-metrics'
+      // MeterProvider constructor already called
+      // PeriodicExportingMetricReader's onInitialized() (confirmed by
+      // reading its source) — i.e. its setInterval is already running
+      // from the moment `new MeterProvider(...)` above returned, BEFORE
+      // this registration attempt — so an un-shut-down loser here would
+      // tick forever, every DEV_METRICS_EXPORT_INTERVAL_MS, exporting an
+      // empty ResourceMetrics (nothing ever creates an instrument on an
+      // abandoned provider) to a StderrMetricExporter nobody reads.
+      // Fire-and-forget, never awaited: shutdown must not block this
+      // synchronous setup path, and a rejection here must never throw
+      // past it (never-throw) — this is purely cleanup of a provider
+      // nothing else will ever reference again.
+      const registered = metrics.setGlobalMeterProvider(candidateMeterProvider);
+      if (registered) {
+        meterProvider = candidateMeterProvider;
+      } else {
+        candidateMeterProvider.shutdown().catch(() => {});
+        if (!warnedMeterProviderAlreadyRegistered) {
+          warnedMeterProviderAlreadyRegistered = true;
+          diag.warn(
+            'opentel-mcp: setupNodeSdk is true, but a MeterProvider is already registered globally — ' +
+              'dev-mode stderr metrics (ADR 023) were not set up, and the existing MeterProvider was left ' +
+              'untouched. This mcp.tool.* metrics will still be recorded through it as normal; only the ' +
+              "convenience stderr printout is skipped. Remove whatever registered a MeterProvider before " +
+              'instrumentMcpServer() ran if you intended to use the dev-mode printout instead.',
+          );
+        }
+      }
+    }
+
+    server.shutdown = async () => {
+      await provider.shutdown();
+      if (meterProvider) await meterProvider.shutdown();
+    };
   }
 
   // Always the final step: when setupNodeSdk is false, this picks up

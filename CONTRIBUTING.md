@@ -51,28 +51,40 @@ Run these in order — each step assumes the previous one passed:
 1. `npm test`
 2. `npm run typecheck` — type-checks `src/**/*.d.ts` against the repo tree
    directly (see "Public API types" above).
-3. `npm run verify:tarball` — packs the tarball, installs it into a clean
-   project *outside* this repo, and imports every value and type export
-   parsed from `src/index.d.ts` under `tsc --strict`, plus a runtime import
-   to confirm the package actually loads. This exists because step 2 can't
-   catch a public export that's re-exported from a `.js` file with no
-   matching `.d.ts` — nothing forces that check through the tarball's
-   `files` allowlist and package.json `exports` the way a real consumer's
-   install does. That exact gap shipped in v0.6.0 (TS7016 on `import {
-   computeFingerprint } from 'opentel-mcp'` for any strict consumer),
-   fixed in v0.6.1. Also wired into `prepublishOnly`, so `npm publish`
-   fails closed on this — but run it manually here so a broken release
-   doesn't burn a publish attempt.
-4. `npm version <patch|minor|major>`
+3. `npm run verify:tarball` — for `packages/core`: packs the tarball,
+   installs it into a clean project *outside* this repo, and imports every
+   value and type export parsed from `src/index.d.ts` under `tsc --strict`,
+   plus a runtime import to confirm the package actually loads. This
+   exists because step 2 can't catch a public export that's re-exported
+   from a `.js` file with no matching `.d.ts` — nothing forces that check
+   through the tarball's `files` allowlist and package.json `exports` the
+   way a real consumer's install does. That exact gap shipped in v0.6.0
+   (TS7016 on `import { computeFingerprint } from 'opentel-mcp'` for any
+   strict consumer), fixed in v0.6.1. For `packages/ui` (ADR 022,
+   `docs/adr/022-publish-ui.md`, v0.1.0): packs its own tarball, installs
+   it plus its real peer dependencies into a separate clean project, and
+   runs the installed `bin/opentel-mcp-ui.js --demo` against real HTTP
+   requests — `npm run build` (building `dist/index.html`) must have run
+   first. Both are wired into their own package's `prepublishOnly`, so
+   `npm publish` fails closed on either regardless — but run this manually
+   here so a broken release doesn't burn a publish attempt.
+4. `npm version <patch|minor|major> --workspace=packages/core` and/or
+   `--workspace=packages/ui` — whichever package(s) this release actually
+   changes. The two have independent version numbers and, per ADR 022,
+   independent release cadences: a release touching only one does not
+   require bumping the other.
 5. `git push --tags`
 
 **Step 6 — publishing itself — happens in CI, not on your machine.**
 `.github/workflows/release.yml` triggers on the `vX.Y.Z` tag `npm version`
 just created and pushed, re-runs steps 1-3 as a safety net (a tag pushed
 without the checklist above must not reach npm just because someone meant
-to run these first), then runs `npm publish --workspace=packages/core
---provenance`. Watch the "Release" run in the Actions tab; nothing more to
-do locally. This moved out of your hands specifically so the published
+to run these first), then runs `npm publish --provenance` for each of
+`packages/core`/`packages/ui` whose current version isn't already on the
+registry — skipping whichever package this particular release didn't
+touch, rather than attempting to re-publish its unchanged, already-live
+version. Watch the "Release" run in the Actions tab; nothing more to do
+locally. This moved out of your hands specifically so the published
 package carries [npm provenance](https://docs.npmjs.com/generating-provenance-statements)
 — a signed attestation tying the published tarball to the exact commit and
 CI run that built it, visible on the npm package page — which npm can only
@@ -81,7 +93,8 @@ generate inside a supported CI provider's OIDC context, never from a local
 
 **One-time setup, before the first tag-triggered release works:** generate
 an [npm automation token](https://docs.npmjs.com/creating-and-viewing-access-tokens)
-for this package and add it as the `NPM_TOKEN` secret in this repo's
+with publish access to both `opentel-mcp` and `opentel-mcp-ui` and add it
+as the `NPM_TOKEN` secret in this repo's
 GitHub Actions settings (Settings → Secrets and variables → Actions). The
 workflow's `id-token: write` permission is what provenance itself needs;
 `NPM_TOKEN` is the separate, still-required credential that authenticates

@@ -16,10 +16,17 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
     "bench": "npm run bench --workspace=packages/core",
-    "verify:tarball": "npm run verify:tarball --workspace=packages/core"
+    "verify:tarball": "npm run verify:tarball --workspace=packages/core && npm run verify:tarball --workspace=packages/ui"
   },
   "engines": {
     "node": ">=20"
+  },
+  "overrides": {
+    "jsdom": "^29.1.1",
+    "vitest": {
+      "jsdom": "^29.1.1"
+    },
+    "rollup": "4.62.2"
   },
   "author": "Thirumalaiboobathi B",
   "license": "MIT",
