@@ -123,6 +123,20 @@ describe('createServer -- /api/meta reflects BOTH transport modes end-to-end ove
     expect(body.detectors.thrashDetection.status).toBe('unavailable');
     expect(body.detectors.thrashDetection.reason).toContain('ADR 012');
   });
+
+  it('demo: true (standalone CLI --demo) reports demo in the body and demo-appropriate detector reasons, never "re-check after the server connects" (ADR 022)', async () => {
+    await startServer({ instrumentedServer: null, demo: true });
+    const body = await (await fetch(`${baseUrl}/api/meta`)).json();
+    expect(body.demo).toBe(true);
+    expect(body.detectors.thrashDetection.reason).toContain('--demo mode');
+    expect(body.detectors.thrashDetection.reason).not.toContain('re-check');
+  });
+
+  it('demo defaults to false when omitted', async () => {
+    await startServer({ instrumentedServer: { transport: { start() {} } } });
+    const body = await (await fetch(`${baseUrl}/api/meta`)).json();
+    expect(body.demo).toBe(false);
+  });
 });
 
 describe('createServer -- GET /api/spans (SSE)', () => {

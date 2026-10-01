@@ -37,6 +37,7 @@ function metaWith(overrides: Partial<MetaResponse['detectors']> = {}): MetaRespo
   return {
     coreVersion: '0.9.0',
     uiVersion: '0.1.0',
+    demo: false,
     transport: { shape: 'single-connection' },
     buffer: { capacity: 1000, size: 0, totalPushed: 0 },
     detectors: {

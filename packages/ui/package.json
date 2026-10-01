@@ -1,8 +1,7 @@
 {
   "name": "opentel-mcp-ui",
   "version": "0.1.0",
-  "private": true,
-  "description": "Zero-infrastructure local dashboard for opentel-mcp's two-axis observation contract",
+  "description": "Zero-infrastructure local dashboard for opentel-mcp -- the silent failures, cost, and thrash loops standard OTel tracing misses",
   "type": "module",
   "main": "src/index.js",
   "types": "./src/index.d.ts",
@@ -18,7 +17,10 @@
   "files": [
     "src",
     "bin",
-    "dist"
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
@@ -29,7 +31,9 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
     "build": "vite build",
     "dev:web": "vite",
-    "demo": "node demo/populate.js"
+    "demo": "node demo/populate.js",
+    "verify:tarball": "node scripts/verify-tarball.js",
+    "prepublishOnly": "npm run build && npm run verify:tarball"
   },
   "author": "Thirumalaiboobathi B",
   "license": "MIT",
@@ -38,13 +42,17 @@
     "url": "git+https://github.com/Thirumalaiboobathi/opentel-mcp.git",
     "directory": "packages/ui"
   },
+  "bugs": {
+    "url": "https://github.com/Thirumalaiboobathi/opentel-mcp/issues"
+  },
+  "homepage": "https://github.com/Thirumalaiboobathi/opentel-mcp/tree/main/packages/ui#readme",
   "peerDependencies": {
     "opentel-mcp": ">=0.8.0 <1.0.0",
     "@opentelemetry/api": "^1.9.0"
   },
   "dependencies": {},
   "devDependencies": {
-    "opentel-mcp": "^0.9.0",
+    "opentel-mcp": "^0.15.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.220.0",
@@ -60,6 +68,6 @@
     "react-dom": "^19.2.8",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
-    "jsdom": "^30.0.1"
+    "jsdom": "^29.1.1"
   }
 }

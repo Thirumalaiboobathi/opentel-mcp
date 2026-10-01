@@ -5,7 +5,7 @@ This repository is an npm-workspaces monorepo for the `opentel-mcp` project.
 | Package | Path | Description |
 |---|---|---|
 | [`opentel-mcp`](packages/core/README.md) | `packages/core` | OpenTelemetry instrumentation for MCP servers — the published library. |
-| `opentel-mcp-ui` | `packages/ui` | Zero-infrastructure local dashboard for the observation contract (scaffold). |
+| [`opentel-mcp-ui`](packages/ui/README.md) | `packages/ui` | Zero-infrastructure local dashboard for the observation contract — the published CLI (`npx opentel-mcp-ui --demo`). |
 
 Runnable usage examples live under [`examples/`](examples/), and design docs
 (including all ADRs) live under [`docs/`](docs/).

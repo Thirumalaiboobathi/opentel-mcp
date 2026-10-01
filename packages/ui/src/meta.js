@@ -67,10 +67,31 @@ export function inspectTransport(instrumentedServer) {
 
 /**
  * @param {string} trackerLabel - human-readable name for the reason string, e.g. "Thrash detection".
- * @param {{ instrumentedServer: *, statelessTransport?: boolean | 'auto' }} options
+ * @param {{ instrumentedServer: *, statelessTransport?: boolean | 'auto', demo?: boolean }} options -
+ *   `demo` (ADR 022, v0.1.0 publish): set only by the standalone CLI's own `--demo` flag
+ *   (`bin/opentel-mcp-ui.js`) — never by `withUI()`, which can legitimately combine `demo: true`
+ *   (seed fixture spans) with a REAL `instrumentedServer` whose connection state is still a genuine,
+ *   checkable question. `demo` here means "there is no server object at all, not just one that
+ *   hasn't connected yet" — a categorically different fact from every other branch below, so it's
+ *   checked first and short-circuits them all rather than falling through to the generic
+ *   `shape: 'undeterminable'` case (whose "re-check after the server connects" advice is actively
+ *   wrong when there is no server that could ever connect).
  * @returns {{ status: DetectorAvailability, reason: string }}
  */
-export function describeInMemoryTrackerAvailability(trackerLabel, { instrumentedServer, statelessTransport = 'auto' }) {
+export function describeInMemoryTrackerAvailability(
+  trackerLabel,
+  { instrumentedServer, statelessTransport = 'auto', demo = false },
+) {
+  if (demo) {
+    return {
+      status: 'unknown',
+      reason:
+        `${trackerLabel} status not applicable — this is --demo mode, showing fixture spans rather than ` +
+        "output from a live detector. Point a real instrumented server's exporterUrl at this dashboard " +
+        "(see the README's quickstart) to see live tracker status.",
+    };
+  }
+
   if (statelessTransport === true) {
     return {
       status: 'unavailable',

@@ -32,8 +32,8 @@ client would receive:
 {"result":{"content":[{"type":"text","text":"{\"echoed\":\"hello opentel-mcp\"}"}]},"jsonrpc":"2.0","id":1}
 ```
 
-stderr carries the span (this and the line above are both real output
-from running the command above, captured separately):
+stderr carries the span, then the metrics (this and the line above are
+both real output from running the command above, captured separately):
 
 ```
 {
@@ -54,11 +54,20 @@ from running the command above, captured separately):
   status: { code: 1 },
   events: []
 }
+[opentel-mcp metrics] mcp.tool.calls{gen_ai.tool.name=echo,mcp.method.name=tools/call} = 1
+[opentel-mcp metrics] mcp.tool.duration{gen_ai.tool.name=echo,mcp.tool.outcome=success} count=1 avg=1.2ms
 ```
 
 `status.code: 1` is `SpanStatusCode.OK`. `kind: 1` is `SpanKind.SERVER`.
 The tool's actual response is `{"echoed":"hello opentel-mcp"}`, visible in
 the stdout JSON-RPC result.
+
+The metrics lines (v0.15.0+, ADR 023) are a forced flush, not the normal
+5-second periodic export — this one-shot piped run exits before that
+interval, so `server.js` flushes once via `process.on('beforeExit', ...)`
+right before exiting. A real, long-running server sees the same lines
+appear on their own, repeating every 5 seconds, with no equivalent code
+needed.
 
 The span name (`tools/call echo`), kind (`SERVER`), and attribute names
 follow the [MCP semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai)
