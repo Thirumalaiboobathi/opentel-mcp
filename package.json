@@ -25,15 +25,13 @@
     "jsdom": "^29.1.1",
     "vitest": {
       "jsdom": "^29.1.1"
-    }
+    },
+    "rollup": "4.62.2"
   },
   "author": "Thirumalaiboobathi B",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Thirumalaiboobathi/opentel-mcp.git"
-  },
-  "dependencies": {
-    "rollup": "^4.62.2"
   }
 }
