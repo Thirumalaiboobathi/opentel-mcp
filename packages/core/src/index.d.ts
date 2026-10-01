@@ -44,6 +44,12 @@ export interface InstrumentOptions {
    * for opting out of metrics even when a `MeterProvider` **is**
    * registered, not a substitute for that default.
    *
+   * Also gates `setupNodeSdk`'s dev-mode `MeterProvider` (ADR 023,
+   * `docs/adr/023-dev-mode-metrics.md`, v0.15.0+) — `{ setupNodeSdk: true,
+   * enableMetrics: false }` gets dev-mode traces with no dev-mode metrics
+   * at all, the same combination this flag already produces against a
+   * host-registered `MeterProvider`.
+   *
    * @default true
    */
   enableMetrics?: boolean;
@@ -53,11 +59,28 @@ export interface InstrumentOptions {
    * `NodeTracerProvider` (always exporting to stderr; additionally to
    * `exporterUrl` via OTLP/HTTP if set).
    *
+   * **Also stands up a dev-mode `MeterProvider` (ADR 023,
+   * `docs/adr/023-dev-mode-metrics.md`, v0.15.0+)**, gated additionally by
+   * `enableMetrics` (above, default `true`): a `PeriodicExportingMetricReader`
+   * exporting all 12 `mcp.tool.*`/`mcp.tool.loop.*`/`mcp.tool.schema_drift.*`
+   * instruments to stderr every 5 seconds, in a compact
+   * `name{attrs} = value` format — never `@opentelemetry/sdk-metrics`'
+   * own `ConsoleMetricExporter`, which writes to stdout and would corrupt
+   * a `StdioServerTransport` server's JSON-RPC stream (the same ADR 003
+   * reasoning the dev tracer's stderr-only exporter already follows). If
+   * a `MeterProvider` is already registered globally when this runs, this
+   * is a complete no-op — nothing is overridden, no exception is thrown,
+   * and a single `diag.warn` (once per process) names the situation;
+   * metrics continue to flow through whatever was already registered,
+   * exactly as they would with this flag `false`.
+   *
    * When `false` (the default), spans are emitted via whatever OpenTelemetry
    * `TracerProvider` the host application has already registered globally —
    * or dropped silently if none has been registered. This default keeps
    * {@link instrumentMcpServer} from ever overriding a host application's own
-   * OpenTelemetry setup.
+   * OpenTelemetry setup. Metrics behavior is completely unaffected by this
+   * flag being `false` — API-only, exactly as documented in the README's
+   * "Metrics" section, with no dev-mode exception.
    *
    * @default false
    */
@@ -326,9 +349,14 @@ export type DuckTypedMcpServer = {
  *   `options.setupNodeSdk` is `true`, the returned object also gets a
  *   `shutdown()` method that flushes and shuts down the `NodeTracerProvider`
  *   created for it — call it during your process's own shutdown sequence to
- *   avoid losing buffered spans. `shutdown` is typed as optional because it
- *   is only attached at runtime when `setupNodeSdk` is `true`; check for its
- *   presence before calling. The returned object also gets a
+ *   avoid losing buffered spans. As of v0.15.0 (ADR 023), when dev-mode
+ *   metrics were also set up (`enableMetrics` not `false`, and no
+ *   `MeterProvider` was already registered globally — see `setupNodeSdk`'s
+ *   own doc above), the same `shutdown()` call also flushes and shuts down
+ *   that `MeterProvider`, so one call covers both signals. `shutdown` is
+ *   typed as optional because it is only attached at runtime when
+ *   `setupNodeSdk` is `true`; check for its presence before calling. The
+ *   returned object also gets a
  *   `getThrashSummary()` method (v0.6.0) returning a point-in-time,
  *   in-process {@link ThrashSummary} — no OTel involved, nothing sent
  *   anywhere; see the README's "Agent Thrash Detection" section. Unlike

@@ -1,5 +1,103 @@
 # Changelog
 
+## 0.15.0
+
+"Make it visible" — no instrumentation changes, no `tools/call` hot-path
+changes. Phase 1 (ADR 022, `docs/adr/022-publish-ui.md`): publishes
+`opentel-mcp-ui`, previously a working but `"private": true`, unpublished
+scaffold with zero mentions in this README. See
+[`opentel-mcp-ui`'s own CHANGELOG](https://www.npmjs.com/package/opentel-mcp-ui)
+for what changed in that package. Phase 2 (ADR 023,
+`docs/adr/023-dev-mode-metrics.md`): dev-mode metrics under
+`setupNodeSdk: true` — see "Added" below.
+
+### Added
+
+- README: a "See it locally" section near the top, pointing at
+  `npx opentel-mcp-ui --demo` — this library had no documented way for a
+  new reader to see its own output before installing anything.
+- `setupNodeSdk: true` now also stands up an owned `MeterProvider` (ADR
+  023): a `PeriodicExportingMetricReader` exporting all 12 `mcp.tool.*`/
+  `mcp.tool.loop.*`/`mcp.tool.schema_drift.*` instruments to stderr every
+  5 seconds, via a new `StderrMetricExporter` (compact
+  `name{attrs} = value` lines, never a stdout-writing JSON dump — same
+  ADR 003 reasoning `StderrSpanExporter` already follows). Gated
+  additionally by `enableMetrics` (default `true`, unchanged option).
+  Closes the gap where the documented 30-second quickstart emitted
+  stderr spans but none of its 12 metrics. `setupNodeSdk: false` (the
+  default, and the production posture) is completely unaffected — every
+  new code path is gated behind the same existing `setupNodeSdk === true`
+  check `StderrSpanExporter` already uses.
+  - If a `MeterProvider` is already registered globally when this runs
+    (your own, or anything else's), this is a complete no-op: nothing is
+    overridden, no exception is thrown, and a single `diag.warn` (once
+    per process, not once per `instrumentMcpServer()` call) names the
+    situation. Detected via `@opentelemetry/api`'s own documented
+    `boolean` return from `setGlobalMeterProvider()` — not by inspecting
+    internals. The abandoned candidate provider built before that check
+    is shut down immediately (fire-and-forget), closing a leak where its
+    own periodic reader would otherwise tick forever, unused, in the
+    background.
+  - `server.shutdown()` (already attached under `setupNodeSdk: true`) now
+    also flushes and shuts down this `MeterProvider`, alongside the
+    existing `TracerProvider` shutdown it already performed.
+  - `StderrMetricExporter` only reprints a metric when its value has
+    actually changed since the last export. Every instrument here is
+    CUMULATIVE, so without this a single early tool call would otherwise
+    reprint two unchanged lines every 5 seconds for the rest of the
+    process's life — confirmed empirically before this fix shipped, not
+    assumed.
+
+### Changed
+
+- **`@opentelemetry/sdk-metrics` is now a runtime (`dependencies`, not
+  `devDependencies`) dependency of `opentel-mcp`, installed for every
+  user — including under `setupNodeSdk: false`, which never executes any
+  code from it.** Needed at import time for the feature above; moving it
+  to `dependencies` means `npm install opentel-mcp` always pulls it in,
+  regardless of whether a given deployment ever sets `setupNodeSdk: true`.
+  Adds no new transitive dependency: its own two dependencies
+  (`@opentelemetry/core`, `@opentelemetry/resources`) were already in
+  this package's tree via `@opentelemetry/sdk-trace-node`/the existing
+  `@opentelemetry/resources` dependency. See ADR 023's "Dependency
+  strategy" section for the full reasoning, including why an optional-peer
+  + dynamic-import approach was considered and rejected.
+
+### Fixed
+
+- The example servers (`examples/hello-server`, `examples/hello-mcpserver`)
+  never showed a metrics line in their own READMEs' "What you'll see": a
+  single piped `tools/call` request exits the process before the 5-second
+  export interval. Both now flush once via `process.on('beforeExit', ...)`
+  right before the process would otherwise exit — confirmed
+  `StdioServerTransport` does not call its own `close()`/`onclose` on
+  stdin EOF, so `beforeExit` is the one hook that still allows the async
+  flush to complete first.
+- Documentation only, no code/behavior changes:
+  - README claimed "Four `mcp.tool.*` metrics" in a way that read as the
+    library's total metric count. Corrected: four is this section's own
+    base call/duration metrics; twelve exist in total across cost/token
+    attribution (2), Agent Thrash Detection (5), and schema drift (1),
+    each already documented in their own sections.
+  - README's test count was stale at every point it was checked this
+    release; now 1017 tests, 1013 passing + 4 intentionally skipped.
+  - README's SigNoz metrics-wiring example described
+    `@opentelemetry/sdk-metrics` as a host-app dependency opentel-mcp
+    "doesn't bundle" — true before this release, no longer true now that
+    it's a real dependency (see "Changed" above).
+
+### CI
+
+- `dependency-audit` (`.github/workflows/ci.yml`) no longer audits this
+  monorepo's own shared, hoisted `node_modules` — `npm audit`, even with
+  `--omit=dev` and run from inside `packages/core/`, scans the entire
+  installed tree regardless of cwd or `--workspace` (confirmed
+  empirically), so it was reporting findings from `examples/*`'s real
+  `@modelcontextprotocol/sdk` dependency (express/hono/ajv transitives)
+  as if they were this library's own. Now packs and installs each of
+  `packages/core`/`packages/ui` into its own clean, throwaway project —
+  the exact tree a real `npm install` produces — and audits that instead.
+
 ## 0.14.0
 
 Adds `errorRecording.redactor`: a host-supplied hook for content

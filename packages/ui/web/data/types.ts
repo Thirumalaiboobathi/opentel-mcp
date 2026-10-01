@@ -10,6 +10,8 @@ export interface MetaDetector {
 export interface MetaResponse {
   coreVersion: string;
   uiVersion: string;
+  /** True only for the standalone CLI's own `--demo` flag (ADR 022, v0.1.0 publish) — never set by `withUI()`. */
+  demo: boolean;
   transport: { shape: 'single-connection' | 'session-oriented' | 'undeterminable' };
   buffer: { capacity: number; size: number; totalPushed: number };
   detectors: {
