@@ -9,8 +9,45 @@ interface Props {
   selectedCell: MatrixCell | null;
 }
 
-const ROW_HEIGHT = 96;
+// Bug (v0.1.0): a single fixed itemHeight (96) was shorter than the
+// tallest row -- the failureMissed two-card comparison -- at every
+// width this was actually checked at, including plain desktop widths
+// with no wrapping involved. VirtualizedList gives each row an absolutely
+// positioned, fixed-height slot (see VirtualizedList.tsx); content taller
+// than that slot doesn't just clip, it bleeds down into the next row's
+// slot, which is what read as "the next row's tool name overlaps the
+// previous cards." Below MOBILE_BREAKPOINT_PX, SilentFailureFeed.css also
+// stacks the two comparison cards into one column (full card width
+// avoids the pill text wrapping it would otherwise need at ~300px of
+// available content width) -- that layout is taller, so the row height
+// below the breakpoint is taller too, kept in sync with the same
+// breakpoint via `useIsNarrowViewport`.
+const DESKTOP_ROW_HEIGHT = 116;
+const MOBILE_ROW_HEIGHT = 184;
+const MOBILE_BREAKPOINT_PX = 560;
 const LIST_HEIGHT = 480;
+
+function supportsMatchMedia(): boolean {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function';
+}
+
+/** Mirrors the `@media (max-width: ${MOBILE_BREAKPOINT_PX}px)` breakpoint in SilentFailureFeed.css. */
+function useIsNarrowViewport(breakpointPx: number): boolean {
+  const [isNarrow, setIsNarrow] = useState(
+    () => supportsMatchMedia() && window.matchMedia(`(max-width: ${breakpointPx}px)`).matches,
+  );
+
+  useEffect(() => {
+    if (!supportsMatchMedia()) return undefined;
+    const mq = window.matchMedia(`(max-width: ${breakpointPx}px)`);
+    const update = () => setIsNarrow(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, [breakpointPx]);
+
+  return isNarrow;
+}
 
 const CELL_LABELS: Record<MatrixCell, string> = {
   successVisible: 'Successful calls',
@@ -39,6 +76,8 @@ export function SilentFailureFeed({ spans, selectedCell }: Props) {
   const ordered = [...filtered].reverse();
 
   const newIds = useNewlyArrivedIds(filtered);
+  const isNarrow = useIsNarrowViewport(MOBILE_BREAKPOINT_PX);
+  const rowHeight = isNarrow ? MOBILE_ROW_HEIGHT : DESKTOP_ROW_HEIGHT;
 
   return (
     <section className="feed-panel" aria-label="Span feed">
@@ -52,7 +91,7 @@ export function SilentFailureFeed({ spans, selectedCell }: Props) {
 
       <VirtualizedList
         items={ordered}
-        itemHeight={ROW_HEIGHT}
+        itemHeight={rowHeight}
         height={LIST_HEIGHT}
         emptyState={<p className="feed-empty">No spans in this category yet.</p>}
         renderItem={(span) => <FeedRow span={span} cell={activeCell} isNew={newIds.has(span.id)} />}

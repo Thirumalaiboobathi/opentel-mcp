@@ -101,3 +101,21 @@
 .feed-side-detected {
   border-color: var(--border-strong);
 }
+
+/* Mirrors MOBILE_BREAKPOINT_PX in SilentFailureFeed.tsx, which switches
+   the virtualized row height to match this stacked layout -- the two
+   stay in sync deliberately, see that file's comment. Side-by-side
+   columns at this width leave too little space per card (see Sidebar at
+   its collapsed 72px width + this panel's own padding) for the pill text
+   to fit on one line; stacking each card to full width fixes that
+   without shrinking the type. */
+@media (max-width: 560px) {
+  .feed-row-meta {
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+  }
+
+  .feed-comparison {
+    grid-template-columns: 1fr;
+  }
+}

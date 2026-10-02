@@ -1,0 +1,23 @@
+.hero-stat {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  color: var(--text-primary);
+  margin: 0 0 var(--space-6);
+}
+
+.hero-stat-number {
+  color: var(--accent);
+}
+
+.hero-stat-percent {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.hero-stat-empty {
+  font-size: var(--text-lg);
+  font-weight: 500;
+  color: var(--text-secondary);
+}

@@ -27,6 +27,8 @@
  * server).
  */
 
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createServer } from '../src/server.js';
 import { CollectorSpanProcessor } from '../src/collector-span-processor.js';
 import { openBrowser } from '../src/open-browser.js';
@@ -125,6 +127,19 @@ export function main(argv = process.argv.slice(2)) {
   return server;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// `npx`/npm's `node_modules/.bin/opentel-mcp-ui` is a symlink to this file.
+// `import.meta.url` always resolves through symlinks to this file's real
+// path, but `process.argv[1]` is the invoked path -- the symlink itself --
+// so a plain string comparison between the two never matches and this CLI
+// would silently do nothing. Resolve argv[1] through the same symlink
+// before comparing.
+let invokedAsMain = false;
+try {
+  invokedAsMain = realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+} catch {
+  // process.argv[1] doesn't exist on disk (e.g. a REPL or a pipe) -- not a
+  // direct CLI invocation, so fall through to the imported-as-a-module case.
+}
+if (invokedAsMain) {
   main();
 }

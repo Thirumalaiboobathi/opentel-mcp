@@ -5,6 +5,8 @@ export type CompletenessLevel = 'complete' | 'partial' | 'unknown';
 export interface Completeness {
   level: CompletenessLevel;
   message: string;
+  /** Technical detail for a first-time user to skip past -- surfaced as a tooltip, never inline. */
+  detail?: string;
 }
 
 const DETECTOR_LABELS: Record<keyof MetaResponse['detectors'], string> = {
@@ -59,7 +61,13 @@ export function computeCompleteness(meta: MetaResponse | null): Completeness {
   if (unknown.length > 0) {
     return {
       level: 'unknown',
-      message: `Completeness unknown — session-oriented transport, ${unknown.join('/')} tracker state unconfirmed.`,
+      // Plain language for a first-time user (v0.1.1): "session-oriented
+      // transport, thrash/budget/schema drift/tool outcome tracker state
+      // unconfirmed" is backend jargon nobody arrives at this dashboard
+      // already knowing. The technical detail isn't lost, just demoted to
+      // `detail` (rendered as a tooltip, not inline) for whoever wants it.
+      message: "Some tracking can't be confirmed yet for this session.",
+      detail: `Session-oriented transport — ${unknown.join(', ')} tracker state unconfirmed. Pass statelessTransport: true/false to withUI() if you know your deployment topology.`,
     };
   }
 

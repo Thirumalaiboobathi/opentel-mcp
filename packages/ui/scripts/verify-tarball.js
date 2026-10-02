@@ -97,10 +97,18 @@ async function main() {
       fail(`npm install of the packed tarball + peer deps failed:\n\n${error.stdout || error.stderr || error.message}`);
     }
 
-    const binPath = join(consumerDir, 'node_modules', pkg.name, 'bin', 'opentel-mcp-ui.js');
-    console.log(`verify-tarball: starting the installed bin --demo --port=${VERIFY_PORT}...`);
+    // Through node_modules/.bin -- a symlink to bin/opentel-mcp-ui.js, same
+    // as `npx opentel-mcp-ui` resolves and executes. Running the target
+    // file directly (`node .../bin/opentel-mcp-ui.js`) would miss exactly
+    // the bug this gate exists to catch: the CLI's own main-module guard
+    // comparing against the invoked (symlink) path instead of the
+    // symlink's realpath, which makes it exit silently when invoked this
+    // way -- see bin/opentel-mcp-ui.js's guard for the fix.
+    const [binName] = Object.keys(pkg.bin ?? {});
+    const binPath = join(consumerDir, 'node_modules', '.bin', binName);
+    console.log(`verify-tarball: starting the installed bin via node_modules/.bin --demo --port=${VERIFY_PORT}...`);
 
-    child = spawn('node', [binPath, '--demo', `--port=${VERIFY_PORT}`], {
+    child = spawn(binPath, ['--demo', `--port=${VERIFY_PORT}`], {
       cwd: consumerDir,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

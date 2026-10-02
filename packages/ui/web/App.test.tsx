@@ -105,10 +105,24 @@ function mockBackend(spans: SerializedSpan[], meta: MetaResponse) {
   FakeEventSource.instances = [];
 }
 
+/** jsdom has no real layout engine and no `window.matchMedia` -- stub it narrow/wide per `matches`, same shape real browsers expose (SilentFailureFeed's viewport-width hook only needs `.matches` and the listener pair). */
+function stubMatchMedia(matches: boolean) {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => ({
+      matches,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    })),
+  );
+}
+
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
 beforeEach(() => {
+  stubMatchMedia(false);
   mockBackend([], metaWith());
 });
 
@@ -194,6 +208,31 @@ describe('App with spans: observation matrix', () => {
     expect(counts).toEqual(['2', '—', '1', '2']);
   });
 
+  it('ACCEPTANCE: hero stat computes "<missed> of <total failures>" from the same counts as the matrix (1 visible + 2 missed = 2 of 3, 67%)', async () => {
+    const spans = [
+      span({ id: '1', status: 'OK' }),
+      span({ id: '2', status: 'OK' }),
+      span({ id: '3', status: 'ERROR', errorType: 'TypeError' }),
+      span({ id: '4', status: 'ERROR', errorType: 'tool_error' }),
+      span({ id: '5', status: 'ERROR', errorType: 'tool_error' }),
+    ];
+    mockBackend(spans, metaWith());
+    const el = await renderApp();
+
+    const hero = el.querySelector('.hero-stat');
+    expect(hero?.textContent).toContain('2 of 3 failures were invisible to standard OTel');
+    expect(hero?.textContent).toContain('67%');
+  });
+
+  it('hero stat shows a neutral message for zero failures, never a divide-by-zero (0 of 0 / NaN%)', async () => {
+    mockBackend([span({ id: '1', status: 'OK' }), span({ id: '2', status: 'OK' })], metaWith());
+    const el = await renderApp();
+
+    expect(el.querySelector('.hero-stat-empty')?.textContent).toContain('No failures observed yet');
+    expect(el.textContent).not.toContain('NaN');
+    expect(el.textContent).not.toContain('Infinity');
+  });
+
   it('ACCEPTANCE: clicking a matrix cell filters the feed below to that cell', async () => {
     const spans = [
       span({ id: '1', toolName: 'search', status: 'OK' }),
@@ -252,6 +291,66 @@ describe('App with spans: detector banner', () => {
     const line = el.querySelector('.detector-banner-unknown');
     expect(line).not.toBeNull();
     expect(el.querySelector('.detector-banner-unavailable')).toBeNull();
+  });
+
+  it('demo mode shows one small "Demo data" badge, never the four-warning banner or "all four live"', async () => {
+    const demoLive = { status: 'live' as const, reason: 'Thrash detection active — showing --demo mode\'s fixture data, not a live detector.' };
+    const meta: MetaResponse = {
+      ...metaWith(),
+      demo: true,
+      detectors: { thrashDetection: demoLive, costTracking: demoLive, schemaDrift: demoLive, toolOutcome: demoLive },
+    };
+    mockBackend([span({ id: '1' })], meta);
+    const el = await renderApp();
+    expect(el.querySelector('.detector-banner-demo-badge')?.textContent).toContain('Demo data');
+    expect(el.textContent).not.toContain('All four in-memory trackers live');
+    expect(el.querySelectorAll('.detector-banner-line').length).toBe(0);
+  });
+
+  it('collapses detectors that share the exact same reason into one notice naming all of them, not four repeated paragraphs', async () => {
+    const sharedReason =
+      'Thrash detection may be unavailable — this server\'s transport is session-oriented. Pass statelessTransport: true/false to withUI() if you know your deployment topology. (ADR 012)';
+    const notLive = { status: 'unknown' as const, reason: sharedReason };
+    const meta = metaWith({
+      thrashDetection: notLive,
+      costTracking: notLive,
+      schemaDrift: notLive,
+      toolOutcome: notLive,
+    });
+    mockBackend([span({ id: '1' })], meta);
+    const el = await renderApp();
+
+    const lines = el.querySelectorAll('.detector-banner-line');
+    expect(lines.length).toBe(1);
+    expect(lines[0]?.textContent).toContain('Thrash detection');
+    expect(lines[0]?.textContent).toContain('Cost/budget tracking');
+    expect(lines[0]?.textContent).toContain('Schema drift detection');
+    expect(lines[0]?.textContent).toContain('ToolOutcome counting');
+    // The shared sentence (and its withUI() hint) appears once, not four times.
+    expect(el.textContent?.split('Pass statelessTransport').length).toBe(2);
+  });
+});
+
+describe('App with spans: silent-failure feed row sizing (v0.1.1 clipping/overlap fix)', () => {
+  it('uses the taller mobile row height, not the desktop one, once the narrow-viewport media query matches', async () => {
+    stubMatchMedia(false);
+    mockBackend([span({ id: '1', status: 'ERROR', errorType: 'tool_error' })], metaWith());
+    const desktopEl = await renderApp();
+    const desktopRowWrapper = desktopEl.querySelector('.feed-row')?.parentElement as HTMLElement;
+    const desktopHeight = Number(desktopRowWrapper.style.height.replace('px', ''));
+
+    act(() => root?.unmount());
+    container?.remove();
+    container = null;
+    root = null;
+
+    stubMatchMedia(true);
+    mockBackend([span({ id: '1', status: 'ERROR', errorType: 'tool_error' })], metaWith());
+    const mobileEl = await renderApp();
+    const mobileRowWrapper = mobileEl.querySelector('.feed-row')?.parentElement as HTMLElement;
+    const mobileHeight = Number(mobileRowWrapper.style.height.replace('px', ''));
+
+    expect(mobileHeight).toBeGreaterThan(desktopHeight);
   });
 });
 
