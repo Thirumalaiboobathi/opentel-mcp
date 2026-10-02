@@ -93,13 +93,13 @@ describe('describeInMemoryTrackerAvailability -- BOTH transport modes, per accep
     expect(result.reason).toContain('Schema drift detection unavailable');
   });
 
-  it('demo: true short-circuits every other check -- never the "re-check after the server connects" text, which would be wrong when no server exists at all (ADR 022)', () => {
+  it('demo: true short-circuits every other check -- reports live (fixture data stands in for a live detector), never the "re-check after the server connects" text, which would be wrong when no server exists at all (ADR 022, v0.1.1)', () => {
     const result = describeInMemoryTrackerAvailability('Thrash detection', {
       instrumentedServer: null,
       statelessTransport: 'auto',
       demo: true,
     });
-    expect(result.status).toBe('unknown');
+    expect(result.status).toBe('live');
     expect(result.reason).toContain('--demo mode');
     expect(result.reason).not.toContain('re-check');
   });
@@ -110,7 +110,7 @@ describe('describeInMemoryTrackerAvailability -- BOTH transport modes, per accep
       statelessTransport: true,
       demo: true,
     });
-    expect(result.status).toBe('unknown');
+    expect(result.status).toBe('live');
     expect(result.reason).toContain('--demo mode');
   });
 });

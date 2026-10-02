@@ -107,3 +107,8 @@
 .completeness-complete {
   color: var(--color-success);
 }
+
+.completeness-info-icon {
+  cursor: help;
+  color: var(--text-tertiary);
+}

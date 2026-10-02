@@ -5,6 +5,7 @@ import { EmptyState } from './components/EmptyState';
 import { ObservationMatrix } from './components/ObservationMatrix';
 import { SilentFailureFeed } from './components/SilentFailureFeed';
 import { DetectorBanner } from './components/DetectorBanner';
+import { HeroStat } from './components/HeroStat';
 import { useDashboardData } from './data/useDashboardData';
 import { matrixCountsFromSummary, type MatrixCell } from './data/classify';
 
@@ -21,6 +22,7 @@ export function App() {
       <main className="main-content">
         {hasSpans ? (
           <>
+            <HeroStat counts={counts} />
             <DetectorBanner meta={meta} />
             <ObservationMatrix counts={counts} meta={meta} selectedCell={selectedCell} onSelectCell={setSelectedCell} />
             <SilentFailureFeed spans={spans} selectedCell={selectedCell} />

@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.1.1
+
+First-impression fixes found while preparing a demo recording of the
+published 0.1.0 release.
+
+### Fixed
+
+- `npx opentel-mcp-ui` (and any install through `node_modules/.bin`)
+  started no server and exited silently with no output, because the main-
+  module guard (`bin/opentel-mcp-ui.js`) compared `import.meta.url`
+  (which always resolves through symlinks) against the raw, un-resolved
+  `process.argv[1]` — the `.bin` symlink path itself. The two could never
+  match. Now resolved through `fs.realpathSync()` on both sides before
+  comparing. `scripts/verify-tarball.js` now runs the packed tarball's
+  bin through its installed `node_modules/.bin` symlink (exactly what
+  `npx` resolves and executes) rather than the target file's real path
+  directly, so this class of regression fails the release gate instead of
+  shipping unnoticed; proved against the old code before committing the
+  fix.
+- `--demo` mode reported all four in-memory trackers (thrash, cost/budget,
+  schema drift, ToolOutcome) as `'unknown'`, and the dashboard showed four
+  near-identical warning paragraphs telling the user to pass
+  `statelessTransport` to `withUI()` — advice that doesn't apply to a demo
+  with no server at all. `describeInMemoryTrackerAvailability()`
+  (`src/meta.js`) now reports `'live'` for demo mode (the fixture data
+  already stands in for live detector output), and `DetectorBanner`
+  collapses to one small "Demo data" badge. Outside demo mode, detectors
+  that share the exact same reason (the common case) are now collapsed
+  into one notice naming all of them, instead of repeating the same
+  sentence once per detector.
+- The completeness line below the observation matrix
+  (`web/data/completeness.ts`) read as backend jargon to a first-time
+  user ("session-oriented transport, thrash/budget/schema drift/tool
+  outcome tracker state unconfirmed"). Replaced with plain language
+  inline; the technical detail (and the `withUI()` hint) moved to a
+  `title` tooltip via a new `detail` field, not deleted.
+- Each silent-failure feed row's "Standard OTel would show" / "opentel-mcp
+  detected" comparison cards clipped at the bottom and overlapped the
+  next row's content at every width this was actually checked at,
+  including plain desktop widths with no text wrapping involved.
+  `VirtualizedList` gives each row a fixed-height, absolutely positioned
+  slot; the feed's `ROW_HEIGHT` constant (96px) was shorter than that
+  content needed, so overflow bled into the next row's slot.
+  `SilentFailureFeed.tsx` now sizes rows per viewport width (116px
+  desktop, 184px below a 560px breakpoint), and `SilentFailureFeed.css`
+  stacks the two comparison cards into one column below that same
+  breakpoint, where side-by-side columns would otherwise leave too little
+  width for the pill text to stay on one line. Checked at 1280/1440/1920
+  and a ~400px mobile width, light and dark.
+
+### Added
+
+- A hero stat above the detector banner: "`<missed>` of `<total
+  failures>` failures were invisible to standard OTel (`<percent>`%)",
+  computed from the exact same `MatrixCounts` the observation matrix
+  renders (`computeHeroStat()`, `web/data/classify.ts`) so it can never
+  drift from the grid below it. Zero failures shows a neutral message,
+  never a `NaN%`/`Infinity` divide-by-zero.
+
 ## 0.1.0
 
 First published release (ADR 022,

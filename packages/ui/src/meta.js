@@ -83,12 +83,16 @@ export function describeInMemoryTrackerAvailability(
   { instrumentedServer, statelessTransport = 'auto', demo = false },
 ) {
   if (demo) {
+    // ADR 022 (v0.1.1): demo mode's fixture spans already encode the
+    // outcomes these trackers exist to surface (silent failures, cost,
+    // drift, thrash) -- there is no "re-check after it connects" wait
+    // here, and no ambiguity to flag as 'unknown'. Reporting 'live' lets
+    // the UI show one small "demo data" indicator instead of four
+    // warnings that read as something being wrong with a demo that's
+    // working exactly as intended.
     return {
-      status: 'unknown',
-      reason:
-        `${trackerLabel} status not applicable — this is --demo mode, showing fixture spans rather than ` +
-        "output from a live detector. Point a real instrumented server's exporterUrl at this dashboard " +
-        "(see the README's quickstart) to see live tracker status.",
+      status: 'live',
+      reason: `${trackerLabel} active — showing --demo mode's fixture data, not a live detector.`,
     };
   }
 

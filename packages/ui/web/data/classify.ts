@@ -57,3 +57,25 @@ export function matrixCountsFromSummary(summary: SummaryResponse | null): Matrix
     failureMissed: buffered.silentFailure,
   };
 }
+
+export interface HeroStat {
+  missed: number;
+  totalFailures: number;
+  /** null, not NaN/Infinity, when there are zero failures to take a percentage of. */
+  percent: number | null;
+}
+
+/**
+ * The headline number: of all FAILURES (both matrix columns on the
+ * FAILURE row -- `failureVisible` + `failureMissed` + the structurally-
+ * near-always-empty `successMissed`), how many were invisible to a
+ * standard OTel setup. Derived from the exact same `MatrixCounts` the
+ * matrix itself renders, so the hero stat can never drift from what the
+ * grid below it shows.
+ */
+export function computeHeroStat(counts: MatrixCounts): HeroStat {
+  const missed = counts.failureMissed + counts.successMissed;
+  const totalFailures = missed + counts.failureVisible;
+  const percent = totalFailures === 0 ? null : Math.round((missed / totalFailures) * 100);
+  return { missed, totalFailures, percent };
+}

@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { main, USAGE } from '../bin/opentel-mcp-ui.js';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** @type {import('node:http').Server | undefined} */
 let server;
@@ -47,5 +52,44 @@ describe('bin/opentel-mcp-ui.js main() -- ADR 022 (v0.1.0 publish)', () => {
     expect(server.address().port).toBe(4319);
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('ignoring invalid --port value'));
     errorSpy.mockRestore();
+  });
+
+  it('starts when invoked through a node_modules/.bin-style symlink -- not just the real file path (regression: the main-module guard must compare realpaths, not raw argv[1])', async () => {
+    const binTarget = fileURLToPath(new URL('../bin/opentel-mcp-ui.js', import.meta.url));
+    const linkDir = mkdtempSync(join(tmpdir(), 'opentel-mcp-ui-bin-link-'));
+    const linkPath = join(linkDir, 'opentel-mcp-ui');
+    symlinkSync(binTarget, linkPath);
+
+    try {
+      const child = spawn('node', [linkPath, '--demo', '--port=0'], {
+        cwd: dirname(binTarget),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let output = '';
+      child.stdout.on('data', (chunk) => (output += chunk.toString()));
+      child.stderr.on('data', (chunk) => (output += chunk.toString()));
+
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`timed out waiting for startup log; output so far:\n${output}`)), 5000);
+        const check = () => {
+          if (output.includes('dashboard listening at')) {
+            clearTimeout(timer);
+            resolve();
+          }
+        };
+        child.stdout.on('data', check);
+        child.on('exit', (code) => {
+          clearTimeout(timer);
+          if (!output.includes('dashboard listening at')) {
+            reject(new Error(`process exited (code ${code}) before starting; output:\n${output}`));
+          }
+        });
+      });
+
+      child.kill();
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true });
+    }
   });
 });
