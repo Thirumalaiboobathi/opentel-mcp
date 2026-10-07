@@ -20,7 +20,7 @@ function meta(overrides: Partial<MetaResponse> = {}): MetaResponse {
 }
 
 describe('computeCompleteness -- demo mode (ADR 022)', () => {
-  it('short-circuits to a demo-specific message, never the "session-oriented transport" wording meant for a real server', () => {
+  it('returns null -- no completeness line at all, since the DetectorBanner badge already says "Demo data" (never the "session-oriented transport" wording meant for a real server)', () => {
     const result = computeCompleteness(
       meta({
         demo: true,
@@ -32,9 +32,7 @@ describe('computeCompleteness -- demo mode (ADR 022)', () => {
         },
       }),
     );
-    expect(result.level).toBe('unknown');
-    expect(result.message).toContain('Demo mode');
-    expect(result.message).not.toContain('session-oriented transport');
+    expect(result).toBeNull();
   });
 
   it('non-demo, all trackers live: reports complete, unaffected by the new branch', () => {
@@ -55,9 +53,9 @@ describe('computeCompleteness -- unknown-tracker-state wording (v0.1.1)', () => 
         },
       }),
     );
-    expect(result.level).toBe('unknown');
-    expect(result.message).not.toContain('session-oriented transport');
-    expect(result.message).not.toContain('tracker state unconfirmed');
+    expect(result?.level).toBe('unknown');
+    expect(result?.message).not.toContain('session-oriented transport');
+    expect(result?.message).not.toContain('tracker state unconfirmed');
   });
 
   it('moves the technical detail (including the withUI() hint) into `detail`, not the inline message', () => {
@@ -71,8 +69,8 @@ describe('computeCompleteness -- unknown-tracker-state wording (v0.1.1)', () => 
         },
       }),
     );
-    expect(result.detail).toContain('Session-oriented transport');
-    expect(result.detail).toContain('thrash');
-    expect(result.detail).toContain('withUI()');
+    expect(result?.detail).toContain('Session-oriented transport');
+    expect(result?.detail).toContain('thrash');
+    expect(result?.detail).toContain('withUI()');
   });
 });

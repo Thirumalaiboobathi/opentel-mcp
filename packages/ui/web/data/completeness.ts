@@ -31,7 +31,7 @@ function namesWithStatus(detectors: MetaResponse['detectors'], status: MetaDetec
  * decision that a session-oriented transport is correlated risk, not
  * confirmed unavailability.
  */
-export function computeCompleteness(meta: MetaResponse | null): Completeness {
+export function computeCompleteness(meta: MetaResponse | null): Completeness | null {
   if (!meta) {
     return { level: 'unknown', message: 'Completeness unknown — waiting for /api/meta.' };
   }
@@ -41,12 +41,9 @@ export function computeCompleteness(meta: MetaResponse | null): Completeness {
   // would be actively wrong here — there is no transport to be unconfirmed
   // about. Checked before the detector-status logic, same short-circuit
   // describeInMemoryTrackerAvailability() (meta.js) applies server-side.
-  if (meta.demo) {
-    return {
-      level: 'unknown',
-      message: 'Demo mode — fixture spans, not live detector output. Point a real instrumented server at this dashboard to see tracker completeness.',
-    };
-  }
+  // No line at all (0.2.0): DetectorBanner's "Demo data" badge already says
+  // this, and saying it twice was noise.
+  if (meta.demo) return null;
 
   const unavailable = namesWithStatus(meta.detectors, 'unavailable');
   const unknown = namesWithStatus(meta.detectors, 'unknown');

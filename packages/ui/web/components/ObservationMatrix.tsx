@@ -51,15 +51,17 @@ export function ObservationMatrix({ counts, meta, selectedCell, onSelectCell }: 
         ))}
       </div>
 
-      <p className={`completeness completeness-${completeness.level}`} title={completeness.detail}>
-        {completeness.message}
-        {completeness.detail && (
-          <span className="completeness-info-icon" aria-hidden="true" title={completeness.detail}>
-            {' '}
-            ⓘ
-          </span>
-        )}
-      </p>
+      {completeness && (
+        <p className={`completeness completeness-${completeness.level}`} title={completeness.detail}>
+          {completeness.message}
+          {completeness.detail && (
+            <span className="completeness-info-icon" aria-hidden="true" title={completeness.detail}>
+              {' '}
+              ⓘ
+            </span>
+          )}
+        </p>
+      )}
     </section>
   );
 }

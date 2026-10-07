@@ -303,6 +303,9 @@ describe('App with spans: detector banner', () => {
     mockBackend([span({ id: '1' })], meta);
     const el = await renderApp();
     expect(el.querySelector('.detector-banner-demo-badge')?.textContent).toContain('Demo data');
+    // Said once, by the badge -- not repeated under the matrix (0.2.0).
+    expect(el.textContent?.match(/fixture spans/gi)?.length).toBe(1);
+    expect(el.querySelector('.completeness')).toBeNull();
     expect(el.textContent).not.toContain('All four in-memory trackers live');
     expect(el.querySelectorAll('.detector-banner-line').length).toBe(0);
   });

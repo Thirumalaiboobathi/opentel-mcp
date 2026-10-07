@@ -12,6 +12,12 @@
   spans…" state. It switches to the live dashboard on the first span,
   over the existing SSE stream, with no reload. `--demo` never shows it.
 
+### Fixed
+
+- `--demo` said "fixture spans, not live detector output" twice: in the
+  "Demo data" badge and again under the observation matrix. The badge
+  stays; the line under the matrix is gone in demo mode.
+
 ## 0.1.1
 
 First-impression fixes found while preparing a demo recording of the
