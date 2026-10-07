@@ -26,12 +26,17 @@ threshold there, change this page too.
 | Silent-failure rate | calls returning `isError: true` (`error.type = tool_error`) ÷ calls | < 2% | < 5% | < 15% | < 30% | ≥ 30% |
 | Error rate | thrown / protocol failures (status `ERROR`, any other `error.type`) ÷ calls | < 2% | < 5% | < 15% | < 30% | ≥ 30% |
 | Thrash episodes | calls carrying `mcp.tool.thrash_detected = true` | 0 | — | 1 | 2–3 | ≥ 4 |
-| p95 latency | 95th-percentile call duration, nearest-rank | < 1 s | < 2.5 s | < 5 s | < 10 s | ≥ 10 s |
+| p95 latency | 95th-percentile call duration, nearest-rank | < 1 s | < 2.5 s | ≥ 2.5 s | — | — |
 
 Each bound is exclusive: a value exactly on a boundary gets the worse
 letter (exactly 5% silent failures is a C, not a B).
 
 Thrash has no B: any thrash loop is worth more than a nudge.
+
+**Latency is capped at C.** A slow tool that works isn't broken, so latency
+alone can pull a tool down to C but never to D or F. Silent-failure rate,
+error rate and thrash keep the full A–F range, so a tool that's slow *and*
+failing is still graded by its failures.
 
 ## Worked examples
 
@@ -41,6 +46,7 @@ Thrash has no B: any thrash loop is worth more than a nudge.
 - 10 calls, 2 silent failures and 2 thrown (20% each), 1 thrash episode:
   silent D, errors D, thrash C → **D**, set by both failure rates.
 - 10 calls with a p95 of exactly 2.5 s and no failures: latency C → **C**.
+- 10 calls with a p95 of 60 s and no failures: still **C** (latency's cap).
 - 3 calls, all failing: **Not enough data** (needs at least 10).
 
 ## What the grade is not

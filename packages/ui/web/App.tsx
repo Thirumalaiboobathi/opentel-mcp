@@ -8,14 +8,19 @@ import { SilentFailureFeed } from './components/SilentFailureFeed';
 import { DetectorBanner } from './components/DetectorBanner';
 import { HeroStat } from './components/HeroStat';
 import { ToolHealth } from './components/ToolHealth';
+import { Operations } from './components/Operations';
 import { useDashboardData } from './data/useDashboardData';
 import { matrixCountsFromSummary, type MatrixCell } from './data/classify';
+import { isToolCallSpan } from './data/method';
 
 export function App() {
   const { spans, summary, meta } = useDashboardData();
   const [selectedCell, setSelectedCell] = useState<MatrixCell | null>(null);
 
+  // Any span at all means a server is connected (leave the connect
+  // screen); only tools/call spans feed the tool views below.
   const hasSpans = spans.length > 0;
+  const toolSpans = spans.filter(isToolCallSpan);
   const counts = matrixCountsFromSummary(summary);
 
   return (
@@ -27,8 +32,9 @@ export function App() {
             <HeroStat counts={counts} />
             <DetectorBanner meta={meta} />
             <ObservationMatrix counts={counts} meta={meta} selectedCell={selectedCell} onSelectCell={setSelectedCell} />
-            <ToolHealth spans={spans} />
-            <SilentFailureFeed spans={spans} selectedCell={selectedCell} />
+            <ToolHealth spans={toolSpans} />
+            <Operations spans={spans} />
+            <SilentFailureFeed spans={toolSpans} selectedCell={selectedCell} />
           </>
         ) : meta && !meta.demo ? (
           // Live (non-demo) instance, nothing received yet. Switches to the

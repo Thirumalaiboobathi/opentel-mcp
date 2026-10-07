@@ -139,6 +139,10 @@ export function buildDemoFixture() {
   ];
   // Calls opentel-mcp core flagged as completing a thrash loop.
   const thrashAt = new Set([6, 9, 10]);
+  // ADR 025 (core 0.16.0+): which silent failures gave the agent nothing to
+  // act on, and the length bucket core recorded for each. Four of eleven
+  // are unactionable, concentrated on send_email (the F-graded tool).
+  const contentBuckets = ['empty', 'short', 'tiny', 'short', 'medium', 'empty', 'short', 'short', 'tiny', 'short', 'medium'];
   for (let i = 0; i < 11; i++) {
     const toolName = silentTools[i];
     spans.push(
@@ -153,9 +157,43 @@ export function buildDemoFixture() {
         attributes: {
           'mcp.failure.fingerprint': `fp-${silentCategories[i]}-${i}`,
           ...(thrashAt.has(i) ? { [THRASH_ATTRIBUTE]: true } : {}),
+          'mcp.failure.unactionable': contentBuckets[i] === 'empty' || contentBuckets[i] === 'tiny',
+          'mcp.failure.content_length_bucket': contentBuckets[i],
         },
       }),
     );
+  }
+
+  // Resource and prompt calls (core 0.16.0's opt-in coverage, ADR 026).
+  // Kept out of the 42 / 7 / 11 tool-call mix above: the UI counts only
+  // tools/call spans there. No URIs anywhere -- core never captures them.
+  const operations = [
+    ...Array(6).fill(['resources/read', 'OK']),
+    ['resources/read', 'ERROR', 'McpError'],
+    ['resources/read', 'ERROR', 'McpError'],
+    ['resources/list', 'OK'],
+    ['resources/list', 'OK'],
+    ['resources/templates/list', 'OK'],
+    ['prompts/get', 'OK', undefined, 'summarize_ticket'],
+    ['prompts/get', 'OK', undefined, 'summarize_ticket'],
+    ['prompts/get', 'ERROR', 'McpError', 'summarize_ticket'],
+    ['prompts/get', 'OK', undefined, 'draft_reply'],
+    ['prompts/list', 'OK'],
+  ];
+  for (const [method, status, errorType, promptName] of operations) {
+    spans.push({
+      id: nextId('span'),
+      traceId: nextId('trace'),
+      name: promptName ? `${method} ${promptName}` : method,
+      startTimeMs: tick(900),
+      durationMs: 3 + (idCounter % 9),
+      status,
+      ...(errorType ? { errorType } : {}),
+      attributes: {
+        'mcp.method.name': method,
+        ...(promptName ? { 'gen_ai.prompt.name': promptName } : {}),
+      },
+    });
   }
 
   return spans;

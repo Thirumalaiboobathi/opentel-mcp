@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+A connect screen for a fresh, empty dashboard, per-tool health grades,
+the "Errors your agent can't act on" filter and a resources & prompts
+panel (both need opentel-mcp core 0.16.0's signals; hidden on older
+cores), and tool views that now count only real tool calls. The peer
+range is unchanged (`opentel-mcp >=0.8.0 <1.0.0`).
 
 ### Added
 
@@ -14,14 +20,42 @@
 - **Per-tool health grades.** A new "Tool health" panel grades each tool
   A–F from the buffered spans alone (silent-failure rate, error rate,
   thrash episodes, p95 latency; the grade is the worst of the four). Each
-  grade's tooltip names the signal that set it. Tools with fewer than 10
+  grade's tooltip names the signal that set it. Latency is capped at C, so
+  a slow-but-working tool never reads as broken. Tools with fewer than 10
   calls show "Not enough data". Formula and thresholds:
   `docs/health-grades.md`. The `--demo` fixture's spans are reassigned
   across tools (same 42 / 7 / 11 totals) so the demo shows a realistic
   spread of grades.
 
+- **Errors your agent can't act on.** With opentel-mcp core 0.16.0+, the
+  silent-failure feed gets a filter, "Errors your agent can't act on
+  (N)", for `isError: true` results core flagged as unactionable (no
+  content, or under 10 characters of text and nothing else), and marks
+  those rows "no actionable detail". Hidden entirely with older cores,
+  which never set the attribute, rather than showing a misleading 0. The
+  `--demo` fixture includes four.
+
+- **Resources & prompts panel.** With opentel-mcp core 0.16.0's opt-in
+  `coverage: { resources, prompts }`, a panel lists `resources/*` and
+  `prompts/*` calls by method (and prompt name for `prompts/get`), with
+  call and failure counts and error types. Hidden for tools-only servers.
+  The `--demo` fixture includes some.
+
 ### Fixed
 
+- **Only tool calls count as tool calls.** `/api/summary`, the
+  observation matrix, the hero stat, the silent-failure feed and the
+  health grades now count only `tools/call` spans (by `mcp.method.name`,
+  falling back to the span name). Before, core's default `tools/list`
+  spans (schema drift) were counted as successful tool calls, inflating
+  the success count; resource/prompt spans would have done the same.
+- `--port=0` (any free port) logged `http://localhost:0` instead of the
+  port actually bound. The startup log now reads the listening socket's
+  address.
+- The startup log's setup hint omitted `serviceName`, which opentel-mcp
+  core requires with `setupNodeSdk: true`, so copying it threw. It now
+  shows the full call with this instance's real endpoint, matching the
+  connect screen's snippet.
 - `--demo` said "fixture spans, not live detector output" twice: in the
   "Demo data" badge and again under the observation matrix. The badge
   stays; the line under the matrix is gone in demo mode.

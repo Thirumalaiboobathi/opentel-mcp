@@ -10,6 +10,8 @@ import { normalizeModelName } from './cost/calculator.js';
 import { resolveThrashConfig } from './thrash/config.js';
 import { resolveSchemaDriftConfig } from './schema-drift/config.js';
 import { resolveErrorRecordingConfig } from './error-recording/config.js';
+import { resolveFlushTimeout } from './flush-on-exit.js';
+import { resolveUnactionableErrorsConfig } from './unactionable.js';
 
 /**
  * @typedef {object} CostTrackingOptions
@@ -98,6 +100,31 @@ import { resolveErrorRecordingConfig } from './error-recording/config.js';
  *   variable (lower precedence than this option), same OTEL_MCP_<FEATURE>_ prefix pattern as
  *   OTEL_MCP_THRASH_ and OTEL_MCP_SCHEMA_DRIFT_; an unrecognized value from either source falls back to
  *   'full' silently, never a throw.
+ * @property {boolean | { timeoutMs?: number }} [flushOnExit] - ADR 024 (docs/adr/024-flush-on-exit.md):
+ *   flush the providers this library created when the process stops — on `beforeExit`, `SIGTERM` and `SIGINT`
+ *   — so spans and dev-mode metrics still buffered aren't lost. Only meaningful with `setupNodeSdk: true`,
+ *   where it defaults to ON; pass `false` to opt out. With `setupNodeSdk: false` (the default) it never has
+ *   any effect: the host owns its providers and its shutdown, and passing it logs a one-time `diag.warn`.
+ *   A signal is re-raised after the flush when the host has no listener of its own for it, so the process
+ *   still dies by that signal; with a host listener, the host decides. The flush waits at most `timeoutMs`
+ *   (default and maximum 1000 ms). Not covered: `process.exit()` (call `await server.shutdown()` first) and
+ *   `SIGKILL`.
+ * @property {Partial<import('./unactionable.js').UnactionableErrorsConfig>} [unactionableErrors] - ADR 025
+ *   (docs/adr/025-unactionable-errors.md): on every `isError: true` result, sets the span attributes
+ *   `mcp.failure.unactionable` (boolean) and `mcp.failure.content_length_bucket` (`empty` | `tiny` | `short` |
+ *   `medium` | `long`), computed only from the whitespace-trimmed length of the text items and the count of
+ *   non-text items — never from the text itself. Unactionable = no content, or under `minTextLength`
+ *   (default 10) characters of text with no image/audio/resource item. `{ enabled: true, minTextLength: 10 }`
+ *   by default; independent of `fingerprinting`. Span-only: never a metric label. Also settable via
+ *   `OTEL_MCP_UNACTIONABLE_ERRORS_ENABLED` / `OTEL_MCP_UNACTIONABLE_ERRORS_MIN_TEXT_LENGTH` (lower precedence).
+ * @property {{ resources?: boolean, prompts?: boolean }} [coverage] - ADR 026 (docs/adr/026-resources-prompts-coverage.md),
+ *   opt-in, both off by default: also trace `resources/read`, `resources/list`, `resources/templates/list`
+ *   (`resources: true`) and `prompts/get`, `prompts/list` (`prompts: true`). Spans are named by method
+ *   (`prompts/get <name>` for prompts/get), carry `mcp.method.name` and never `gen_ai.tool.name`; resource
+ *   URIs and prompt arguments are never captured. A handler for one of these methods that's already
+ *   registered when instrumentMcpServer() runs is skipped (not wrapped) with a single `diag.warn` — never a
+ *   throw. Durations go to the `mcp.server.operation.duration` histogram (labels: `mcp.method.name`,
+ *   `error.type`).
  * @property {string} [instanceKey] - Host-supplied stable identifier for one logical service (ADR 012,
  *   docs/adr/012-tracker-lifecycle-and-shared-state.md, Option C — Phase 2: this option and its wiring).
  *   When provided, the four in-memory trackers this library keeps per instrumented server — budget
@@ -133,6 +160,41 @@ let warnedServiceNameIgnored = false;
 // same file already triggered. Not part of the public API.
 export function __resetServiceNameWarnedForTests() {
   warnedServiceNameIgnored = false;
+}
+
+// Guards the "flushOnExit has no effect without setupNodeSdk" diagnostic
+// (ADR 024), same once-per-process pattern.
+let warnedFlushOnExitIgnored = false;
+
+// Test-only, same purpose as __resetServiceNameWarnedForTests above.
+export function __resetFlushOnExitWarnedForTests() {
+  warnedFlushOnExitIgnored = false;
+}
+
+/**
+ * ADR 024: `false` turns it off; an object supplies `timeoutMs`; anything
+ * else (true, undefined, null, junk) means "on, defaults". Only consulted
+ * when setupNodeSdk is true.
+ *
+ * @param {unknown} value
+ * @returns {{ timeoutMs: number } | null}
+ */
+function resolveFlushOnExit(value) {
+  if (value === false) return null;
+  const timeoutMs = value !== null && typeof value === 'object' ? /** @type {any} */ (value).timeoutMs : undefined;
+  return { timeoutMs: resolveFlushTimeout(timeoutMs) };
+}
+
+/**
+ * ADR 026: opt-in resources/* and prompts/* coverage. Only a literal `true`
+ * turns a family on; anything else (including the default) is off.
+ *
+ * @param {unknown} value
+ * @returns {{ resources: boolean, prompts: boolean }}
+ */
+function resolveCoverage(value) {
+  const v = value !== null && typeof value === 'object' ? /** @type {any} */ (value) : {};
+  return { resources: v.resources === true, prompts: v.prompts === true };
 }
 
 // Guards the DEFAULT_PRICING staleness diagnostic below (ADR 016 point 3),
@@ -210,6 +272,16 @@ export function resolveOptions(options) {
     );
   }
 
+  const flushOnExitRequested = opts.flushOnExit !== undefined && opts.flushOnExit !== false;
+  if (!setupNodeSdk && flushOnExitRequested && !warnedFlushOnExitIgnored) {
+    warnedFlushOnExitIgnored = true;
+    diag.warn(
+      'opentel-mcp: flushOnExit was provided but setupNodeSdk is false, so it has no effect. ' +
+        'The host application owns its TracerProvider/MeterProvider and their shutdown — flush them in your ' +
+        "own shutdown sequence. See ADR 024, docs/adr/024-flush-on-exit.md.",
+    );
+  }
+
   const rawCostTracking = opts.costTracking ?? {};
   const costTrackingEnabled = rawCostTracking.enabled ?? true;
 
@@ -275,5 +347,8 @@ export function resolveOptions(options) {
     schemaDrift: resolveSchemaDriftConfig(opts.schemaDrift),
     errorRecording: resolveErrorRecordingConfig(opts.errorRecording),
     instanceKey: resolveInstanceKey(opts.instanceKey, process.env[ENV_INSTANCE_KEY]),
+    flushOnExit: setupNodeSdk ? resolveFlushOnExit(opts.flushOnExit) : null,
+    unactionableErrors: resolveUnactionableErrorsConfig(opts.unactionableErrors),
+    coverage: resolveCoverage(opts.coverage),
   };
 }

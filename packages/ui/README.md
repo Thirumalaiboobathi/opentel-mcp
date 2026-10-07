@@ -14,17 +14,32 @@ Grafana, no OTel Collector to configure first.
 npx opentel-mcp-ui --demo
 ```
 
-Opens a dashboard at `http://127.0.0.1:4319` seeded with 60 realistic
-fixture spans (42 clean successes, 7 ordinary thrown/protocol failures a
-standard OTel setup would also catch, and 11 silent failures it wouldn't)
-— nothing to configure, no MCP server required. Three panels:
+Opens a dashboard at `http://127.0.0.1:4319` seeded with realistic
+fixture data: 60 tool calls (42 clean successes, 7 ordinary thrown/protocol
+failures a standard OTel setup would also catch, and 11 silent failures it
+wouldn't), plus a few resource and prompt calls. Nothing to configure, no
+MCP server required. The panels:
 
 - **Observation matrix** — SUCCESS/FAILURE rows × visible-to-OTel/missed-by-OTel
   columns. The "missed" + "failure" cell is the whole point: calls a
   plain OTel setup would show as green.
+- **Tool health** — an A–F grade per tool from silent-failure rate, error
+  rate, thrash episodes and p95 latency. The grade is the worst of the four
+  (latency alone never goes below C), and hovering a grade tells you which
+  signal set it. Tools with fewer than 10 calls show "Not enough data".
+  Formula and thresholds: [`docs/health-grades.md`](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/docs/health-grades.md).
 - **Silent-failure feed** — defaults to that exact cell, newest-first,
   with the side-by-side comparison of what standard tracing would have
-  shown versus what actually happened.
+  shown versus what actually happened. With opentel-mcp 0.16.0+, a filter
+  narrows it to **errors your agent can't act on**: `isError: true` with
+  no content, or under 10 characters of text and nothing else.
+- **Resources & prompts** — with opentel-mcp 0.16.0+'s opt-in
+  `coverage: { resources: true, prompts: true }`, calls to `resources/*`
+  and `prompts/*` by method (and prompt name), with their failures. Hidden
+  for tools-only servers.
+
+Only `tools/call` spans count toward the matrix, the hero number, the feed
+and the grades. A `tools/list` or `resources/read` span isn't a tool call.
 - **Detector status banner** — which of opentel-mcp's four in-memory
   trackers (thrash detection, cost/budget, schema drift, tool-outcome
   counting) are confidently live for the server you've pointed this at —
@@ -37,7 +52,10 @@ for the full flag list.
 
 ## Pointing a real MCP server at it
 
-Drop `--demo` and start the dashboard against nothing:
+Drop `--demo` and start the dashboard against nothing. Until the first
+span arrives it shows a **Connect your server** screen: this instance's
+OTLP endpoint and the exact snippet below, already filled in with it.
+Then it switches to the live dashboard by itself.
 
 ```bash
 npx opentel-mcp-ui
@@ -46,8 +64,7 @@ npx opentel-mcp-ui
 ```
 opentel-mcp-ui: dashboard listening at http://localhost:4319
 opentel-mcp-ui: OTLP/HTTP JSON trace receiver at http://localhost:4319/v1/traces
-opentel-mcp-ui: point your instrumented server's exporterUrl at the URL above
-(instrumentMcpServer(server, { setupNodeSdk: true, exporterUrl: ... })).
+opentel-mcp-ui: point your instrumented server's exporterUrl at the URL above (instrumentMcpServer(server, { serviceName: 'my-mcp-server', setupNodeSdk: true, exporterUrl: 'http://localhost:4319/v1/traces' })).
 ```
 
 Then, in the MCP server you're instrumenting with `opentel-mcp` core,
@@ -65,11 +82,8 @@ instrumentMcpServer(server, {
 });
 ```
 
-Until the first span arrives, the dashboard shows a **Connect your
-server** screen with this exact snippet, pre-filled with the endpoint the
-instance is actually listening on. Make real tool calls against your
-server and the dashboard replaces it live, over Server-Sent Events — no
-page reload needed.
+Make real tool calls against your server and the dashboard replaces the
+connect screen live, over Server-Sent Events, with no page reload needed.
 
 **Environment variable, as an alternative to hardcoding the URL:**
 `opentel-mcp` core doesn't read an env var for `exporterUrl` itself (it's

@@ -31,8 +31,17 @@ import { createSchemaDriftEmitter } from './schema-drift/emitter.js';
 import { ToolOutcomeCounter } from './observation/tool-outcome-counter.js';
 import { detectObservationIntegrity } from './observation/integrity.js';
 import { InstanceRegistry } from './registry/instance-registry.js';
+import { registerFlushOnExit } from './flush-on-exit.js';
+import { applyUnactionableAttributes } from './unactionable.js';
 import {
   ATTR_MCP_METHOD_NAME,
+  ATTR_GEN_AI_PROMPT_NAME,
+  MAX_PROMPT_NAME_LENGTH,
+  MCP_METHOD_NAME_RESOURCES_READ,
+  MCP_METHOD_NAME_RESOURCES_LIST,
+  MCP_METHOD_NAME_RESOURCES_TEMPLATES_LIST,
+  MCP_METHOD_NAME_PROMPTS_GET,
+  MCP_METHOD_NAME_PROMPTS_LIST,
   ATTR_GEN_AI_TOOL_NAME,
   ATTR_GEN_AI_OPERATION_NAME,
   ATTR_GEN_AI_RESPONSE_MODEL,
@@ -390,7 +399,28 @@ export function instrumentMcpServer(input, options) {
     return input;
   }
 
+  // v2 McpServer declared with `capabilities.tools` installs its own
+  // tools/list + tools/call dispatchers in its constructor, before this
+  // function can ever run — see hasConstructorInstalledToolHandlers().
+  // Those aren't user handlers that would be bypassed: they're McpServer's
+  // own, and McpServer will install identical ones again on request. Take
+  // them down here (public removeRequestHandler) so the ordering check
+  // below only sees genuine user registrations, and re-install them through
+  // the patched setRequestHandler at the end of this function. If anything
+  // in between throws, McpServer re-installs them (unwrapped) on its next
+  // registerTool(), since its own guard flag is reset too.
+  const reinstallToolHandlers = hasConstructorInstalledToolHandlers(server, outer, kind);
+  if (reinstallToolHandlers) {
+    server.removeRequestHandler(TOOLS_CALL_METHOD);
+    server.removeRequestHandler(TOOLS_LIST_METHOD);
+    outer._toolHandlersInitialized = false;
+  }
+
   assertInstrumentFirst(server, resolved);
+
+  // ADR 026: opt-in resources/* and prompts/* methods to wrap — minus any
+  // already registered (skipped with one diag.warn, never a throw).
+  const coveredMethods = resolveCoveredMethods(server, resolved);
 
   const tracer = setupTracer(server, resolved);
   const metricsRecorder = resolved.enableMetrics ? setupMeter(PACKAGE_VERSION) : null;
@@ -586,6 +616,7 @@ export function instrumentMcpServer(input, options) {
           resolved.errorRecording,
           costAttributionState,
           errorRecordingState,
+          resolved.unactionableErrors,
         );
       } else if (schema === v1.ListToolsRequestSchema && schemaDriftDetector) {
         handler = wrapToolsListHandler(
@@ -598,6 +629,11 @@ export function instrumentMcpServer(input, options) {
           resolved.errorRecording,
           errorRecordingState,
         );
+      } else if (coveredMethods.size > 0) {
+        const method = v1CoveredMethodForSchema(v1, schema);
+        if (method && coveredMethods.has(method)) {
+          handler = wrapNonToolHandler(handler, method, tracer, metricsRecorder, resolved.fingerprinting, kind);
+        }
       }
       return originalSetRequestHandler(schema, handler);
     };
@@ -640,6 +676,7 @@ export function instrumentMcpServer(input, options) {
           resolved.errorRecording,
           costAttributionState,
           errorRecordingState,
+          resolved.unactionableErrors,
         );
       } else if (maybeHandler === undefined && method === TOOLS_LIST_METHOD && schemaDriftDetector) {
         handlerOrSchemas = wrapToolsListHandler(
@@ -653,15 +690,200 @@ export function instrumentMcpServer(input, options) {
           errorRecordingState,
         );
       }
+      if (maybeHandler === undefined && coveredMethods.has(method)) {
+        handlerOrSchemas = wrapNonToolHandler(handlerOrSchemas, method, tracer, metricsRecorder, resolved.fingerprinting, kind);
+      }
       return maybeHandler === undefined
         ? originalSetRequestHandler(method, handlerOrSchemas)
         : originalSetRequestHandler(method, handlerOrSchemas, maybeHandler);
     };
   }
 
+  if (reinstallToolHandlers) {
+    // McpServer's own (TS-private) installer, guarded by the flag reset
+    // above: re-registers its tools/list + tools/call dispatchers, this time
+    // through the patched setRequestHandler, so they come back wrapped.
+    outer.setToolRequestHandlers();
+  }
+
   server[kInstrumented] = true;
   if (outer) outer[kInstrumented] = true;
   return input;
+}
+
+/**
+ * True when `outer` is a v2 McpServer whose tools/list + tools/call
+ * handlers were installed by its own constructor rather than by the user:
+ * v2's constructor calls `this.setToolRequestHandlers()` when
+ * `capabilities.tools` is declared (@modelcontextprotocol/server 2.x,
+ * `mcp-*.mjs`: `if (options?.capabilities?.tools) this.setToolRequestHandlers()`),
+ * so with that (common) option the handlers exist before
+ * instrumentMcpServer() can be called at all, and ADR 002's check threw on
+ * every such server.
+ *
+ * Deliberately narrow, so every genuine misorder still throws:
+ * - v2 McpServer only (v1's McpServer never installs eagerly);
+ * - its installer ran (`_toolHandlersInitialized === true`) but no tool has
+ *   been registered yet (`_registeredTools` empty). A tool registered before
+ *   instrumenting keeps throwing, same as v1 and same as before;
+ * - not yet connected: re-installing calls `registerCapabilities()`, which
+ *   v2 refuses after connect, so a connected server keeps the old behavior;
+ * - every member used is feature-detected. These are McpServer internals
+ *   (ADR 001/002 avoid them in general); they're read only to recognize
+ *   McpServer's own handlers, never to reach a handler function. Any
+ *   mismatch falls back to the previous behavior (ADR 002's throw).
+ *
+ * Known limit: a user who replaced McpServer's own dispatcher directly on
+ * `mcp.server` (setRequestHandler after construction, no tool registered)
+ * is indistinguishable from the constructor's handler without reading the
+ * private handler map; that handler would be replaced by McpServer's.
+ *
+ * Never throws.
+ *
+ * @returns {boolean}
+ */
+function hasConstructorInstalledToolHandlers(server, outer, kind) {
+  try {
+    if (kind !== 'v2' || !outer) return false;
+    const registered = outer._registeredTools;
+    return (
+      outer._toolHandlersInitialized === true &&
+      registered !== null &&
+      typeof registered === 'object' &&
+      Object.keys(registered).length === 0 &&
+      typeof outer.setToolRequestHandlers === 'function' &&
+      typeof server.removeRequestHandler === 'function' &&
+      !server.transport
+    );
+  } catch {
+    return false;
+  }
+}
+
+const RESOURCE_METHODS = [
+  MCP_METHOD_NAME_RESOURCES_READ,
+  MCP_METHOD_NAME_RESOURCES_LIST,
+  MCP_METHOD_NAME_RESOURCES_TEMPLATES_LIST,
+];
+const PROMPT_METHODS = [MCP_METHOD_NAME_PROMPTS_GET, MCP_METHOD_NAME_PROMPTS_LIST];
+
+/**
+ * ADR 026: which resources/* and prompts/* methods this instance wraps.
+ * Only the families the caller opted into (`coverage`), minus any method
+ * whose handler is already registered: wrapping happens at registration
+ * (ADR 001), so an existing handler can't be wrapped, and ADR 010 showed
+ * that throwing on misorder breaks upgrades. Such methods are skipped with
+ * ONE diag.warn naming them — never a throw. Never throws.
+ *
+ * @returns {Set<string>}
+ */
+function resolveCoveredMethods(server, resolved) {
+  const covered = new Set();
+  try {
+    const wanted = [
+      ...(resolved.coverage.resources ? RESOURCE_METHODS : []),
+      ...(resolved.coverage.prompts ? PROMPT_METHODS : []),
+    ];
+    const skipped = [];
+    for (const method of wanted) {
+      if (typeof server.assertCanSetRequestHandler === 'function') {
+        try {
+          server.assertCanSetRequestHandler(method);
+        } catch {
+          skipped.push(method);
+          continue;
+        }
+      }
+      covered.add(method);
+    }
+    if (skipped.length > 0) {
+      diag.warn(
+        `opentel-mcp: coverage requested for ${skipped.join(', ')}, but a handler for ` +
+          `${skipped.length === 1 ? 'it' : 'each'} was already registered, so ${skipped.length === 1 ? 'it is' : 'they are'} not traced. ` +
+          'Call instrumentMcpServer() before registering resources/prompts. On an SDK v2 McpServer, ' +
+          "don't declare capabilities.resources/prompts in the constructor (that registers the handlers immediately); " +
+          'registering a resource or prompt declares the capability for you. See ADR 026.',
+      );
+    }
+  } catch {
+    // never throw
+  }
+  return covered;
+}
+
+/**
+ * v1 dispatches by schema object identity (ADR 001); maps a schema to its
+ * ADR 026 method name, or undefined. Never throws.
+ */
+function v1CoveredMethodForSchema(v1, schema) {
+  if (!v1 || !schema) return undefined;
+  if (schema === v1.ReadResourceRequestSchema) return MCP_METHOD_NAME_RESOURCES_READ;
+  if (schema === v1.ListResourcesRequestSchema) return MCP_METHOD_NAME_RESOURCES_LIST;
+  if (schema === v1.ListResourceTemplatesRequestSchema) return MCP_METHOD_NAME_RESOURCES_TEMPLATES_LIST;
+  if (schema === v1.GetPromptRequestSchema) return MCP_METHOD_NAME_PROMPTS_GET;
+  if (schema === v1.ListPromptsRequestSchema) return MCP_METHOD_NAME_PROMPTS_LIST;
+  return undefined;
+}
+
+/**
+ * ADR 026: a SERVER span around one resources/* or prompts/* handler.
+ *
+ * - Name: the method; `prompts/get <prompt name>` for prompts/get.
+ * - `mcp.method.name` always; `gen_ai.prompt.name` on prompts/get (capped);
+ *   `gen_ai.tool.name` NEVER set — absent, not empty.
+ * - Never captured: resource URIs (request params or results), prompt
+ *   arguments, result content. On a thrown error, only status ERROR,
+ *   `error.type` (the class name), and — with fingerprinting — the
+ *   fingerprint hash/category/channel enums. The exception message and
+ *   stack are deliberately NOT recorded here, whatever errorRecording.mode
+ *   says: the SDK's own resource errors embed the URI in the message
+ *   (e.g. `Resource ${uri} not found`).
+ * - Duration: mcp.server.operation.duration, labeled by method (+ error.type).
+ * - No thrash detection, no cost attribution, no isError handling (these
+ *   methods have no such result field).
+ *
+ * The handler's result and errors pass through unchanged.
+ */
+function wrapNonToolHandler(handler, method, tracer, metricsRecorder, fingerprintingEnabled, kind) {
+  return (request, extra) => {
+    let promptName;
+    const rawName = request?.params?.name;
+    if (method === MCP_METHOD_NAME_PROMPTS_GET && typeof rawName === 'string' && rawName !== '') {
+      promptName = rawName.slice(0, MAX_PROMPT_NAME_LENGTH);
+    }
+    const spanName = promptName ? `${method} ${promptName}` : method;
+    const parentContext = extractTraceContext(request?.params?._meta);
+
+    return tracer.startActiveSpan(spanName, { kind: SpanKind.SERVER }, parentContext, async (span) => {
+      span.setAttribute(ATTR_MCP_METHOD_NAME, method);
+      if (promptName) span.setAttribute(ATTR_GEN_AI_PROMPT_NAME, promptName);
+      const { requestId } = extractSessionAndRequestId(kind, extra);
+      if (requestId !== undefined && requestId !== null) {
+        span.setAttribute(ATTR_JSONRPC_REQUEST_ID, String(requestId));
+      }
+
+      const startTime = performance.now();
+      try {
+        const result = await handler(request, extra);
+        span.setStatus({ code: SpanStatusCode.OK });
+        metricsRecorder?.recordOperationDuration(method, performance.now() - startTime);
+        return result;
+      } catch (err) {
+        span.setStatus({ code: SpanStatusCode.ERROR });
+        const errorType = String(err?.name ?? 'Error').slice(0, MAX_ERROR_CLASS_LENGTH);
+        span.setAttribute(ATTR_ERROR_TYPE, errorType);
+        if (fingerprintingEnabled) {
+          const failure = computeFingerprint(err, { toolName: undefined, origin: 'thrown', cwd: process.cwd() });
+          span.setAttributes(toSpanAttributes(failure));
+          span.setAttribute(ATTRIBUTE_KEYS.CHANNEL, classifyFailureChannel(err));
+        }
+        metricsRecorder?.recordOperationDuration(method, performance.now() - startTime, errorType);
+        throw err;
+      } finally {
+        span.end();
+      }
+    });
+  };
 }
 
 /**
@@ -811,10 +1033,25 @@ function setupTracer(server, resolved) {
       }
     }
 
-    server.shutdown = async () => {
-      await provider.shutdown();
-      if (meterProvider) await meterProvider.shutdown();
+    // Memoized (ADR 024): the first call — from the host, or from
+    // flushOnExit's process listeners — creates the promise; every later
+    // call gets the same one, so the providers are shut down exactly once.
+    let shutdownPromise = null;
+    let unregisterFlushOnExit = null;
+    const shutdown = () => {
+      if (!shutdownPromise) {
+        unregisterFlushOnExit?.();
+        shutdownPromise = (async () => {
+          await provider.shutdown();
+          if (meterProvider) await meterProvider.shutdown();
+        })();
+      }
+      return shutdownPromise;
     };
+    server.shutdown = shutdown;
+    if (resolved.flushOnExit) {
+      unregisterFlushOnExit = registerFlushOnExit(shutdown, resolved.flushOnExit.timeoutMs);
+    }
   }
 
   // Always the final step: when setupNodeSdk is false, this picks up
@@ -1712,6 +1949,7 @@ function wrapToolCallHandler(
   errorRecordingConfig,
   costAttributionState,
   errorRecordingState,
+  unactionableErrorsConfig,
 ) {
   return (request, extra) => {
     const toolName = request?.params?.name;
@@ -1772,6 +2010,10 @@ function wrapToolCallHandler(
         if (isToolResultError(result)) {
           span.setAttribute(ATTR_ERROR_TYPE, ERROR_TYPE_TOOL_ERROR);
           span.setStatus({ code: SpanStatusCode.ERROR });
+          // ADR 025: content SHAPE only (lengths, item counts), own
+          // try/catch, before fingerprinting so a classifier problem can't
+          // suppress it. Doesn't feed the fingerprint or the category.
+          applyUnactionableAttributes(span, result, unactionableErrorsConfig);
 
           let failureCategory = '';
           let failure = null;

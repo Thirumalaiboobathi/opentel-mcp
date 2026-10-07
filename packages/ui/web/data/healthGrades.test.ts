@@ -125,6 +125,24 @@ describe('gradeTool -- formula', () => {
     expect(h.explanation).toContain('p95 latency 2.5 s (C)');
   });
 
+  it('latency is capped at C: even a 60 s p95 with no failures is a C, never D or F', () => {
+    const h = gradeTool('t', ok(10, { durationMs: 60_000 }));
+    expect(h.signals!.p95LatencyMs.grade).toBe('C');
+    expect(h.grade).toBe('C');
+  });
+
+  it('latency cap does not soften failure signals: slow and failing is still graded by the failures', () => {
+    const h = gradeTool('t', [...ok(6, { durationMs: 60_000 }), ...silent(4).map((s) => ({ ...s, durationMs: 60_000 }))]);
+    expect(h.signals!.p95LatencyMs.grade).toBe('C');
+    expect(h.grade).toBe('F');
+    expect(h.drivers).toEqual(['silentFailureRate']);
+  });
+
+  it('latency thresholds: < 1 s is A, < 2.5 s is B, anything slower is C', () => {
+    const t = THRESHOLDS.p95LatencyMs;
+    expect([0, 999, 1000, 2499, 2500, 9_999, 10_000, 1e9].map((v) => letterFor(v, t))).toEqual(['A', 'A', 'B', 'B', 'C', 'C', 'C', 'C']);
+  });
+
   it('ignores a non-finite duration rather than producing NaN', () => {
     const h = gradeTool('t', [...ok(10), span({ durationMs: Number.NaN })]);
     expect(Number.isFinite(h.signals!.p95LatencyMs.value)).toBe(true);

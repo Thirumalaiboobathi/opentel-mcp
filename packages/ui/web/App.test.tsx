@@ -6,6 +6,7 @@ import type { SerializedSpan } from '../src/types.d.ts';
 import { ThemeProvider } from './theme/ThemeProvider';
 import { App } from './App';
 import type { MetaResponse, SummaryResponse } from './data/types';
+import { isToolCallSpan } from './data/method';
 
 /**
  * A real, rendered-DOM smoke test for the acceptance criteria this
@@ -50,7 +51,9 @@ function metaWith(overrides: Partial<MetaResponse['detectors']> = {}): MetaRespo
   };
 }
 
-function summaryFor(spans: SerializedSpan[]): SummaryResponse {
+/** Mirrors src/summary.js, including its tools/call-only filter. */
+function summaryFor(allSpans: SerializedSpan[]): SummaryResponse {
+  const spans = allSpans.filter(isToolCallSpan);
   const buffered = { total: spans.length, success: 0, error: 0, silentFailure: 0 };
   for (const s of spans) {
     if (s.errorType === 'tool_error') buffered.silentFailure++;
@@ -462,5 +465,110 @@ describe('App: per-tool health grades', () => {
     const low = el.querySelector('[data-testid="health-row-rarely_used"] .health-grade');
     expect(low?.textContent).toBe('Not enough data');
     expect(low?.getAttribute('title')).toContain('3 calls');
+  });
+});
+
+describe("App: errors your agent can't act on (ADR 025)", () => {
+  const silent = (id: string, unactionable?: boolean) =>
+    span({
+      id,
+      toolName: `tool-${id}`,
+      status: 'ERROR',
+      errorType: 'tool_error',
+      attributes: unactionable === undefined ? {} : { 'mcp.failure.unactionable': unactionable },
+    });
+
+  it('shows the count and filters the silent-failure feed to unactionable errors', async () => {
+    mockBackend([silent('a', true), silent('b', false), silent('c', true)], metaWith());
+    const el = await renderApp();
+
+    expect(el.querySelector('[data-testid="unactionable-count"]')?.textContent).toBe('(2)');
+    const feed = () => el.querySelector('.feed-panel')?.textContent ?? '';
+    expect(feed()).toContain('tool-b');
+    expect(feed()).toContain('no actionable detail');
+
+    const filter = el.querySelector('[data-testid="unactionable-filter"]') as HTMLButtonElement;
+    expect(filter.textContent).toContain("Errors your agent can't act on");
+    act(() => filter.click());
+
+    expect(filter.getAttribute('aria-pressed')).toBe('true');
+    expect(feed()).toContain('tool-a');
+    expect(feed()).toContain('tool-c');
+    expect(feed()).not.toContain('tool-b');
+  });
+
+  it('hides the filter (rather than showing "0") when no span carries the attribute, e.g. an older core', async () => {
+    mockBackend([silent('a'), silent('b')], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('[data-testid="unactionable-filter"]')).toBeNull();
+  });
+});
+
+describe('App: only tools/call spans reach the tool views', () => {
+  it('resources/*, prompts/* and tools/list spans stay out of the feed and the health table', async () => {
+    const tool = span({ id: 't1', toolName: 'echo', attributes: { 'mcp.method.name': 'tools/call' } });
+    const resource = span({ id: 'r1', name: 'resources/read', attributes: { 'mcp.method.name': 'resources/read' } });
+    const prompt = span({ id: 'p1', name: 'prompts/get greet', attributes: { 'mcp.method.name': 'prompts/get' } });
+    const list = span({ id: 'l1', name: 'tools/list', attributes: { 'mcp.method.name': 'tools/list' } });
+    const manyTools = Array.from({ length: 10 }, (_, i) =>
+      span({ id: `e${i}`, toolName: 'echo', attributes: { 'mcp.method.name': 'tools/call' } }),
+    );
+    mockBackend([tool, ...manyTools, resource, prompt, list], metaWith());
+    const el = await renderApp();
+
+    // The success cell's feed lists tool calls only.
+    const successCell = el.querySelectorAll('.matrix-cell')[0] as HTMLButtonElement;
+    act(() => successCell.click());
+    const feed = el.querySelector('.feed-panel')?.textContent ?? '';
+    expect(feed).toContain('echo');
+    expect(feed).not.toContain('resources/read');
+    expect(feed).not.toContain('prompts/get');
+    expect(feed).not.toContain('tools/list');
+
+    // Health: one row, for the tool, graded on its 11 calls only.
+    const rows = el.querySelectorAll('[aria-label="Tool health"] tbody tr');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain('echo');
+    expect(rows[0]?.textContent).toContain('11');
+  });
+});
+
+describe('App: resources & prompts view (ADR 026)', () => {
+  const op = (id: string, method: string, extra: Partial<SerializedSpan> = {}, promptName?: string) =>
+    span({
+      id,
+      name: promptName ? `${method} ${promptName}` : method,
+      attributes: { 'mcp.method.name': method, ...(promptName ? { 'gen_ai.prompt.name': promptName } : {}) },
+      ...extra,
+    });
+
+  it('lists resource/prompt calls with their failures and error types', async () => {
+    const tool = span({ id: 't', toolName: 'echo', attributes: { 'mcp.method.name': 'tools/call' } });
+    mockBackend(
+      [
+        tool,
+        op('r1', 'resources/read'),
+        op('r2', 'resources/read', { status: 'ERROR', errorType: 'McpError' }),
+        op('p1', 'prompts/get', {}, 'greet'),
+        op('l1', 'prompts/list'),
+      ],
+      metaWith(),
+    );
+    const el = await renderApp();
+
+    const read = el.querySelector('[data-testid="operation-row-resources/read"]')?.textContent ?? '';
+    expect(read).toContain('2');
+    expect(read).toContain('1');
+    expect(read).toContain('McpError');
+    expect(el.querySelector('[data-testid="operation-row-prompts/get-greet"]')).not.toBeNull();
+    expect(el.querySelector('[data-testid="operation-row-prompts/list"]')).not.toBeNull();
+    // The tool call isn't listed here.
+    expect(el.querySelector('.operations-table')?.textContent).not.toContain('echo');
+  });
+
+  it('renders nothing for a tools-only server', async () => {
+    mockBackend([span({ id: 't', toolName: 'echo' })], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('.operations-table')).toBeNull();
   });
 });

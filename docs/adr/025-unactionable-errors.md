@@ -1,6 +1,6 @@
 # ADR 025: Flagging unactionable tool errors
 
-**Status:** Proposed — awaiting approval. Investigation and design only; nothing in this ADR is implemented.
+**Status:** Accepted (approved as proposed; implemented in v0.16.0). Env vars use the codebase's existing `OTEL_MCP_` prefix (`OTEL_MCP_UNACTIONABLE_ERRORS_ENABLED`, `OTEL_MCP_UNACTIONABLE_ERRORS_MIN_TEXT_LENGTH`), not the `OPENTEL_MCP_` written below.
 
 ## Context
 

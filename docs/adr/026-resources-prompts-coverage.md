@@ -1,6 +1,6 @@
 # ADR 026: Instrumenting `resources/*` and `prompts/*`
 
-**Status:** Proposed — awaiting approval. Investigation and design only; nothing in this ADR is implemented.
+**Status:** Accepted (approved, opt-in; implemented in v0.16.0). As implemented: detect-and-skip with one `diag.warn`; the new `mcp.server.operation.duration` histogram; no exception message recorded on these spans (resource errors embed the URI); `gen_ai.prompt.name` capped at 128 characters. The McpServer callback-patching option (Open question 3) and the v2 eager-handler re-install for resources/prompts were not done.
 
 ## Context
 

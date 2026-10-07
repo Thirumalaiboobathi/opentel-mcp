@@ -23,7 +23,8 @@ const GRADE_ORDER: Grade[] = ['A', 'B', 'C', 'D', 'F'];
 /**
  * Exclusive upper bounds for A, B, C, D, in that order: a value below the
  * first bound is an A, below the second a B, and so on; at or above the
- * last bound is an F.
+ * last bound is an F. An `Infinity` bound means that letter (and every
+ * worse one) is unreachable for the signal.
  */
 export const THRESHOLDS: Record<SignalKey, [number, number, number, number]> = {
   // isError: true results -- the failure the agent sees but OTel doesn't.
@@ -33,8 +34,10 @@ export const THRESHOLDS: Record<SignalKey, [number, number, number, number]> = {
   // Calls opentel-mcp flagged as part of a thrash loop. 0 = A, 1 = C,
   // 2-3 = D, 4+ = F (no B: any thrash is worth more than a nudge).
   thrashEpisodes: [1, 1, 2, 4],
-  // 95th-percentile call duration, nearest-rank.
-  p95LatencyMs: [1000, 2500, 5000, 10000],
+  // 95th-percentile call duration, nearest-rank. Capped at C: no D or F
+  // bound, so a slow-but-working tool never reads as broken. Latency can
+  // pull an otherwise-A tool down to C, never further.
+  p95LatencyMs: [1000, 2500, Infinity, Infinity],
 };
 
 export const SIGNAL_LABELS: Record<SignalKey, string> = {

@@ -119,3 +119,37 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ADR 025: "Errors your agent can't act on" filter, a two-option toggle. */
+.feed-filter {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-4);
+}
+
+.feed-filter-option {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.feed-filter-option:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.feed-filter-option[aria-pressed='true'] {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+  color: var(--text-primary);
+}
+
+.feed-filter-option:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}

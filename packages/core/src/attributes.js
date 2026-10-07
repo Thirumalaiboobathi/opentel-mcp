@@ -76,6 +76,29 @@ export const MCP_METHOD_NAME_TOOLS_CALL = 'tools/call';
 /** Well-known mcp.method.name value for a tools/list request (ADR 010, schema drift detection). */
 export const MCP_METHOD_NAME_TOOLS_LIST = 'tools/list';
 
+// ADR 026 (v0.16.0, opt-in `coverage`): the five resource/prompt methods.
+// mcp.method.name only ever takes these fixed string constants, never a
+// value read from a request, so its value space stays bounded (7 total).
+
+/** Well-known mcp.method.name value for a resources/read request (ADR 026). */
+export const MCP_METHOD_NAME_RESOURCES_READ = 'resources/read';
+/** Well-known mcp.method.name value for a resources/list request (ADR 026). */
+export const MCP_METHOD_NAME_RESOURCES_LIST = 'resources/list';
+/** Well-known mcp.method.name value for a resources/templates/list request (ADR 026). */
+export const MCP_METHOD_NAME_RESOURCES_TEMPLATES_LIST = 'resources/templates/list';
+/** Well-known mcp.method.name value for a prompts/get request (ADR 026). */
+export const MCP_METHOD_NAME_PROMPTS_GET = 'prompts/get';
+/** Well-known mcp.method.name value for a prompts/list request (ADR 026). */
+export const MCP_METHOD_NAME_PROMPTS_LIST = 'prompts/list';
+
+/**
+ * gen_ai.prompt.name — the prompt a prompts/get span requested (ADR 026).
+ * Span attribute only, never a metric label. Capped at
+ * MAX_PROMPT_NAME_LENGTH, since the value comes from the request.
+ */
+export const ATTR_GEN_AI_PROMPT_NAME = 'gen_ai.prompt.name';
+export const MAX_PROMPT_NAME_LENGTH = 128;
+
 // --- Custom (non-spec) attributes ---
 
 /**

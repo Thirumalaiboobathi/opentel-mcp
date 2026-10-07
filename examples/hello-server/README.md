@@ -62,12 +62,12 @@ both real output from running the command above, captured separately):
 The tool's actual response is `{"echoed":"hello opentel-mcp"}`, visible in
 the stdout JSON-RPC result.
 
-The metrics lines (v0.15.0+, ADR 023) are a forced flush, not the normal
-5-second periodic export — this one-shot piped run exits before that
-interval, so `server.js` flushes once via `process.on('beforeExit', ...)`
-right before exiting. A real, long-running server sees the same lines
-appear on their own, repeating every 5 seconds, with no equivalent code
-needed.
+The metrics lines (v0.15.0+, ADR 023) come from the flush on exit, not
+the normal 5-second periodic export — this one-shot piped run exits before
+that interval, and `setupNodeSdk: true` flushes automatically as the
+process stops (`flushOnExit`, v0.16.0, ADR 024), so `server.js` needs no
+exit hook of its own. A real, long-running server sees the same lines
+appear on their own, repeating every 5 seconds.
 
 The span name (`tools/call echo`), kind (`SERVER`), and attribute names
 follow the [MCP semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai)

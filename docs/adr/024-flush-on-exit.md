@@ -1,6 +1,6 @@
 # ADR 024: `flushOnExit` — flush telemetry when an MCP server is stopped
 
-**Status:** Proposed — awaiting approval. Investigation and design only; nothing in this ADR is implemented.
+**Status:** Accepted (approved as proposed; implemented in v0.16.0). The flush timeout is capped at 1000 ms: `timeoutMs` can lower it but not raise it (the proposal allowed up to 5000).
 
 ## Context
 
@@ -162,7 +162,7 @@ re-raise.
 - `Promise.race([sharedShutdown(), delay(timeoutMs)])`, with the delay timer
   `unref()`'d so it never holds the process open by itself.
 - Invalid `timeoutMs` (non-finite, ≤ 0) falls back to the default; values are
-  clamped to at most 5000. Never throws.
+  clamped to at most 1000 (as implemented: `timeoutMs` can only lower the cap). Never throws.
 - A timeout doesn't cancel the export. The process is allowed to proceed
   (re-raise / exit) and whatever hasn't been sent is lost, same as today.
 

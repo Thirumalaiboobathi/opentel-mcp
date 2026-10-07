@@ -1,31 +1,6 @@
 import { useState } from 'react';
+import { connectSnippet, OTLP_TRACES_PATH } from '../data/connect';
 import './ConnectScreen.css';
-
-/**
- * The OTLP/HTTP JSON receiver path every opentel-mcp-ui server exposes
- * (server.js's `POST /v1/traces` route).
- */
-export const OTLP_TRACES_PATH = '/v1/traces';
-
-/**
- * The exact snippet to point an instrumented server at this dashboard.
- * Kept to options opentel-mcp core really has (config.js): `serviceName`
- * is required when `setupNodeSdk` is true, and `exporterUrl` only takes
- * effect with `setupNodeSdk: true`. This is the same call
- * test/e2e-silent-failure.test.js drives end to end.
- */
-export function connectSnippet(endpoint: string): string {
-  return [
-    "import { instrumentMcpServer } from 'opentel-mcp';",
-    '',
-    '// Before registering any tools:',
-    'instrumentMcpServer(server, {',
-    "  serviceName: 'my-mcp-server',",
-    '  setupNodeSdk: true,',
-    `  exporterUrl: '${endpoint}',`,
-    '});',
-  ].join('\n');
-}
 
 /**
  * Shown instead of an empty dashboard when this instance is live (not
