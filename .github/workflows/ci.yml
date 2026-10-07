@@ -36,7 +36,11 @@ jobs:
         run: npm run lint --if-present
 
   verify-tarball:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -119,15 +123,3 @@ jobs:
           npm init -y >/dev/null
           npm install "$pack_dir"/opentel-mcp-ui-*.tgz
           npm audit --omit=dev --audit-level=high
-            # Vite's rolldown native binaries for macOS/Windows are missing from
-      # the Linux-generated lockfile (npm/cli#4828). The published UI ships
-      # a prebuilt dist/, so consumers never bundle; build + tarball checks
-      # run on Linux only. Follow-up: regenerate the lockfile with all
-      # platform bindings.
-      - name: Build
-        if: runner.os == 'Linux'
-        run: npm run build
-
-      - name: Verify the packed tarball is consumable under strict TypeScript (core) and installs/runs cleanly (ui)
-        if: runner.os == 'Linux'
-        run: npm run verify:tarball
