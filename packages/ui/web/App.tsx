@@ -7,6 +7,7 @@ import { ObservationMatrix } from './components/ObservationMatrix';
 import { SilentFailureFeed } from './components/SilentFailureFeed';
 import { DetectorBanner } from './components/DetectorBanner';
 import { HeroStat } from './components/HeroStat';
+import { ToolHealth } from './components/ToolHealth';
 import { useDashboardData } from './data/useDashboardData';
 import { matrixCountsFromSummary, type MatrixCell } from './data/classify';
 
@@ -26,6 +27,7 @@ export function App() {
             <HeroStat counts={counts} />
             <DetectorBanner meta={meta} />
             <ObservationMatrix counts={counts} meta={meta} selectedCell={selectedCell} onSelectCell={setSelectedCell} />
+            <ToolHealth spans={spans} />
             <SilentFailureFeed spans={spans} selectedCell={selectedCell} />
           </>
         ) : meta && !meta.demo ? (

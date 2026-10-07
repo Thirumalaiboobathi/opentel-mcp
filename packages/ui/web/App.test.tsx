@@ -247,9 +247,11 @@ describe('App with spans: observation matrix', () => {
     const failureVisibleCell = el.querySelectorAll('.matrix-cell')[2] as HTMLButtonElement; // row FAILURE, col visible
     act(() => failureVisibleCell.click());
 
-    expect(el.textContent).toContain('Failures visible to standard OTel');
-    expect(el.textContent).toContain('broken');
-    expect(el.textContent).not.toContain('search');
+    // Scoped to the feed: the tool-health table lists every tool by design.
+    const feed = el.querySelector('.feed-panel');
+    expect(feed?.textContent).toContain('Failures visible to standard OTel');
+    expect(feed?.textContent).toContain('broken');
+    expect(feed?.textContent).not.toContain('search');
   });
 
   it('the successMissed cell renders an em-dash, not a bare 0, and is visually distinct', async () => {
@@ -440,5 +442,25 @@ describe('App: connect screen (live instance, no spans yet)', () => {
     vi.stubGlobal('fetch', pending as unknown as typeof fetch);
     const el = await renderApp();
     expect(el.querySelector('.connect-screen')).toBeNull();
+  });
+});
+
+describe('App: per-tool health grades', () => {
+  it('shows a grade per tool with an explaining tooltip, and "Not enough data" below the minimum sample', async () => {
+    const failing = Array.from({ length: 10 }, (_, i) =>
+      span({ id: `bad-${i}`, toolName: 'fetch_report', status: 'ERROR', errorType: 'tool_error' }),
+    );
+    const rare = Array.from({ length: 3 }, (_, i) => span({ id: `rare-${i}`, toolName: 'rarely_used' }));
+    mockBackend([...failing, ...rare], metaWith());
+    const el = await renderApp();
+
+    const bad = el.querySelector('[data-testid="health-row-fetch_report"] .health-grade');
+    expect(bad?.textContent).toBe('F');
+    expect(bad?.getAttribute('title')).toContain('Grade F, set by silent failures 100% (F)');
+    expect(bad?.getAttribute('title')).toContain('docs/health-grades.md');
+
+    const low = el.querySelector('[data-testid="health-row-rarely_used"] .health-grade');
+    expect(low?.textContent).toBe('Not enough data');
+    expect(low?.getAttribute('title')).toContain('3 calls');
   });
 });

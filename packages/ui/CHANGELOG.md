@@ -11,6 +11,14 @@
   exporterUrl })` snippet to point a server at it, and a "Waiting for
   spans…" state. It switches to the live dashboard on the first span,
   over the existing SSE stream, with no reload. `--demo` never shows it.
+- **Per-tool health grades.** A new "Tool health" panel grades each tool
+  A–F from the buffered spans alone (silent-failure rate, error rate,
+  thrash episodes, p95 latency; the grade is the worst of the four). Each
+  grade's tooltip names the signal that set it. Tools with fewer than 10
+  calls show "Not enough data". Formula and thresholds:
+  `docs/health-grades.md`. The `--demo` fixture's spans are reassigned
+  across tools (same 42 / 7 / 11 totals) so the demo shows a realistic
+  spread of grades.
 
 ### Fixed
 
