@@ -18,13 +18,10 @@
  * JSON-RPC stream on stdout is untouched (ADR 003). Metrics (v0.15.0+,
  * ADR 023) print to stderr too, but only every 5 seconds while the
  * process stays alive — a single piped request's process exits as soon
- * as stdin closes, well before that interval, so the beforeExit hook
- * below forces one final metrics flush first (same shutdown() call a
- * real long-lived server's own exit sequence would make anyway).
- * StdioServerTransport doesn't call its own close()/onclose on stdin
- * EOF — confirmed by testing — so 'exit' or the SDK's onclose won't see
- * this; 'beforeExit' is the one Node event that still lets async work
- * (shutdown()'s own flush) run before the process actually exits.
+ * as stdin closes, well before that interval, so they print once as it
+ * exits instead: setupNodeSdk: true flushes on exit automatically
+ * (flushOnExit, v0.16.0, ADR 024), covering stdin EOF, SIGTERM and SIGINT.
+ * No exit hook needed here.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -35,7 +32,7 @@ import { z } from 'zod';
 const server = new McpServer({ name: 'hello-mcpserver', version: '0.1.0' });
 
 // Must run before any .tool()/.registerTool() call — see ADR 002.
-const instrumented = instrumentMcpServer(server, {
+instrumentMcpServer(server, {
   serviceName: 'hello-mcpserver',
   setupNodeSdk: true,
 });
@@ -46,14 +43,3 @@ server.tool('echo', { text: z.string() }, async ({ text }) => ({
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-
-// Flush metrics to stderr once, right before the process would otherwise
-// exit (stdin EOF for this piped-input demo), instead of waiting up to
-// 5s for a periodic export that may never come. Guarded so shutdown()
-// itself (also async) doesn't retrigger this when the loop goes idle again.
-let flushed = false;
-process.on('beforeExit', () => {
-  if (flushed) return;
-  flushed = true;
-  instrumented.shutdown();
-});

@@ -74,13 +74,20 @@ const [v1ServerMod, v1TypesMod, v2Mod] = await Promise.all([
   tryImport('@modelcontextprotocol/server'),
 ]);
 
-/** @type {{ Server: Function, CallToolRequestSchema: unknown, ListToolsRequestSchema: unknown } | null} */
+/** @type {{ Server: Function, CallToolRequestSchema: unknown, ListToolsRequestSchema: unknown, [schema: string]: unknown } | null} */
 const v1Sdk =
   v1ServerMod && v1TypesMod
     ? {
         Server: v1ServerMod.Server,
         CallToolRequestSchema: v1TypesMod.CallToolRequestSchema,
         ListToolsRequestSchema: v1TypesMod.ListToolsRequestSchema,
+        // ADR 026 (opt-in coverage): v1 dispatches by schema identity, so
+        // each resource/prompt method needs its schema object too.
+        ReadResourceRequestSchema: v1TypesMod.ReadResourceRequestSchema,
+        ListResourcesRequestSchema: v1TypesMod.ListResourcesRequestSchema,
+        ListResourceTemplatesRequestSchema: v1TypesMod.ListResourceTemplatesRequestSchema,
+        GetPromptRequestSchema: v1TypesMod.GetPromptRequestSchema,
+        ListPromptsRequestSchema: v1TypesMod.ListPromptsRequestSchema,
       }
     : null;
 
@@ -101,7 +108,7 @@ const v2Sdk = v2Mod ? { Server: v2Mod.Server } : null;
  * Resolves `@modelcontextprotocol/sdk` (v1). `null` when not installed (an
  * optional peer dependency — see this module's docblock).
  *
- * @returns {{ Server: Function, CallToolRequestSchema: unknown, ListToolsRequestSchema: unknown } | null}
+ * @returns {{ Server: Function, CallToolRequestSchema: unknown, ListToolsRequestSchema: unknown, [schema: string]: unknown } | null}
  */
 export function getV1Sdk() {
   return v1Sdk;

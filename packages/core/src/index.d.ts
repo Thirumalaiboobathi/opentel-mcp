@@ -87,6 +87,65 @@ export interface InstrumentOptions {
   setupNodeSdk?: boolean;
 
   /**
+   * ADR 024: flush the providers this library created when the process
+   * stops — on `beforeExit`, `SIGTERM` and `SIGINT` — so buffered spans and
+   * dev-mode metrics aren't lost. Only meaningful with `setupNodeSdk: true`,
+   * where it defaults to on; pass `false` to opt out. With `setupNodeSdk:
+   * false` it never has any effect (the host owns its providers), and
+   * passing it logs a one-time `diag.warn`.
+   *
+   * After flushing, a signal is re-raised when no other listener for it
+   * exists, so the process still dies by that signal; if the host has its
+   * own listener, the host decides. The flush waits at most `timeoutMs`
+   * (default and maximum 1000 ms). Not covered: `process.exit()` (call
+   * `await server.shutdown()` first) and `SIGKILL`.
+   *
+   * @default true when `setupNodeSdk` is true
+   */
+  flushOnExit?: boolean | { timeoutMs?: number };
+
+  /**
+   * ADR 025: on every `isError: true` result, sets the span attributes
+   * `mcp.failure.unactionable` (boolean) and
+   * `mcp.failure.content_length_bucket` (`'empty' | 'tiny' | 'short' |
+   * 'medium' | 'long'`). Computed only from the whitespace-trimmed length of
+   * the text items and the count of non-text items, never from the text
+   * itself. Unactionable means no content, or fewer than `minTextLength`
+   * characters of text with no image/audio/resource item. Span-only (never a
+   * metric label); independent of `fingerprinting`. Also settable via
+   * `OTEL_MCP_UNACTIONABLE_ERRORS_ENABLED` /
+   * `OTEL_MCP_UNACTIONABLE_ERRORS_MIN_TEXT_LENGTH` (lower precedence).
+   *
+   * @default { enabled: true, minTextLength: 10 }
+   */
+  /**
+   * ADR 026, opt-in (both off by default): also trace `resources/read`,
+   * `resources/list`, `resources/templates/list` (`resources: true`) and
+   * `prompts/get`, `prompts/list` (`prompts: true`). Spans are named by
+   * method (`prompts/get <name>` for prompts/get), carry `mcp.method.name`,
+   * and never carry `gen_ai.tool.name`. Resource URIs, prompt arguments and
+   * result content are never captured; on a thrown error the span gets
+   * status ERROR, `error.type` and (with fingerprinting) the
+   * `mcp.failure.*` hash/enums, never the exception message. Durations go
+   * to the `mcp.server.operation.duration` histogram (labels:
+   * `mcp.method.name`, `error.type`). A handler for one of these methods
+   * that's already registered when `instrumentMcpServer()` runs is skipped
+   * with a single `diag.warn`, never a throw.
+   *
+   * @default { resources: false, prompts: false }
+   */
+  coverage?: {
+    resources?: boolean;
+    prompts?: boolean;
+  };
+
+  unactionableErrors?: {
+    enabled?: boolean;
+    /** Integer 0–200. `0` flags only empty (or whitespace-only) errors. @default 10 */
+    minTextLength?: number;
+  };
+
+  /**
    * Controls the `mcp.tool.tokens.*` / `mcp.tool.model` / `mcp.tool.cost.*` span attributes, the
    * `mcp.tool.tokens.total` / `mcp.tool.cost.total` metrics, and the optional per-session/per-tool budget
    * guardrail. Any fields you omit from a partial object fall back to their defaults individually —
@@ -383,6 +442,10 @@ export function instrumentMcpServer<T extends DuckTypedServer | DuckTypedMcpServ
   server: T,
   options?: InstrumentOptions,
 ): T & {
+  /**
+   * Present under `setupNodeSdk: true`. Flushes and shuts down the providers
+   * this library created. Idempotent: every call returns the same promise.
+   */
   shutdown?: () => Promise<void>;
   getThrashSummary?: (options?: { topOffendersLimit?: number }) => ThrashSummary;
   getObservationState?: () => ObservationState;

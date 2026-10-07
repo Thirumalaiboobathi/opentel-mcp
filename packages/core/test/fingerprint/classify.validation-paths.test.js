@@ -58,9 +58,17 @@ function readInstalledSdkVersion() {
  * this file tests -- and only then move the pin, rather than the failure
  * mode this test exists to prevent: extractValidationPaths() silently
  * degrading back to `[]` with nothing failing at all.
+ *
+ * Moved 1.30.0 -> 1.32.1 when the lockfile was regenerated to record all
+ * platform optional bindings (npm/cli#4828). Re-check: this file's 44
+ * other tests -- the real-McpServer / real-Zod extraction tests below, plus
+ * the synthetic format tests -- all passed unmodified against 1.32.1, so
+ * the 1.30.0+ rendered "<message> at <path>" format still holds. The
+ * version is also pinned exactly in packages/core's devDependencies so a
+ * future lockfile regeneration can't move it without a package.json edit.
  */
 it("pins the installed @modelcontextprotocol/sdk version this file's two rendering formats were verified against", () => {
-  expect(readInstalledSdkVersion()).toBe('1.30.0');
+  expect(readInstalledSdkVersion()).toBe('1.32.1');
 });
 
 /**
@@ -99,9 +107,14 @@ function readInstalledV2SdkVersion() {
  * to change it with no deprecation notice. A version bump failing this
  * test is the intended, loud signal to re-run the empirical checks
  * against the new version before moving the pin.
+ *
+ * Moved 2.0.0 -> 2.3.1 alongside the v1 pin above (same lockfile
+ * regeneration, same re-check: the 44 extraction tests in this file,
+ * including the v2 format ones, passed unmodified against 2.3.1). Pinned
+ * exactly in packages/core's devDependencies for the same reason.
  */
 it("pins the installed @modelcontextprotocol/server version this file's v2 rendering format was verified against", () => {
-  expect(readInstalledV2SdkVersion()).toBe('2.0.0');
+  expect(readInstalledV2SdkVersion()).toBe('2.3.1');
 });
 
 /** Registers a single tool named 'my-tool' with the given Zod input schema on a fresh McpServer. */
@@ -121,7 +134,7 @@ function callTool(mcpServer, args) {
   return handler({ method: 'tools/call', params: { name: 'my-tool', arguments: args } }, { requestId: 1 });
 }
 
-describe('extractValidationPaths — real McpServer / real Zod (isError: true, disguised) — exercises whichever format the pinned SDK version above actually renders (currently SDK 1.30.0\'s rendered "<message> at <path>" format, NOT the JSON array)', () => {
+describe('extractValidationPaths — real McpServer / real Zod (isError: true, disguised) — exercises whichever format the pinned SDK version above actually renders (currently SDK 1.32.1, which still renders 1.30.0\'s "<message> at <path>" format, NOT the JSON array)', () => {
   it('extracts a single failing field', async () => {
     const mcpServer = createServerWithTool({ email: z.string().email() });
     const result = await callTool(mcpServer, { email: 'not-an-email' });

@@ -20,6 +20,8 @@
  *   design, and both are reported so a consumer can tell).
  */
 
+import { isToolCallSpan } from './span-method.js';
+
 /** @typedef {import('./types.d.ts').SerializedSpan} SerializedSpan */
 /** @typedef {import('opentel-mcp').ObservationState} ObservationState */
 /** @typedef {import('./span-buffer.js').SpanBuffer} SpanBuffer */
@@ -28,8 +30,11 @@
  * @param {SerializedSpan[]} spans
  */
 function summarizeBufferedSpans(spans) {
-  const summary = { total: spans.length, success: 0, error: 0, silentFailure: 0 };
-  for (const span of spans) {
+  // Tool calls only: tools/list, resources/* and prompts/* spans aren't
+  // tool outcomes (see span-method.js).
+  const toolCalls = spans.filter(isToolCallSpan);
+  const summary = { total: toolCalls.length, success: 0, error: 0, silentFailure: 0 };
+  for (const span of toolCalls) {
     if (span.errorType === 'tool_error') summary.silentFailure++;
     else if (span.status === 'ERROR') summary.error++;
     else summary.success++;

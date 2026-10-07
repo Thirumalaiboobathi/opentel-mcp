@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.16.0
+
+Finishes what 0.15 started. Telemetry now survives the way MCP clients
+actually stop servers (`flushOnExit`), and two new signals land: errors
+your agent can't act on, and opt-in resources/prompts coverage. Plus a fix
+for SDK v2 servers that declare `capabilities.tools`.
+`setupNodeSdk: false` (production) behavior is unchanged apart from the
+new span attributes on `isError: true` results and the v2 fix; resources/
+prompts coverage is off unless you opt in. No new metric label keys.
+
+### Added
+
+- **`flushOnExit` (ADR 024, `docs/adr/024-flush-on-exit.md`).** Under
+  `setupNodeSdk: true`, buffered spans and dev-mode metrics are now
+  flushed automatically when the process stops: on `beforeExit` (stdin
+  closed, loop drained), `SIGTERM` and `SIGINT`. MCP clients built on the
+  SDK's stdio transport stop servers with exactly that sequence (stdin
+  close → SIGTERM → SIGKILL, 2 s apart); the old `process.on('beforeExit')`
+  snippet only covered the first step. On by default with
+  `setupNodeSdk: true`; `flushOnExit: false` opts out;
+  `flushOnExit: { timeoutMs }` lowers the 1000 ms cap.
+  - One listener set per process, however many servers are instrumented,
+    and it's removed again once every server has shut down.
+  - After flushing, a signal is re-raised when no other listener for it
+    exists, so the process still dies by that signal. If your code has its
+    own listener, yours decides. `beforeExit` never changes the exit code.
+  - **No effect at all with `setupNodeSdk: false`** (production
+    behavior unchanged): passing it there logs a one-time `diag.warn`.
+  - Not covered: `process.exit()` (call `await server.shutdown()` first)
+    and `SIGKILL`.
+
+- **Unactionable tool errors (ADR 025, `docs/adr/025-unactionable-errors.md`).**
+  Every `isError: true` span now carries `mcp.failure.unactionable`
+  (boolean) and `mcp.failure.content_length_bucket` (`empty` | `tiny` |
+  `short` | `medium` | `long`). Unactionable means no content, or under
+  10 characters of trimmed text with no image/audio/resource item: an
+  error that gives the agent nothing to act on. Computed only from text
+  lengths and non-text item counts, never from the text; a canary-string
+  test checks every exported span and metric. Span-only (no metric label,
+  `METRIC_SAFE_ATTRIBUTES` unchanged); fingerprints and categories
+  unchanged. Configure with `unactionableErrors: { enabled, minTextLength }`
+  or `OTEL_MCP_UNACTIONABLE_ERRORS_ENABLED` /
+  `OTEL_MCP_UNACTIONABLE_ERRORS_MIN_TEXT_LENGTH`.
+
+- **Resources and prompts coverage, opt-in (ADR 026,
+  `docs/adr/026-resources-prompts-coverage.md`).**
+  `coverage: { resources: true, prompts: true }` also traces
+  `resources/read`, `resources/list`, `resources/templates/list`,
+  `prompts/get` and `prompts/list`, on SDK v1 and v2, low-level `Server`
+  and `McpServer`. Both are off by default; nothing changes unless you opt in.
+  - Spans are named by method (`prompts/get <name>` for prompts/get) and
+    carry `mcp.method.name` (+ `gen_ai.prompt.name` on prompts/get, capped
+    at 128 characters). `gen_ai.tool.name` is absent.
+  - Never captured: resource URIs, prompt arguments, result content, or
+    the exception message of a failing request (SDK resource errors embed
+    the URI). Failures get status `ERROR`, `error.type` and the usual
+    fingerprint/category/channel.
+  - New histogram `mcp.server.operation.duration`, labeled by
+    `mcp.method.name` + `error.type` only. No new label keys;
+    `mcp.method.name` stays a fixed set of constants (now 7 values).
+  - A handler already registered when `instrumentMcpServer()` runs is
+    skipped with one `diag.warn`, never a throw. That includes SDK v2
+    `McpServer` declaring `capabilities.resources/prompts` in its
+    constructor.
+
+### Changed
+
+- `server.shutdown()` (under `setupNodeSdk: true`) is now idempotent:
+  every call returns the same promise, so an explicit `shutdown()` and
+  `flushOnExit` never shut the providers down twice.
+- The README quickstart and both examples no longer need the
+  `process.on('beforeExit', ...)` block; it's been removed.
+
+### Fixed
+
+- **SDK v2: a `McpServer` constructed with `capabilities: { tools: {} }`
+  can now be instrumented.** v2's `McpServer` installs its own
+  `tools/list`/`tools/call` dispatchers in its constructor when that
+  capability is declared, so `instrumentMcpServer()` threw
+  `INSTRUMENT_FIRST_ERROR` on every such server, whatever the call order.
+  It now recognizes McpServer's own constructor-installed handlers (v2
+  McpServer, installer ran, no tool registered yet, not yet connected),
+  takes them down with the public `removeRequestHandler()`, and lets
+  McpServer re-install them through the instrumented `setRequestHandler`,
+  so they're wrapped like any lazily-installed handler. Genuine misorders
+  still throw: a tool registered before instrumenting (v1 or v2, with or
+  without declared capabilities) or a low-level `Server` handler
+  registered first. Present since v2 support shipped (SDK 2.0.0).
+
 ## 0.15.0
 
 "Make it visible" — no instrumentation changes, no `tools/call` hot-path

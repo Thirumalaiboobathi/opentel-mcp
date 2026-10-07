@@ -12,7 +12,21 @@
  * the exact comparison this whole project exists to make visible.
  */
 
-const TOOL_NAMES = ['search', 'read_file', 'write_file', 'run_query', 'send_email'];
+// Per-tool allocation (0.2.0): chosen so the per-tool health grades
+// (web/data/healthGrades.ts, docs/health-grades.md) show a realistic
+// spread -- read_file A, search B (latency), write_file C, run_query D,
+// send_email F, list_calendars "Not enough data" -- while the overall
+// 42 / 7 / 11 mix above stays exactly as the README describes it.
+const SUCCESS_ALLOCATION = [
+  ['read_file', 12],
+  ['search', 10],
+  ['write_file', 9],
+  ['run_query', 6],
+  ['send_email', 3],
+  ['list_calendars', 2],
+];
+
+const THRASH_ATTRIBUTE = 'mcp.tool.thrash_detected';
 
 let idCounter = 0;
 function nextId(prefix) {
@@ -54,14 +68,16 @@ export function buildDemoFixture() {
     return t;
   };
 
-  // 42 clean successes, spread across every demo tool.
-  for (let i = 0; i < 42; i++) {
-    const toolName = TOOL_NAMES[i % TOOL_NAMES.length];
+  // 42 clean successes. `search` is the slow one (1.2-2.1 s).
+  const successTools = SUCCESS_ALLOCATION.flatMap(([toolName, count]) => Array(count).fill(toolName));
+  let searchCalls = 0;
+  for (let i = 0; i < successTools.length; i++) {
+    const toolName = successTools[i];
     spans.push(
       makeSpan({
         toolName,
         startTimeMs: tick(1200 + (i % 5) * 300),
-        durationMs: 20 + (i % 7) * 15,
+        durationMs: toolName === 'search' ? 1200 + 100 * searchCalls++ : 20 + (i % 7) * 15,
         status: 'OK',
         attributes: { 'mcp.tool.argument_count': 1 + (i % 3) },
       }),
@@ -71,13 +87,13 @@ export function buildDemoFixture() {
   // 7 thrown/protocol failures -- VISIBLE to standard OTel (status ERROR,
   // errorType is the exception's own name, never 'tool_error').
   const thrown = [
-    ['TypeError', 'read_file'],
-    ['McpError', 'run_query'],
-    ['RangeError', 'search'],
     ['TypeError', 'send_email'],
-    ['McpError', 'write_file'],
+    ['McpError', 'run_query'],
+    ['RangeError', 'send_email'],
+    ['TypeError', 'send_email'],
+    ['McpError', 'send_email'],
     ['Error', 'run_query'],
-    ['TimeoutError', 'search'],
+    ['TimeoutError', 'send_email'],
   ];
   for (const [errorType, toolName] of thrown) {
     spans.push(
@@ -108,8 +124,27 @@ export function buildDemoFixture() {
     'permission_denied',
     'not_found',
   ];
+  const silentTools = [
+    'send_email',
+    'run_query',
+    'send_email',
+    'write_file',
+    'send_email',
+    'send_email',
+    'run_query',
+    'send_email',
+    'send_email',
+    'send_email',
+    'send_email',
+  ];
+  // Calls opentel-mcp core flagged as completing a thrash loop.
+  const thrashAt = new Set([6, 9, 10]);
+  // ADR 025 (core 0.16.0+): which silent failures gave the agent nothing to
+  // act on, and the length bucket core recorded for each. Four of eleven
+  // are unactionable, concentrated on send_email (the F-graded tool).
+  const contentBuckets = ['empty', 'short', 'tiny', 'short', 'medium', 'empty', 'short', 'short', 'tiny', 'short', 'medium'];
   for (let i = 0; i < 11; i++) {
-    const toolName = TOOL_NAMES[i % TOOL_NAMES.length];
+    const toolName = silentTools[i];
     spans.push(
       makeSpan({
         toolName,
@@ -121,9 +156,44 @@ export function buildDemoFixture() {
         failureChannel: 'execution',
         attributes: {
           'mcp.failure.fingerprint': `fp-${silentCategories[i]}-${i}`,
+          ...(thrashAt.has(i) ? { [THRASH_ATTRIBUTE]: true } : {}),
+          'mcp.failure.unactionable': contentBuckets[i] === 'empty' || contentBuckets[i] === 'tiny',
+          'mcp.failure.content_length_bucket': contentBuckets[i],
         },
       }),
     );
+  }
+
+  // Resource and prompt calls (core 0.16.0's opt-in coverage, ADR 026).
+  // Kept out of the 42 / 7 / 11 tool-call mix above: the UI counts only
+  // tools/call spans there. No URIs anywhere -- core never captures them.
+  const operations = [
+    ...Array(6).fill(['resources/read', 'OK']),
+    ['resources/read', 'ERROR', 'McpError'],
+    ['resources/read', 'ERROR', 'McpError'],
+    ['resources/list', 'OK'],
+    ['resources/list', 'OK'],
+    ['resources/templates/list', 'OK'],
+    ['prompts/get', 'OK', undefined, 'summarize_ticket'],
+    ['prompts/get', 'OK', undefined, 'summarize_ticket'],
+    ['prompts/get', 'ERROR', 'McpError', 'summarize_ticket'],
+    ['prompts/get', 'OK', undefined, 'draft_reply'],
+    ['prompts/list', 'OK'],
+  ];
+  for (const [method, status, errorType, promptName] of operations) {
+    spans.push({
+      id: nextId('span'),
+      traceId: nextId('trace'),
+      name: promptName ? `${method} ${promptName}` : method,
+      startTimeMs: tick(900),
+      durationMs: 3 + (idCounter % 9),
+      status,
+      ...(errorType ? { errorType } : {}),
+      attributes: {
+        'mcp.method.name': method,
+        ...(promptName ? { 'gen_ai.prompt.name': promptName } : {}),
+      },
+    });
   }
 
   return spans;

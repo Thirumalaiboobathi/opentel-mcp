@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SerializedSpan } from '../../src/types.d.ts';
 import { classifySpan, type MatrixCell } from '../data/classify';
+import { hasUnactionableSignal, isUnactionable } from '../data/unactionable';
 import { VirtualizedList } from './VirtualizedList';
 import './SilentFailureFeed.css';
 
@@ -71,7 +72,13 @@ const CELL_LABELS: Record<MatrixCell, string> = {
  */
 export function SilentFailureFeed({ spans, selectedCell }: Props) {
   const activeCell = selectedCell ?? 'failureMissed';
-  const filtered = spans.filter((s) => classifySpan(s) === activeCell);
+  const [onlyUnactionable, setOnlyUnactionable] = useState(false);
+  const inCell = spans.filter((s) => classifySpan(s) === activeCell);
+  // ADR 025 filter: only on the silent-failure view, and only once some
+  // span in the buffer actually carries the attribute (core 0.16.0+).
+  const showUnactionableFilter = activeCell === 'failureMissed' && hasUnactionableSignal(inCell);
+  const unactionableCount = showUnactionableFilter ? inCell.filter(isUnactionable).length : 0;
+  const filtered = showUnactionableFilter && onlyUnactionable ? inCell.filter(isUnactionable) : inCell;
   // Newest first -- a live feed reads top-down like a log/chat stream.
   const ordered = [...filtered].reverse();
 
@@ -87,6 +94,29 @@ export function SilentFailureFeed({ spans, selectedCell }: Props) {
           Calls where <code className="mono">isError: true</code> was reported inside an otherwise-successful
           response — the exact case a standard OpenTelemetry setup renders as a clean, successful span.
         </p>
+      )}
+
+      {showUnactionableFilter && (
+        <div className="feed-filter" role="group" aria-label="Filter silent failures">
+          <button
+            type="button"
+            className="feed-filter-option"
+            aria-pressed={!onlyUnactionable}
+            onClick={() => setOnlyUnactionable(false)}
+          >
+            All silent failures <span className="mono">({inCell.length})</span>
+          </button>
+          <button
+            type="button"
+            className="feed-filter-option"
+            aria-pressed={onlyUnactionable}
+            data-testid="unactionable-filter"
+            title="isError: true with no content, or under 10 characters of text and nothing else — the agent can't tell what went wrong or what to do next."
+            onClick={() => setOnlyUnactionable(true)}
+          >
+            Errors your agent can't act on <span className="mono" data-testid="unactionable-count">({unactionableCount})</span>
+          </button>
+        </div>
       )}
 
       <VirtualizedList
@@ -154,6 +184,7 @@ function FeedRow({ span, cell, isNew }: { span: SerializedSpan; cell: MatrixCell
             <span className="feed-side-label">opentel-mcp detected</span>
             <span className="feed-pill feed-pill-failure">
               isError: true{span.failureCategory ? ` · ${span.failureCategory}` : ''}
+              {isUnactionable(span) ? ' · no actionable detail' : ''}
             </span>
           </div>
         </div>

@@ -1,0 +1,83 @@
+.health-panel {
+  margin-bottom: var(--space-7);
+}
+
+.health-table {
+  width: 100%;
+  max-width: 640px;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.health-table th {
+  text-align: left;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.health-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.health-num {
+  text-align: right;
+}
+
+.health-why {
+  color: var(--text-secondary);
+}
+
+.health-grade {
+  display: inline-block;
+  min-width: 1.75rem;
+  padding: 0.1em 0.5em;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-weight: 600;
+  text-align: center;
+  cursor: help;
+}
+
+.health-grade:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.health-grade-A,
+.health-grade-B {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+  border-color: transparent;
+}
+
+.health-grade-C {
+  color: var(--text-primary);
+  background: var(--bg-sunken);
+}
+
+.health-grade-D,
+.health-grade-F {
+  color: var(--color-failure);
+  background: var(--color-failure-bg);
+  border-color: transparent;
+}
+
+.health-grade-na {
+  font-weight: 400;
+  color: var(--text-tertiary);
+  background: transparent;
+}
+
+@media (max-width: 600px) {
+  .health-why-col {
+    display: none;
+  }
+}

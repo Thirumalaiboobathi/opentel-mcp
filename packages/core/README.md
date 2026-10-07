@@ -79,7 +79,7 @@ const server = new McpServer({ name: 'my-server', version: '1.0.0' });
 
 // Wraps every tool registered below. Must run BEFORE server.tool() —
 // see "Ordering constraint" below for why.
-const instrumented = instrumentMcpServer(server, {
+instrumentMcpServer(server, {
   serviceName: 'my-mcp-server', // shows up on your traces
   setupNodeSdk: true, // dev mode: prints traces to your terminal
 });
@@ -91,26 +91,25 @@ server.tool('echo', { text: z.string() }, async ({ text }) => ({
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-
-// Only needed to see metrics (below) immediately when piping ONE request
-// in and exiting right after, like the "See it working" example does —
-// a real, long-running server sees the same lines on their own, every 5
-// seconds, with no extra code.
-let flushed = false;
-process.on('beforeExit', () => {
-  if (flushed) return;
-  flushed = true;
-  instrumented.shutdown();
-});
 ```
 
 That's it. Every tool call now emits a trace. Wire an exporter to see them
-(next section).
+(next section). When the server stops — your MCP client closing stdin, or
+sending SIGTERM/SIGINT — anything still buffered is flushed first,
+automatically (see "Flushing on exit" below).
 
 ## See it working
 
-Run the snippet above and this prints to your terminal — a real, captured
-run (full dump: `examples/hello-mcpserver/README.md`):
+Save the snippet as `server.js`. On its own it just waits: an MCP server
+reads requests from stdin and does nothing until a client sends one. To
+try it without a client, pipe in a single tool call:
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}' | node server.js
+```
+
+The JSON-RPC response goes to stdout, and this prints to stderr — a real,
+captured run (full dump: `examples/hello-mcpserver/README.md`):
 
 ```
 name: 'tools/call echo'
@@ -127,10 +126,12 @@ attributes: {
 No dashboard needed — `setupNodeSdk: true`'s dev exporter printed this
 directly. Point it at a real backend later; see "Two modes" below.
 
-**Metrics print too (v0.15.0+)** — within 5 seconds (not the default
-60-second export interval), a compact one-line-per-metric summary follows
+**Metrics print too (v0.15.0+)** — a compact one-line-per-metric summary
 on stderr, reusing the exact `mcp.tool.*` instruments documented in
-"Metrics" below:
+"Metrics" below. A long-running server prints it every 5 seconds (not the
+default 60-second export interval). The one-shot piped run above prints it
+once as it exits, because the server flushes when stdin closes (v0.16.0,
+see "Flushing on exit"):
 
 ```
 [opentel-mcp metrics] mcp.tool.calls{gen_ai.tool.name=echo,mcp.method.name=tools/call} = 1
@@ -315,6 +316,60 @@ error.type = tool_error
 
 Verified in `test/instrument.test.js`'s "tool-level failure" tests.
 
+#### Errors your agent can't act on (v0.16.0)
+
+An `isError: true` result with no content, or just `"Error"`, tells the
+model nothing about what went wrong or what to do next — a common cause
+of retries and thrash. Every `isError: true` span also carries:
+
+| Attribute | Values |
+| --- | --- |
+| `mcp.failure.unactionable` | `true` when there's no content, or fewer than 10 characters of text (whitespace-trimmed) and no image/audio/resource item |
+| `mcp.failure.content_length_bucket` | `empty` (0) · `tiny` (1–9) · `short` (< 80) · `medium` (< 500) · `long` |
+
+Both are computed **only from lengths and item counts — never from the
+text itself** (proved by a canary-string test in
+`test/unactionable.test.js`), on spans only, never as metric labels. They
+don't change fingerprints or categories. Configure with
+`unactionableErrors: { enabled, minTextLength }` (defaults `true`, `10`).
+Design: [ADR 025](../../docs/adr/025-unactionable-errors.md).
+
+### Resources and prompts (opt-in, v0.16.0)
+
+Tools are traced by default. `resources/*` and `prompts/*` requests can be
+traced too, if you turn them on:
+
+```js
+instrumentMcpServer(server, {
+  coverage: { resources: true, prompts: true }, // either or both
+});
+```
+
+| Method | Span name | Attributes |
+| --- | --- | --- |
+| `resources/read`, `resources/list`, `resources/templates/list` | the method, e.g. `resources/read` | `mcp.method.name` |
+| `prompts/get` | `prompts/get <prompt name>` | `mcp.method.name`, `gen_ai.prompt.name` |
+| `prompts/list` | `prompts/list` | `mcp.method.name` |
+
+- **Never captured:** resource URIs, prompt arguments, result content. A
+  failing request gets status `ERROR`, `error.type`, and the usual
+  fingerprint/category/channel (`mcp.failure.*`), but **not** the exception
+  message, because SDK resource errors embed the URI in it.
+- `gen_ai.tool.name` is absent (not empty) on these spans, so they never
+  show up in per-tool views or tool metrics.
+- Durations go to a separate histogram, `mcp.server.operation.duration`,
+  labeled only by `mcp.method.name` (one of the five methods above) and
+  `error.type`. No thrash detection or cost tracking applies.
+- **Ordering:** instrument before registering resources/prompts, same as
+  tools. If a handler for one of these methods already exists, that method
+  is skipped with a single `diag.warn`. It never throws, so turning this on
+  can't break an existing server. On an SDK v2 `McpServer`, declaring
+  `capabilities: { resources: {}, prompts: {} }` in the constructor
+  registers those handlers immediately (and so skips them); leave them out,
+  since registering a resource or prompt declares the capability for you.
+
+Design: [ADR 026](../../docs/adr/026-resources-prompts-coverage.md).
+
 ### Span attributes
 
 Every span follows the OpenTelemetry MCP semantic conventions (see
@@ -449,8 +504,30 @@ What it does, under `setupNodeSdk: true` and `enableMetrics` (default
   already registered, exactly as it does today.
 - Extends `server.shutdown()` (already attached under `setupNodeSdk: true`)
   to also flush and shut down the `MeterProvider` it registered, alongside
-  the existing `TracerProvider` shutdown — call it during your process's
-  shutdown sequence, same as before, to avoid losing buffered metric data.
+  the existing `TracerProvider` shutdown. As of v0.16.0 this runs
+  automatically when the process stops — see "Flushing on exit" below.
+
+### Flushing on exit (`flushOnExit`, v0.16.0)
+
+Under `setupNodeSdk: true`, buffered spans and dev-mode metrics are
+flushed automatically when the process stops. It's on by default; pass
+`flushOnExit: false` to turn it off. MCP clients built on the SDK's stdio
+transport stop a server by closing stdin, then sending SIGTERM 2 seconds
+later, then SIGKILL; this covers the first two:
+
+| Event | What happens |
+| --- | --- |
+| stdin closes and nothing else keeps the process alive | flushed on `beforeExit`; the process exits with its own exit code |
+| `SIGTERM` / `SIGINT` | flushed, then the same signal is re-raised so the process still dies by it, unless your code has its own listener for that signal, in which case yours decides |
+| `process.exit()` | **not covered**: call `await server.shutdown()` before exiting |
+| `SIGKILL` | can't be intercepted |
+
+The flush waits at most 1000 ms (`flushOnExit: { timeoutMs }` can only
+lower that), so a stuck exporter can't keep a stopping server alive.
+`server.shutdown()` is safe to call yourself as well: it runs once, however
+many times it's called. With `setupNodeSdk: false` this option does
+nothing — your application owns its providers and its shutdown. Design:
+[ADR 024](../../docs/adr/024-flush-on-exit.md).
 
 `@opentelemetry/sdk-metrics` is a real (non-dev) dependency of opentel-mcp
 as of this feature — not an optional peer, not a dynamic import with a
@@ -2241,6 +2318,7 @@ so they're spelled out instead of forced into one bucket.
 | `mcp.tool.pricing_status` | span attr, metric label | **blend — library-computed, depends on tool + host** | which of three enum values depends on a tool-controlled model name resolving (or not) in a library-default-or-host-overridden pricing table |
 | `mcp.failure.fingerprint` / `.signature` / `.category` / `.origin` / `.channel` | span attr (2 also metric labels) | library-computed | hashes/enums — the governed core this project has kept clean since v0.4.0 |
 | `mcp.failure.error_class` | span attr | **blend — tool-controlled, capped only** | `err.name`, length-capped at 128 characters but, unlike everything hashed into the fingerprint, *not* pattern-scrubbed — a documented, deliberate tradeoff (`docs/known-gaps.md` entry 10) |
+| `mcp.failure.unactionable` / `.content_length_bucket` | span attr | library-computed | a boolean and a 5-value enum derived from the trimmed text LENGTH and non-text item COUNT of an `isError: true` result — no text is read for anything but its length (ADR 025, v0.16.0) |
 | `mcp.failure.validation_paths` | span attr | mostly library-computed (gated) | one legacy Zod-issue-rendering path can still carry a tool-controlled dynamic object key, now redacted to a `<KEY>` placeholder rather than closed structurally (`docs/known-gaps.md` entry 10, item 3) |
 | `exception.type` (event) | event attr | tool-controlled | length-capped only under `'normalized'` mode; uncapped under `'full'` (the native SDK call) |
 | `exception.message` / `.stacktrace` (event), status message | event attr + status | **blend — layered** | raw tool content under `'full'`; this library's `normalizeMessage()`/`parseAndNormalizeStack()` transform of that same content under `'normalized'`; optionally a host-supplied `errorRecording.redactor`'s output feeding *that*, first (v0.14.0) — the most layered-provenance attribute in the system |

@@ -76,6 +76,7 @@ import { ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
  *   recordDuration: (toolName: string | undefined, durationMs: number, outcome: string, failureCategory?: string) => void,
  *   recordTokens: (toolName: string | undefined, model: string | undefined, totalTokens: number, pricingStatus: string) => void,
  *   recordCost: (toolName: string | undefined, model: string | undefined, costUsd: number, pricingStatus: string) => void,
+ *   recordOperationDuration: (method: string, durationMs: number, errorType?: string) => void,
  * }}
  */
 export function setupMeter(packageVersion) {
@@ -103,8 +104,22 @@ export function setupMeter(packageVersion) {
     description: 'Total estimated cost of MCP tool calls (see src/cost/calculator.js).',
     unit: 'USD',
   });
+  // ADR 026 (v0.16.0): resources/* and prompts/* handler durations, only
+  // recorded when that opt-in coverage is on. Labeled by mcp.method.name
+  // (one of five fixed constants) and, on failure, error.type: no new
+  // label keys, and nothing request-derived (no URI, no prompt name).
+  const operationDuration = meter.createHistogram('mcp.server.operation.duration', {
+    description: 'Duration of MCP resources/* and prompts/* request handling (opt-in coverage, ADR 026).',
+    unit: 'ms',
+  });
 
   return {
+    recordOperationDuration(method, durationMs, errorType) {
+      operationDuration.record(durationMs, {
+        [ATTR_MCP_METHOD_NAME]: method,
+        ...(errorType ? { [ATTR_ERROR_TYPE]: errorType } : {}),
+      });
+    },
     recordCall(toolName) {
       calls.add(1, {
         [ATTR_GEN_AI_TOOL_NAME]: toolName,

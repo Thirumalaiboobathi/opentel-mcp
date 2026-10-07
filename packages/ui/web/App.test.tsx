@@ -6,6 +6,7 @@ import type { SerializedSpan } from '../src/types.d.ts';
 import { ThemeProvider } from './theme/ThemeProvider';
 import { App } from './App';
 import type { MetaResponse, SummaryResponse } from './data/types';
+import { isToolCallSpan } from './data/method';
 
 /**
  * A real, rendered-DOM smoke test for the acceptance criteria this
@@ -50,7 +51,9 @@ function metaWith(overrides: Partial<MetaResponse['detectors']> = {}): MetaRespo
   };
 }
 
-function summaryFor(spans: SerializedSpan[]): SummaryResponse {
+/** Mirrors src/summary.js, including its tools/call-only filter. */
+function summaryFor(allSpans: SerializedSpan[]): SummaryResponse {
+  const spans = allSpans.filter(isToolCallSpan);
   const buffered = { total: spans.length, success: 0, error: 0, silentFailure: 0 };
   for (const s of spans) {
     if (s.errorType === 'tool_error') buffered.silentFailure++;
@@ -155,7 +158,7 @@ async function renderApp() {
 }
 
 describe('App shell (no spans yet)', () => {
-  it('renders the empty state when there is nothing to show', async () => {
+  it('renders the waiting state when there is nothing to show', async () => {
     const el = await renderApp();
     expect(el.textContent).toContain('Waiting for spans');
   });
@@ -247,9 +250,11 @@ describe('App with spans: observation matrix', () => {
     const failureVisibleCell = el.querySelectorAll('.matrix-cell')[2] as HTMLButtonElement; // row FAILURE, col visible
     act(() => failureVisibleCell.click());
 
-    expect(el.textContent).toContain('Failures visible to standard OTel');
-    expect(el.textContent).toContain('broken');
-    expect(el.textContent).not.toContain('search');
+    // Scoped to the feed: the tool-health table lists every tool by design.
+    const feed = el.querySelector('.feed-panel');
+    expect(feed?.textContent).toContain('Failures visible to standard OTel');
+    expect(feed?.textContent).toContain('broken');
+    expect(feed?.textContent).not.toContain('search');
   });
 
   it('the successMissed cell renders an em-dash, not a bare 0, and is visually distinct', async () => {
@@ -303,6 +308,9 @@ describe('App with spans: detector banner', () => {
     mockBackend([span({ id: '1' })], meta);
     const el = await renderApp();
     expect(el.querySelector('.detector-banner-demo-badge')?.textContent).toContain('Demo data');
+    // Said once, by the badge -- not repeated under the matrix (0.2.0).
+    expect(el.textContent?.match(/fixture spans/gi)?.length).toBe(1);
+    expect(el.querySelector('.completeness')).toBeNull();
     expect(el.textContent).not.toContain('All four in-memory trackers live');
     expect(el.querySelectorAll('.detector-banner-line').length).toBe(0);
   });
@@ -373,5 +381,194 @@ describe('App: live SSE updates', () => {
 
     const counts = Array.from(el.querySelectorAll('.matrix-count')).map((n) => n.textContent);
     expect(counts).toEqual(['1', '—', '0', '0']);
+  });
+});
+
+describe('App: connect screen (live instance, no spans yet)', () => {
+  it('shows "Connect your server" with this instance\'s OTLP endpoint and the exact setup snippet', async () => {
+    mockBackend([], metaWith());
+    const el = await renderApp();
+
+    expect(el.querySelector('.connect-screen')).not.toBeNull();
+    expect(el.textContent).toContain('Connect your server');
+
+    const endpoint = `${window.location.origin}/v1/traces`;
+    expect(el.querySelector('[data-testid="connect-endpoint"]')?.textContent).toBe(endpoint);
+
+    const snippet = el.querySelector('[data-testid="connect-snippet"]')?.textContent ?? '';
+    expect(snippet).toContain("import { instrumentMcpServer } from 'opentel-mcp';");
+    expect(snippet).toContain("serviceName: 'my-mcp-server',");
+    expect(snippet).toContain('setupNodeSdk: true,');
+    expect(snippet).toContain(`exporterUrl: '${endpoint}',`);
+
+    expect(el.querySelector('[role="status"]')?.textContent).toContain('Waiting for spans');
+    // Not the dashboard.
+    expect(el.querySelector('.matrix-count')).toBeNull();
+  });
+
+  it('switches to the live dashboard automatically when the first span arrives over SSE', async () => {
+    mockBackend([], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('.connect-screen')).not.toBeNull();
+
+    const first = span({ id: 'first', status: 'ERROR', errorType: 'tool_error', toolName: 'fetch_report' });
+    setBackendData([first], metaWith());
+    await act(async () => {
+      FakeEventSource.instances[0]!.emit(first);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(el.querySelector('.connect-screen')).toBeNull();
+    const counts = Array.from(el.querySelectorAll('.matrix-count')).map((n) => n.textContent);
+    expect(counts).toEqual(['0', '—', '0', '1']);
+  });
+
+  it('--demo never shows the connect screen, even with an empty buffer', async () => {
+    mockBackend([], { ...metaWith(), demo: true });
+    const el = await renderApp();
+    expect(el.querySelector('.connect-screen')).toBeNull();
+    expect(el.textContent).not.toContain('Connect your server');
+  });
+
+  it('--demo with its fixture shows the dashboard, not the connect screen', async () => {
+    mockBackend([span({ id: 'd1' })], { ...metaWith(), demo: true });
+    const el = await renderApp();
+    expect(el.querySelector('.connect-screen')).toBeNull();
+    expect(el.querySelector('.matrix-count')).not.toBeNull();
+  });
+
+  it('does not flash the connect screen before /api/meta has loaded', async () => {
+    mockBackend([], metaWith());
+    // Hold /api/meta (and so the initial Promise.all) open.
+    const pending = vi.fn(() => new Promise(() => {}));
+    vi.stubGlobal('fetch', pending as unknown as typeof fetch);
+    const el = await renderApp();
+    expect(el.querySelector('.connect-screen')).toBeNull();
+  });
+});
+
+describe('App: per-tool health grades', () => {
+  it('shows a grade per tool with an explaining tooltip, and "Not enough data" below the minimum sample', async () => {
+    const failing = Array.from({ length: 10 }, (_, i) =>
+      span({ id: `bad-${i}`, toolName: 'fetch_report', status: 'ERROR', errorType: 'tool_error' }),
+    );
+    const rare = Array.from({ length: 3 }, (_, i) => span({ id: `rare-${i}`, toolName: 'rarely_used' }));
+    mockBackend([...failing, ...rare], metaWith());
+    const el = await renderApp();
+
+    const bad = el.querySelector('[data-testid="health-row-fetch_report"] .health-grade');
+    expect(bad?.textContent).toBe('F');
+    expect(bad?.getAttribute('title')).toContain('Grade F, set by silent failures 100% (F)');
+    expect(bad?.getAttribute('title')).toContain('docs/health-grades.md');
+
+    const low = el.querySelector('[data-testid="health-row-rarely_used"] .health-grade');
+    expect(low?.textContent).toBe('Not enough data');
+    expect(low?.getAttribute('title')).toContain('3 calls');
+  });
+});
+
+describe("App: errors your agent can't act on (ADR 025)", () => {
+  const silent = (id: string, unactionable?: boolean) =>
+    span({
+      id,
+      toolName: `tool-${id}`,
+      status: 'ERROR',
+      errorType: 'tool_error',
+      attributes: unactionable === undefined ? {} : { 'mcp.failure.unactionable': unactionable },
+    });
+
+  it('shows the count and filters the silent-failure feed to unactionable errors', async () => {
+    mockBackend([silent('a', true), silent('b', false), silent('c', true)], metaWith());
+    const el = await renderApp();
+
+    expect(el.querySelector('[data-testid="unactionable-count"]')?.textContent).toBe('(2)');
+    const feed = () => el.querySelector('.feed-panel')?.textContent ?? '';
+    expect(feed()).toContain('tool-b');
+    expect(feed()).toContain('no actionable detail');
+
+    const filter = el.querySelector('[data-testid="unactionable-filter"]') as HTMLButtonElement;
+    expect(filter.textContent).toContain("Errors your agent can't act on");
+    act(() => filter.click());
+
+    expect(filter.getAttribute('aria-pressed')).toBe('true');
+    expect(feed()).toContain('tool-a');
+    expect(feed()).toContain('tool-c');
+    expect(feed()).not.toContain('tool-b');
+  });
+
+  it('hides the filter (rather than showing "0") when no span carries the attribute, e.g. an older core', async () => {
+    mockBackend([silent('a'), silent('b')], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('[data-testid="unactionable-filter"]')).toBeNull();
+  });
+});
+
+describe('App: only tools/call spans reach the tool views', () => {
+  it('resources/*, prompts/* and tools/list spans stay out of the feed and the health table', async () => {
+    const tool = span({ id: 't1', toolName: 'echo', attributes: { 'mcp.method.name': 'tools/call' } });
+    const resource = span({ id: 'r1', name: 'resources/read', attributes: { 'mcp.method.name': 'resources/read' } });
+    const prompt = span({ id: 'p1', name: 'prompts/get greet', attributes: { 'mcp.method.name': 'prompts/get' } });
+    const list = span({ id: 'l1', name: 'tools/list', attributes: { 'mcp.method.name': 'tools/list' } });
+    const manyTools = Array.from({ length: 10 }, (_, i) =>
+      span({ id: `e${i}`, toolName: 'echo', attributes: { 'mcp.method.name': 'tools/call' } }),
+    );
+    mockBackend([tool, ...manyTools, resource, prompt, list], metaWith());
+    const el = await renderApp();
+
+    // The success cell's feed lists tool calls only.
+    const successCell = el.querySelectorAll('.matrix-cell')[0] as HTMLButtonElement;
+    act(() => successCell.click());
+    const feed = el.querySelector('.feed-panel')?.textContent ?? '';
+    expect(feed).toContain('echo');
+    expect(feed).not.toContain('resources/read');
+    expect(feed).not.toContain('prompts/get');
+    expect(feed).not.toContain('tools/list');
+
+    // Health: one row, for the tool, graded on its 11 calls only.
+    const rows = el.querySelectorAll('[aria-label="Tool health"] tbody tr');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain('echo');
+    expect(rows[0]?.textContent).toContain('11');
+  });
+});
+
+describe('App: resources & prompts view (ADR 026)', () => {
+  const op = (id: string, method: string, extra: Partial<SerializedSpan> = {}, promptName?: string) =>
+    span({
+      id,
+      name: promptName ? `${method} ${promptName}` : method,
+      attributes: { 'mcp.method.name': method, ...(promptName ? { 'gen_ai.prompt.name': promptName } : {}) },
+      ...extra,
+    });
+
+  it('lists resource/prompt calls with their failures and error types', async () => {
+    const tool = span({ id: 't', toolName: 'echo', attributes: { 'mcp.method.name': 'tools/call' } });
+    mockBackend(
+      [
+        tool,
+        op('r1', 'resources/read'),
+        op('r2', 'resources/read', { status: 'ERROR', errorType: 'McpError' }),
+        op('p1', 'prompts/get', {}, 'greet'),
+        op('l1', 'prompts/list'),
+      ],
+      metaWith(),
+    );
+    const el = await renderApp();
+
+    const read = el.querySelector('[data-testid="operation-row-resources/read"]')?.textContent ?? '';
+    expect(read).toContain('2');
+    expect(read).toContain('1');
+    expect(read).toContain('McpError');
+    expect(el.querySelector('[data-testid="operation-row-prompts/get-greet"]')).not.toBeNull();
+    expect(el.querySelector('[data-testid="operation-row-prompts/list"]')).not.toBeNull();
+    // The tool call isn't listed here.
+    expect(el.querySelector('.operations-table')?.textContent).not.toContain('echo');
+  });
+
+  it('renders nothing for a tools-only server', async () => {
+    mockBackend([span({ id: 't', toolName: 'echo' })], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('.operations-table')).toBeNull();
   });
 });

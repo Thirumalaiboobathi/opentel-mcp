@@ -113,8 +113,13 @@ function fail(message) {
 
 class StopWithFailure extends Error {}
 
+// On Windows, npm/npx are .cmd shims, which Node refuses to execute
+// without a shell (EINVAL since the CVE-2024-27980 fix). Elsewhere, no
+// shell -- unchanged behavior.
+const useShell = process.platform === 'win32';
+
 function run(cmd, args, options) {
-  return execFileSync(cmd, args, { stdio: 'pipe', encoding: 'utf8', ...options });
+  return execFileSync(cmd, args, { stdio: 'pipe', encoding: 'utf8', shell: useShell, ...options });
 }
 
 async function main() {

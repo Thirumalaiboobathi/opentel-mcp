@@ -74,31 +74,16 @@ Run these in order — each step assumes the previous one passed:
    independent release cadences: a release touching only one does not
    require bumping the other.
 5. `git push --tags`
+6. `npm publish --workspace=packages/core` and/or
+   `npm publish --workspace=packages/ui` — publishing is manual, run from
+   your machine, for whichever package(s) step 4 bumped. Each package's
+   `prepublishOnly` re-runs its `verify:tarball` (and, for `packages/ui`,
+   its build), so a publish still fails closed on a broken tarball.
 
-**Step 6 — publishing itself — happens in CI, not on your machine.**
-`.github/workflows/release.yml` triggers on the `vX.Y.Z` tag `npm version`
-just created and pushed, re-runs steps 1-3 as a safety net (a tag pushed
-without the checklist above must not reach npm just because someone meant
-to run these first), then runs `npm publish --provenance` for each of
-`packages/core`/`packages/ui` whose current version isn't already on the
-registry — skipping whichever package this particular release didn't
-touch, rather than attempting to re-publish its unchanged, already-live
-version. Watch the "Release" run in the Actions tab; nothing more to do
-locally. This moved out of your hands specifically so the published
-package carries [npm provenance](https://docs.npmjs.com/generating-provenance-statements)
-— a signed attestation tying the published tarball to the exact commit and
-CI run that built it, visible on the npm package page — which npm can only
-generate inside a supported CI provider's OIDC context, never from a local
-`npm publish`.
-
-**One-time setup, before the first tag-triggered release works:** generate
-an [npm automation token](https://docs.npmjs.com/creating-and-viewing-access-tokens)
-with publish access to both `opentel-mcp` and `opentel-mcp-ui` and add it
-as the `NPM_TOKEN` secret in this repo's
-GitHub Actions settings (Settings → Secrets and variables → Actions). The
-workflow's `id-token: write` permission is what provenance itself needs;
-`NPM_TOKEN` is the separate, still-required credential that authenticates
-the publish — provenance doesn't replace it.
+There is no tag-triggered publish workflow: a manual `npm publish` can't
+carry [npm provenance](https://docs.npmjs.com/generating-provenance-statements)
+(npm only generates it inside a CI provider's OIDC context), which is the
+accepted trade-off for publishing by hand.
 
 ## Dependency updates
 

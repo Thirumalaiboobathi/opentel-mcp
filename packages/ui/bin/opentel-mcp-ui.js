@@ -110,7 +110,11 @@ export function main(argv = process.argv.slice(2)) {
   // "never reachable off this machine by default" isn't a convenience
   // setting to make configurable, it's the one this CLI commits to.
   server.listen(port, '127.0.0.1', () => {
-    const url = `http://localhost:${port}`;
+    // The port actually bound, not the one requested: --port=0 asks the OS
+    // for any free port, and printing "localhost:0" would be useless.
+    const address = server.address();
+    const boundPort = address && typeof address === 'object' ? address.port : port;
+    const url = `http://localhost:${boundPort}`;
     console.log(`opentel-mcp-ui: dashboard listening at ${url}`);
     if (demo) {
       console.log(`opentel-mcp-ui: seeded ${collector.buffer.size} demo spans -- no live MCP server needed.`);
@@ -118,7 +122,7 @@ export function main(argv = process.argv.slice(2)) {
       console.log(`opentel-mcp-ui: OTLP/HTTP JSON trace receiver at ${url}/v1/traces`);
       console.log(
         "opentel-mcp-ui: point your instrumented server's exporterUrl at the URL above " +
-          '(instrumentMcpServer(server, { setupNodeSdk: true, exporterUrl: ... })).',
+          `(instrumentMcpServer(server, { serviceName: 'my-mcp-server', setupNodeSdk: true, exporterUrl: '${url}/v1/traces' })).`,
       );
     }
     if (open) openBrowser(url);

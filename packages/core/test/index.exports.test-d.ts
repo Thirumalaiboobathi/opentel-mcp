@@ -510,3 +510,23 @@ const invalidErrorRecording: InstrumentOptions = {
   errorRecording: { notARealField: true },
 };
 void invalidErrorRecording;
+
+// ADR 024: flushOnExit accepts a boolean or { timeoutMs }.
+const flushOnExitOn: InstrumentOptions = { serviceName: 's', setupNodeSdk: true, flushOnExit: true };
+const flushOnExitOff: InstrumentOptions = { serviceName: 's', setupNodeSdk: true, flushOnExit: false };
+const flushOnExitTimeout: InstrumentOptions = { serviceName: 's', setupNodeSdk: true, flushOnExit: { timeoutMs: 500 } };
+void flushOnExitOn;
+void flushOnExitOff;
+void flushOnExitTimeout;
+// @ts-expect-error -- timeoutMs must be a number
+const flushOnExitBad: InstrumentOptions = { flushOnExit: { timeoutMs: '500' } };
+void flushOnExitBad;
+
+// ADR 026: opt-in resources/prompts coverage.
+const coverageBoth: InstrumentOptions = { coverage: { resources: true, prompts: true } };
+const coverageOne: InstrumentOptions = { coverage: { prompts: true } };
+void coverageBoth;
+void coverageOne;
+// @ts-expect-error -- coverage flags are booleans
+const coverageBad: InstrumentOptions = { coverage: { resources: 'yes' } };
+void coverageBad;

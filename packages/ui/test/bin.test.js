@@ -93,3 +93,36 @@ describe('bin/opentel-mcp-ui.js main() -- ADR 022 (v0.1.0 publish)', () => {
     }
   });
 });
+
+describe('startup log', () => {
+  it('--port=0 prints the port actually bound, not 0', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      server = main(['--port=0']);
+      await new Promise((resolve) => server.once('listening', resolve));
+      // The listen callback that logs runs right after 'listening'.
+      await new Promise((resolve) => setImmediate(resolve));
+      const { port } = /** @type {import('node:net').AddressInfo} */ (server.address());
+      const output = log.mock.calls.map((args) => args.join(' ')).join('\n');
+      expect(port).toBeGreaterThan(0);
+      expect(output).toContain(`dashboard listening at http://localhost:${port}`);
+      expect(output).toContain(`receiver at http://localhost:${port}/v1/traces`);
+      expect(output).not.toContain('localhost:0');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("the setup hint names every option core requires with setupNodeSdk (serviceName included)", async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      server = main(['--port=0']);
+      await new Promise((resolve) => server.once('listening', resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      const output = log.mock.calls.map((args) => args.join(' ')).join('\n');
+      expect(output).toMatch(/instrumentMcpServer\(server, \{ serviceName: '[^']+', setupNodeSdk: true, exporterUrl: 'http:\/\/localhost:\d+\/v1\/traces' \}\)/);
+    } finally {
+      log.mockRestore();
+    }
+  });
+});

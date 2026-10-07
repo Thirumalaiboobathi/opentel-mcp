@@ -50,8 +50,13 @@ function fail(message) {
   throw new StopWithFailure();
 }
 
+// On Windows, npm/npx are .cmd shims, which Node refuses to execute
+// without a shell (EINVAL since the CVE-2024-27980 fix). Elsewhere, no
+// shell -- unchanged behavior.
+const useShell = process.platform === 'win32';
+
 function run(cmd, args, options) {
-  return execFileSync(cmd, args, { stdio: 'pipe', encoding: 'utf8', ...options });
+  return execFileSync(cmd, args, { stdio: 'pipe', encoding: 'utf8', shell: useShell, ...options });
 }
 
 /**
@@ -105,12 +110,15 @@ async function main() {
     // symlink's realpath, which makes it exit silently when invoked this
     // way -- see bin/opentel-mcp-ui.js's guard for the fix.
     const [binName] = Object.keys(pkg.bin ?? {});
-    const binPath = join(consumerDir, 'node_modules', '.bin', binName);
+    // On Windows npm writes a .cmd shim here instead of a symlink -- the
+    // same entry point npx resolves on that platform.
+    const binPath = join(consumerDir, 'node_modules', '.bin', useShell ? `${binName}.cmd` : binName);
     console.log(`verify-tarball: starting the installed bin via node_modules/.bin --demo --port=${VERIFY_PORT}...`);
 
     child = spawn(binPath, ['--demo', `--port=${VERIFY_PORT}`], {
       cwd: consumerDir,
       stdio: ['ignore', 'pipe', 'pipe'],
+      shell: useShell,
     });
 
     let output = '';
