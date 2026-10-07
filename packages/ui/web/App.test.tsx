@@ -155,7 +155,7 @@ async function renderApp() {
 }
 
 describe('App shell (no spans yet)', () => {
-  it('renders the empty state when there is nothing to show', async () => {
+  it('renders the waiting state when there is nothing to show', async () => {
     const el = await renderApp();
     expect(el.textContent).toContain('Waiting for spans');
   });
@@ -373,5 +373,69 @@ describe('App: live SSE updates', () => {
 
     const counts = Array.from(el.querySelectorAll('.matrix-count')).map((n) => n.textContent);
     expect(counts).toEqual(['1', '—', '0', '0']);
+  });
+});
+
+describe('App: connect screen (live instance, no spans yet)', () => {
+  it('shows "Connect your server" with this instance\'s OTLP endpoint and the exact setup snippet', async () => {
+    mockBackend([], metaWith());
+    const el = await renderApp();
+
+    expect(el.querySelector('.connect-screen')).not.toBeNull();
+    expect(el.textContent).toContain('Connect your server');
+
+    const endpoint = `${window.location.origin}/v1/traces`;
+    expect(el.querySelector('[data-testid="connect-endpoint"]')?.textContent).toBe(endpoint);
+
+    const snippet = el.querySelector('[data-testid="connect-snippet"]')?.textContent ?? '';
+    expect(snippet).toContain("import { instrumentMcpServer } from 'opentel-mcp';");
+    expect(snippet).toContain("serviceName: 'my-mcp-server',");
+    expect(snippet).toContain('setupNodeSdk: true,');
+    expect(snippet).toContain(`exporterUrl: '${endpoint}',`);
+
+    expect(el.querySelector('[role="status"]')?.textContent).toContain('Waiting for spans');
+    // Not the dashboard.
+    expect(el.querySelector('.matrix-count')).toBeNull();
+  });
+
+  it('switches to the live dashboard automatically when the first span arrives over SSE', async () => {
+    mockBackend([], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('.connect-screen')).not.toBeNull();
+
+    const first = span({ id: 'first', status: 'ERROR', errorType: 'tool_error', toolName: 'fetch_report' });
+    setBackendData([first], metaWith());
+    await act(async () => {
+      FakeEventSource.instances[0]!.emit(first);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(el.querySelector('.connect-screen')).toBeNull();
+    const counts = Array.from(el.querySelectorAll('.matrix-count')).map((n) => n.textContent);
+    expect(counts).toEqual(['0', '—', '0', '1']);
+  });
+
+  it('--demo never shows the connect screen, even with an empty buffer', async () => {
+    mockBackend([], { ...metaWith(), demo: true });
+    const el = await renderApp();
+    expect(el.querySelector('.connect-screen')).toBeNull();
+    expect(el.textContent).not.toContain('Connect your server');
+  });
+
+  it('--demo with its fixture shows the dashboard, not the connect screen', async () => {
+    mockBackend([span({ id: 'd1' })], { ...metaWith(), demo: true });
+    const el = await renderApp();
+    expect(el.querySelector('.connect-screen')).toBeNull();
+    expect(el.querySelector('.matrix-count')).not.toBeNull();
+  });
+
+  it('does not flash the connect screen before /api/meta has loaded', async () => {
+    mockBackend([], metaWith());
+    // Hold /api/meta (and so the initial Promise.all) open.
+    const pending = vi.fn(() => new Promise(() => {}));
+    vi.stubGlobal('fetch', pending as unknown as typeof fetch);
+    const el = await renderApp();
+    expect(el.querySelector('.connect-screen')).toBeNull();
   });
 });

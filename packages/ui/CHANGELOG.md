@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Connect screen.** Without `--demo`, a dashboard that hasn't received
+  any spans yet now shows "Connect your server" instead of an empty
+  page: this instance's OTLP/HTTP endpoint (`<origin>/v1/traces`), the
+  exact `instrumentMcpServer(server, { serviceName, setupNodeSdk: true,
+  exporterUrl })` snippet to point a server at it, and a "Waiting for
+  spans…" state. It switches to the live dashboard on the first span,
+  over the existing SSE stream, with no reload. `--demo` never shows it.
+
 ## 0.1.1
 
 First-impression fixes found while preparing a demo recording of the

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import './App.css';
 import { Sidebar } from './components/Sidebar';
 import { EmptyState } from './components/EmptyState';
+import { ConnectScreen } from './components/ConnectScreen';
 import { ObservationMatrix } from './components/ObservationMatrix';
 import { SilentFailureFeed } from './components/SilentFailureFeed';
 import { DetectorBanner } from './components/DetectorBanner';
@@ -27,7 +28,12 @@ export function App() {
             <ObservationMatrix counts={counts} meta={meta} selectedCell={selectedCell} onSelectCell={setSelectedCell} />
             <SilentFailureFeed spans={spans} selectedCell={selectedCell} />
           </>
+        ) : meta && !meta.demo ? (
+          // Live (non-demo) instance, nothing received yet. Switches to the
+          // dashboard above on the first SSE span -- no reload.
+          <ConnectScreen origin={window.location.origin} />
         ) : (
+          // /api/meta not loaded yet (or a demo with an empty fixture).
           <EmptyState />
         )}
       </main>

@@ -65,8 +65,11 @@ instrumentMcpServer(server, {
 });
 ```
 
-Make real tool calls against your server and they'll appear in the
-dashboard live, over Server-Sent Events — no page reload needed.
+Until the first span arrives, the dashboard shows a **Connect your
+server** screen with this exact snippet, pre-filled with the endpoint the
+instance is actually listening on. Make real tool calls against your
+server and the dashboard replaces it live, over Server-Sent Events — no
+page reload needed.
 
 **Environment variable, as an alternative to hardcoding the URL:**
 `opentel-mcp` core doesn't read an env var for `exporterUrl` itself (it's
