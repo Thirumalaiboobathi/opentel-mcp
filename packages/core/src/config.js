@@ -12,6 +12,7 @@ import { resolveSchemaDriftConfig } from './schema-drift/config.js';
 import { resolveErrorRecordingConfig } from './error-recording/config.js';
 import { resolveFlushTimeout } from './flush-on-exit.js';
 import { resolveUnactionableErrorsConfig } from './unactionable.js';
+import { resolveStalenessConfig } from './staleness.js';
 
 /**
  * @typedef {object} CostTrackingOptions
@@ -91,8 +92,9 @@ import { resolveUnactionableErrorsConfig } from './unactionable.js';
  *   what a THROWN exception (not a tool-level `isError: true` result, which never carries a JS Error and is
  *   unaffected) puts on the mcp.tool.call / tools/list span (ADR 019, docs/adr/019-raw-content-on-spans.md
  *   Part 1, v0.13.0): `{ mode: 'full' | 'normalized' | 'none' }`. Defaults to `{ mode: 'full' }` —
- *   byte-identical to every release before v0.13.0 (span.recordException(err) plus setStatus({ message:
- *   err.message }), uncapped). `'normalized'` reuses fingerprint/normalize/message.js's normalizeMessage()
+ *   the exception event span.recordException(err) would record plus setStatus({ message }), with credentials
+ *   scrubbed (fingerprint/normalize/secrets.js) and the message/stack capped at 4096/16384 characters (v0.17.0;
+ *   raw and uncapped before that). `'normalized'` reuses fingerprint/normalize/message.js's normalizeMessage()
  *   for the exception message and fingerprint/normalize/stack.js's parseAndNormalizeStack() for the
  *   stacktrace (cwd-stripped, node_modules-version-collapsed) — no new scrubbing pipeline. `'none'` sets
  *   only the ERROR status code, no message, no exception event — the same pattern already used for a
@@ -117,6 +119,12 @@ import { resolveUnactionableErrorsConfig } from './unactionable.js';
  *   (default 10) characters of text with no image/audio/resource item. `{ enabled: true, minTextLength: 10 }`
  *   by default; independent of `fingerprinting`. Span-only: never a metric label. Also settable via
  *   `OTEL_MCP_UNACTIONABLE_ERRORS_ENABLED` / `OTEL_MCP_UNACTIONABLE_ERRORS_MIN_TEXT_LENGTH` (lower precedence).
+ * @property {{ enabled?: boolean, tools?: Record<string, { maxAgeMs: number }> }} [staleness] - ADR 027
+ *   (docs/adr/027-staleness-detection.md): a tool reports freshness in
+ *   `result._meta['io.github.thirumalaiboobathi.opentel-mcp/freshness']` (`{ asOf, maxAgeMs | freshUntil }`) and
+ *   successful responses get `mcp.tool.freshness.*` span attributes plus the `mcp.tool.stale_responses`
+ *   counter. `tools[name].maxAgeMs` overrides that tool's own window (config can't supply `asOf`). On by
+ *   default; tools that don't report freshness are untouched. A stale response is NOT an error.
  * @property {{ resources?: boolean, prompts?: boolean }} [coverage] - ADR 026 (docs/adr/026-resources-prompts-coverage.md),
  *   opt-in, both off by default: also trace `resources/read`, `resources/list`, `resources/templates/list`
  *   (`resources: true`) and `prompts/get`, `prompts/list` (`prompts: true`). Spans are named by method
@@ -350,5 +358,6 @@ export function resolveOptions(options) {
     flushOnExit: setupNodeSdk ? resolveFlushOnExit(opts.flushOnExit) : null,
     unactionableErrors: resolveUnactionableErrorsConfig(opts.unactionableErrors),
     coverage: resolveCoverage(opts.coverage),
+    staleness: resolveStalenessConfig(opts.staleness),
   };
 }

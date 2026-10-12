@@ -169,3 +169,63 @@ describe('computeToolHealth', () => {
     expect(computeToolHealth([])).toEqual([]);
   });
 });
+
+describe('gradeTool -- stale-data signal (ADR 027, core 0.17.0+)', () => {
+  const VERDICT = 'mcp.tool.freshness.verdict';
+  const fresh = (count: number) => ok(count, { attributes: { [VERDICT]: 'fresh' } });
+  const stale = (count: number) => ok(count, { attributes: { [VERDICT]: 'stale' } });
+  const unknown = (count: number) => ok(count, { attributes: { [VERDICT]: 'unknown' } });
+
+  it('a tool that never reports freshness: n/a, graded on the other four, and n/a is not mentioned', () => {
+    const h = gradeTool('t', ok(20));
+    expect(h.signals!.staleRate).toBeNull();
+    expect(h.grade).toBe('A');
+    expect(h.freshnessVerdicts).toBe(0);
+    expect(h.explanation).not.toMatch(/stale/i);
+    expect(h.explanation).toContain('worst of the 4 signal grades');
+  });
+
+  it('rate is stale / (fresh + stale): 3 of 13 is 23% -> D, named as the driver', () => {
+    const h = gradeTool('t', [...fresh(10), ...stale(3)]);
+    expect(h.signals!.staleRate).toEqual({ value: 3 / 13, grade: 'D' });
+    expect(h.grade).toBe('D');
+    expect(h.drivers).toEqual(['staleRate']);
+    expect(h.staleResponses).toBe(3);
+    expect(h.explanation).toContain('stale data 23% (D)');
+    expect(h.explanation).toContain('worst of the 5 signal grades');
+  });
+
+  it('unknown verdicts and responses without freshness count toward neither side', () => {
+    const h = gradeTool('t', [...fresh(9), ...stale(1), ...unknown(30), ...ok(30)]);
+    expect(h.freshnessVerdicts).toBe(10);
+    expect(h.signals!.staleRate!.value).toBe(0.1);
+  });
+
+  it(`fewer than ${MIN_CALLS} verdicts: n/a, explained, and graded on the other four`, () => {
+    const h = gradeTool('t', [...ok(16), ...stale(4)]);
+    expect(h.signals!.staleRate).toBeNull();
+    expect(h.grade).toBe('A');
+    expect(h.explanation).toContain('Stale data: n/a, only 4 responses with a freshness verdict (needs 10)');
+  });
+
+  it('stale responses are not failures: the silent-failure and error rates stay A', () => {
+    const h = gradeTool('t', stale(10));
+    expect(h.signals!.silentFailureRate.grade).toBe('A');
+    expect(h.signals!.errorRate.grade).toBe('A');
+    expect(h.grade).toBe('F');
+    expect(h.drivers).toEqual(['staleRate']);
+  });
+
+  it('a stale signal and a failure signal tied for worst are both drivers', () => {
+    const h = gradeTool('t', [...fresh(8), ...stale(2), ...silent(2).map((s) => ({ ...s, attributes: {} }))]);
+    // stale 2/10 = 20% (D); silent 2/12 = 17% (D)
+    expect(h.grade).toBe('D');
+    expect(h.drivers).toEqual(['silentFailureRate', 'staleRate']);
+  });
+
+  it('ignores unrecognized verdict values rather than counting them', () => {
+    const h = gradeTool('t', ok(12, { attributes: { [VERDICT]: 'STALE!' } }));
+    expect(h.freshnessVerdicts).toBe(0);
+    expect(h.signals!.staleRate).toBeNull();
+  });
+});

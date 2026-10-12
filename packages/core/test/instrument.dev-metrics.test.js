@@ -76,7 +76,7 @@ describe('dev-mode metrics under setupNodeSdk: true (ADR 023)', () => {
     ).toBe(true);
   });
 
-  it('drives all 12 known instruments through real feature triggers and sees each one printed to stderr', async () => {
+  it('drives all 13 known instruments through real feature triggers and sees each one printed to stderr', async () => {
     const stderrLines = [];
     vi.spyOn(console, 'error').mockImplementation((line) => stderrLines.push(String(line)));
 
@@ -104,8 +104,15 @@ describe('dev-mode metrics under setupNodeSdk: true (ADR 023)', () => {
       model: 'claude-sonnet-5',
     };
 
+    // ADR 027: data older than the tool's own freshness window.
+    const STALE_RESULT = {
+      content: [{ type: 'text', text: 'ok' }],
+      _meta: { 'io.github.thirumalaiboobathi.opentel-mcp/freshness': { asOf: Date.now() - 60_000, maxAgeMs: 1_000 } },
+    };
+
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (request.params.name === 'costed') return COSTED_RESULT;
+      if (request.params.name === 'stale') return STALE_RESULT;
       if (request.params.name === 'flaky') return FAILING_RESULT;
       if (request.params.name === 'throws') throw new Error('boom');
       return SUCCESS_RESULT;
@@ -120,6 +127,8 @@ describe('dev-mode metrics under setupNodeSdk: true (ADR 023)', () => {
     await invokeToolCall(server, { name: 'throws', arguments: {} }).catch(() => {});
     // mcp.tool.tokens.total, mcp.tool.cost.total (plus calls/duration again)
     await invokeToolCall(server, { name: 'costed', arguments: {} });
+    // mcp.tool.stale_responses
+    await invokeToolCall(server, { name: 'stale', arguments: {} });
     // mcp.tool.silent_failures x3, which also crosses the default thrash
     // threshold on the 3rd call: mcp.tool.loop.detected/.length/.duration/
     // .wasted_tokens/.wasted_cost_usd (the latter two record unconditionally,
@@ -148,6 +157,7 @@ describe('dev-mode metrics under setupNodeSdk: true (ADR 023)', () => {
       'mcp.tool.loop.wasted_cost_usd',
       'mcp.tool.loop.duration',
       'mcp.tool.schema_drift.detected',
+      'mcp.tool.stale_responses',
     ];
     for (const name of expectedInstruments) {
       expect(stderr, `expected a stderr line for ${name}`).toContain(`[opentel-mcp metrics] ${name}`);

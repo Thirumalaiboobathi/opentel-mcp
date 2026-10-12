@@ -530,3 +530,30 @@ void coverageOne;
 // @ts-expect-error -- coverage flags are booleans
 const coverageBad: InstrumentOptions = { coverage: { resources: 'yes' } };
 void coverageBad;
+
+// ADR 027: staleness detection -- the _meta key, the FreshnessMeta helper
+// type tool authors use for autocomplete, and the per-tool override.
+import { FRESHNESS_META_KEY } from '../src/index.js';
+import type { FreshnessMeta, FreshnessVerdict } from '../src/index.js';
+expectTypeOf(FRESHNESS_META_KEY).toEqualTypeOf<'io.github.thirumalaiboobathi.opentel-mcp/freshness'>();
+const quoteFreshness: FreshnessMeta = { asOf: '2026-10-12T14:30:00Z', maxAgeMs: 5_000 };
+const barsFreshness: FreshnessMeta = { asOf: 1_791_799_200_000, freshUntil: '2026-10-12T20:00:00Z' };
+const bothFreshness: FreshnessMeta = { asOf: 1_791_799_200_000, maxAgeMs: 1_000, freshUntil: 1_791_799_300_000 };
+const toolResult = { content: [], _meta: { [FRESHNESS_META_KEY]: quoteFreshness } };
+void barsFreshness;
+void bothFreshness;
+void toolResult;
+// @ts-expect-error -- asOf alone isn't a valid FreshnessMeta: it needs maxAgeMs or freshUntil
+const freshnessNoWindow: FreshnessMeta = { asOf: '2026-10-12T14:30:00Z' };
+void freshnessNoWindow;
+// @ts-expect-error -- maxAgeMs is a number
+const freshnessBadMaxAge: FreshnessMeta = { asOf: 1, maxAgeMs: '5000' };
+void freshnessBadMaxAge;
+expectTypeOf<FreshnessVerdict>().toEqualTypeOf<'fresh' | 'stale' | 'unknown'>();
+const stalenessOverride: InstrumentOptions = { staleness: { tools: { get_quote: { maxAgeMs: 2_000 } } } };
+const stalenessOff: InstrumentOptions = { staleness: { enabled: false } };
+void stalenessOverride;
+void stalenessOff;
+// @ts-expect-error -- config can only override maxAgeMs, not asOf
+const stalenessBad: InstrumentOptions = { staleness: { tools: { get_quote: { asOf: 1 } } } };
+void stalenessBad;

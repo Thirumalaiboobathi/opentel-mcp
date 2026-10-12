@@ -44,6 +44,15 @@ import { createServer as createHttpServer } from 'node:http';
 import { computeSummary } from './summary.js';
 import { describeInMemoryTrackerAvailability, inspectTransport } from './meta.js';
 import { parseOtlpJsonTraceRequest } from './otlp-json-receiver.js';
+import { checkRequest, checkOtlpContentType, MAX_OTLP_BODY_BYTES } from './request-guard.js';
+import { buildContentSecurityPolicy } from './csp.js';
+
+/** Sent on every response (v0.3.0). */
+const BASE_SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Referrer-Policy': 'no-referrer',
+};
 
 const PLACEHOLDER_HTML = `<!doctype html>
 <html>
@@ -103,8 +112,16 @@ export function createRequestHandler({
   demo = false,
 }) {
   const buffer = collector.buffer;
+  // Computed once: the hashes of exactly the inline script/style being served.
+  const pageHeaders = {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Security-Policy': buildContentSecurityPolicy(spaHtml),
+    'X-Frame-Options': 'DENY',
+    'Cache-Control': 'no-store',
+  };
 
   return function handleRequestSync(req, res) {
+    for (const [name, value] of Object.entries(BASE_SECURITY_HEADERS)) res.setHeader(name, value);
     handleRequest(req, res).catch((err) => {
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err?.message ?? 'internal error' }));
@@ -118,6 +135,15 @@ export function createRequestHandler({
   async function handleRequest(req, res) {
     const url = new URL(req.url ?? '/', 'http://localhost');
 
+    // Host (DNS rebinding) and Origin (cross-site requests) checks; see request-guard.js.
+    const rejected = checkRequest(req, url.pathname);
+    if (rejected) {
+      res.writeHead(rejected.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: rejected.error }));
+      req.resume();
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/v1/traces') {
       await handleOtlpTraces(req, res, collector);
       return;
@@ -130,7 +156,7 @@ export function createRequestHandler({
     }
 
     if (url.pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, pageHeaders);
       res.end(spaHtml);
       return;
     }
@@ -245,26 +271,72 @@ function writeSseEvent(res, span, seq) {
 }
 
 /**
+ * POST /v1/traces. JSON only, at most MAX_OTLP_BODY_BYTES, and nothing in
+ * the body can crash the server: a bad body is a 4xx, an aborted request
+ * is dropped.
+ *
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  * @param {import('./collector-span-processor.js').CollectorSpanProcessor} collector
  */
 function handleOtlpTraces(req, res, collector) {
   return new Promise((resolve) => {
+    const reply = (status, payload, close = false) => {
+      if (!res.headersSent) res.writeHead(status, { 'Content-Type': 'application/json', ...(close ? { Connection: 'close' } : {}) });
+      res.end(JSON.stringify(payload));
+      resolve();
+    };
+
+    const badType = checkOtlpContentType(req.headers['content-type']);
+    if (badType) {
+      req.resume();
+      reply(badType.status, { error: badType.error });
+      return;
+    }
+
+    const tooLarge = { error: `OTLP request body exceeds ${MAX_OTLP_BODY_BYTES} bytes; send smaller batches.` };
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > MAX_OTLP_BODY_BYTES) {
+      req.resume();
+      reply(413, tooLarge, true);
+      return;
+    }
+
     const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    let received = 0;
+    let done = false;
+    req.on('data', (chunk) => {
+      if (done) return;
+      received += chunk.length;
+      if (received > MAX_OTLP_BODY_BYTES) {
+        // Chunked body that turned out too big: stop buffering, answer now,
+        // and discard the rest.
+        done = true;
+        chunks.length = 0;
+        reply(413, tooLarge, true);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('error', () => {
+      done = true;
+      resolve();
+    });
+    req.on('aborted', () => {
+      done = true;
+      resolve();
+    });
     req.on('end', () => {
+      if (done) return;
+      done = true;
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         const spans = parseOtlpJsonTraceRequest(body);
         for (const span of spans) collector.ingestSerializedSpan(span);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ partialSuccess: {} }));
+        reply(200, { partialSuccess: {} });
       } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err?.message ?? 'invalid OTLP payload' }));
+        reply(400, { error: `invalid OTLP/HTTP JSON payload: ${err instanceof Error ? err.message : 'unparseable'}`.slice(0, 300) });
       }
-      resolve();
     });
   });
 }

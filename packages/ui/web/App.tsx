@@ -4,7 +4,8 @@ import { Sidebar } from './components/Sidebar';
 import { EmptyState } from './components/EmptyState';
 import { ConnectScreen } from './components/ConnectScreen';
 import { ObservationMatrix } from './components/ObservationMatrix';
-import { SilentFailureFeed } from './components/SilentFailureFeed';
+import { SilentFailureFeed, type FeedChoice } from './components/SilentFailureFeed';
+import { StaleLine } from './components/StaleLine';
 import { DetectorBanner } from './components/DetectorBanner';
 import { HeroStat } from './components/HeroStat';
 import { ToolHealth } from './components/ToolHealth';
@@ -16,6 +17,7 @@ import { isToolCallSpan } from './data/method';
 export function App() {
   const { spans, summary, meta } = useDashboardData();
   const [selectedCell, setSelectedCell] = useState<MatrixCell | null>(null);
+  const [feedChoice, setFeedChoice] = useState<FeedChoice | null>(null);
 
   // Any span at all means a server is connected (leave the connect
   // screen); only tools/call spans feed the tool views below.
@@ -30,11 +32,19 @@ export function App() {
         {hasSpans ? (
           <>
             <HeroStat counts={counts} />
+            <StaleLine
+              spans={toolSpans}
+              onOpen={() => {
+                setFeedChoice({ cell: selectedCell ?? 'failureMissed', view: 'stale' });
+                const feed = document.getElementById('span-feed');
+                if (typeof feed?.scrollIntoView === 'function') feed.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }}
+            />
             <DetectorBanner meta={meta} />
             <ObservationMatrix counts={counts} meta={meta} selectedCell={selectedCell} onSelectCell={setSelectedCell} />
             <ToolHealth spans={toolSpans} />
             <Operations spans={spans} />
-            <SilentFailureFeed spans={toolSpans} selectedCell={selectedCell} />
+            <SilentFailureFeed spans={toolSpans} selectedCell={selectedCell} choice={feedChoice} onChoice={setFeedChoice} />
           </>
         ) : meta && !meta.demo ? (
           // Live (non-demo) instance, nothing received yet. Switches to the

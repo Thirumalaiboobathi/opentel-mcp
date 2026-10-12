@@ -3,7 +3,7 @@
 ## What this is
 
 The same "echo" tool as `examples/hello-server`, but built on `McpServer`
-— the high-level `.tool()` registration API most real MCP servers use —
+— the high-level `registerTool()` registration API most real MCP servers use —
 instead of the low-level `Server` class. `instrumentMcpServer()`
 auto-detects `McpServer` by duck-typing (see `detectServerKind` in
 `src/instrument.js`) and instruments its inner `Server` transparently, no

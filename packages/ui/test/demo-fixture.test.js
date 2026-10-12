@@ -6,13 +6,13 @@ import { isToolCallSpan } from '../src/span-method.js';
 import { computeToolHealth } from '../web/data/healthGrades.ts';
 
 describe('buildDemoFixture', () => {
-  it('produces a realistic mix matching the design brief\'s worked example (42 success, 7 visible failures, 11 missed-by-otel failures)', () => {
+  it('produces a realistic mix: 68 successes (42 + 26 market-data), 7 visible failures, 11 missed-by-otel failures', () => {
     const spans = buildDemoFixture();
     const buffer = new SpanBuffer({ capacity: spans.length });
     for (const span of spans) buffer.push(span);
 
     const { buffered } = computeSummary({ instrumentedServer: {}, buffer });
-    expect(buffered).toEqual({ total: 60, success: 42, error: 7, silentFailure: 11 });
+    expect(buffered).toEqual({ total: 86, success: 68, error: 7, silentFailure: 11 });
   });
 
   it('every span is well-formed (unique id, MCP method name, valid status)', () => {
@@ -54,7 +54,30 @@ describe('buildDemoFixture', () => {
       run_query: 'D',
       send_email: 'F',
       list_calendars: null,
+      get_quote: 'D',
+      get_daily_bars: 'C',
     });
+  });
+
+  it('tells the staleness story (ADR 027): market-data tools with fresh, stale and unknown verdicts, all successful', () => {
+    const spans = buildDemoFixture();
+    const verdict = (s) => s.attributes['mcp.tool.freshness.verdict'];
+    const withVerdict = spans.filter((s) => verdict(s) !== undefined);
+    expect(new Set(withVerdict.map((s) => s.toolName))).toEqual(new Set(['get_quote', 'get_daily_bars']));
+    expect(withVerdict.every((s) => s.status === 'OK' && s.errorType === undefined)).toBe(true);
+    const count = (tool, v) => spans.filter((s) => s.toolName === tool && verdict(s) === v).length;
+    expect([count('get_quote', 'fresh'), count('get_quote', 'stale'), count('get_quote', 'unknown')]).toEqual([10, 3, 1]);
+    expect([count('get_daily_bars', 'fresh'), count('get_daily_bars', 'stale')]).toEqual([10, 1]);
+    // One bars response reported no freshness at all: no verdict, not "fresh".
+    expect(spans.filter((s) => s.toolName === 'get_daily_bars' && verdict(s) === undefined)).toHaveLength(1);
+    // The quote window is seconds; the bars window comes from freshUntil.
+    const sources = (tool) => new Set(spans.filter((s) => s.toolName === tool).map((s) => s.attributes['mcp.tool.freshness.limit_source']).filter(Boolean));
+    expect(sources('get_quote')).toEqual(new Set(['max_age_ms']));
+    expect(sources('get_daily_bars')).toEqual(new Set(['fresh_until']));
+    // Every stale span carries an age above its limit.
+    for (const s of withVerdict.filter((x) => verdict(x) === 'stale')) {
+      expect(s.attributes['mcp.tool.freshness.data_age_ms']).toBeGreaterThan(s.attributes['mcp.tool.freshness.max_age_ms']);
+    }
   });
 
   it('includes some silent failures flagged unactionable (ADR 025), and only silent failures carry the flag', () => {

@@ -98,6 +98,16 @@
   color: var(--color-failure);
 }
 
+.feed-pill-stale {
+  background: var(--color-stale-bg);
+  color: var(--color-stale);
+}
+
+.feed-age {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+}
+
 .feed-side-detected {
   border-color: var(--border-strong);
 }

@@ -15,6 +15,7 @@ const ROW_LABELS = {
   errorRate: 'Error rate',
   thrashEpisodes: 'Thrash episodes',
   p95LatencyMs: 'p95 latency',
+  staleRate: 'Stale-data rate',
 };
 
 const formatPercent = (v) => `${Math.round(v * 100)}%`;

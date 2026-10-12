@@ -77,6 +77,7 @@ import { ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
  *   recordTokens: (toolName: string | undefined, model: string | undefined, totalTokens: number, pricingStatus: string) => void,
  *   recordCost: (toolName: string | undefined, model: string | undefined, costUsd: number, pricingStatus: string) => void,
  *   recordOperationDuration: (method: string, durationMs: number, errorType?: string) => void,
+ *   recordStaleResponse: (toolName: string | undefined) => void,
  * }}
  */
 export function setupMeter(packageVersion) {
@@ -113,7 +114,20 @@ export function setupMeter(packageVersion) {
     unit: 'ms',
   });
 
+  // ADR 027 (v0.17.0): successful responses whose data was older than the
+  // tool's own freshness window. gen_ai.tool.name only -- no new label key,
+  // and no verdict/age label (data age is span-only).
+  const staleResponses = meter.createCounter('mcp.tool.stale_responses', {
+    description:
+      'Number of successful MCP tool calls whose data was older than the freshness the tool reported (ADR 027). Not an error.',
+  });
+
   return {
+    recordStaleResponse(toolName) {
+      staleResponses.add(1, {
+        [ATTR_GEN_AI_TOOL_NAME]: toolName,
+      });
+    },
     recordOperationDuration(method, durationMs, errorType) {
       operationDuration.record(durationMs, {
         [ATTR_MCP_METHOD_NAME]: method,
