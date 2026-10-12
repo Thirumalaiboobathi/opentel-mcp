@@ -4,7 +4,7 @@ import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { createServer } from '../src/server.js';
 import { CollectorSpanProcessor } from '../src/collector-span-processor.js';
-import { MAX_OTLP_BODY_BYTES, isAllowedHost, isSameOrigin } from '../src/request-guard.js';
+import { MAX_OTLP_BODY_BYTES, MAX_DISCARDED_BODY_BYTES, isAllowedHost, isSameOrigin } from '../src/request-guard.js';
 import { buildContentSecurityPolicy, extractInlineBlocks } from '../src/csp.js';
 import { main } from '../bin/opentel-mcp-ui.js';
 import { withUI } from '../src/with-ui.js';
@@ -182,20 +182,15 @@ describe('B6: DNS rebinding (Host header validation)', () => {
 });
 
 describe('B7: OTLP receiver limits', () => {
-  it('rejects a declared oversized body with 413 before reading it', async () => {
-    const res = await request(port, {
-      method: 'POST',
-      path: '/v1/traces',
-      headers: { ...json, 'Content-Length': String(MAX_OTLP_BODY_BYTES + 1) },
-    }).catch((e) => ({ status: 'socket', error: e }));
-    expect(res.status).toBe(413);
-    expect(collector.buffer.size).toBe(0);
-    expect((await request(port, { path: '/api/summary' })).status).toBe(200);
-  });
-
-  it('rejects an oversized chunked body with 413, without buffering it, and keeps serving', async () => {
-    const res = await new Promise((resolve) => {
-      const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/v1/traces', headers: json }, (r) => {
+  /**
+   * Streams `totalBytes` of body (declared up front via Content-Length when
+   * `declare` is set, chunked otherwise) and resolves with the status the
+   * client saw, or 'socket' if the connection failed before a response.
+   */
+  function upload(totalBytes, { declare = false } = {}) {
+    return new Promise((resolve) => {
+      const headers = { ...json, ...(declare ? { 'Content-Length': String(totalBytes) } : {}) };
+      const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/v1/traces', headers }, (r) => {
         r.resume();
         resolve({ status: r.statusCode });
       });
@@ -203,15 +198,40 @@ describe('B7: OTLP receiver limits', () => {
       const chunk = Buffer.alloc(1024 * 1024, 0x20);
       let sent = 0;
       const pump = () => {
-        while (sent < 12) {
-          sent++;
-          if (!req.write(chunk)) return req.once('drain', pump);
+        while (sent < totalBytes) {
+          const piece = sent + chunk.length <= totalBytes ? chunk : chunk.subarray(0, totalBytes - sent);
+          sent += piece.length;
+          if (!req.write(piece)) return req.once('drain', pump);
         }
         req.end();
       };
       pump();
     });
+  }
+
+  // These two assert 413 strictly: the server answers, then reads and
+  // discards the rest of the upload instead of closing mid-write, so the
+  // client always gets to read the response. (Closing raced the 413
+  // against EPIPE/ECONNRESET, which failed CI on Node 20 and on Windows.)
+  it('rejects a body whose declared Content-Length is over the limit with 413', async () => {
+    const res = await upload(MAX_OTLP_BODY_BYTES + 1, { declare: true });
     expect(res.status).toBe(413);
+    expect(collector.buffer.size).toBe(0);
+    expect((await request(port, { path: '/api/summary' })).status).toBe(200);
+  });
+
+  it('rejects an oversized chunked body with 413, without buffering it, and keeps serving', async () => {
+    const res = await upload(12 * 1024 * 1024);
+    expect(res.status).toBe(413);
+    expect(collector.buffer.size).toBe(0);
+    expect((await request(port, { path: '/api/summary' })).status).toBe(200);
+  });
+
+  it('cuts off a sender that keeps going far past the limit, and keeps serving', async () => {
+    // The 413 may or may not be read before the cut; either is fine here.
+    // What matters is that the server stops reading and stays up.
+    const res = await upload(MAX_DISCARDED_BODY_BYTES + 8 * 1024 * 1024);
+    expect([413, 'socket']).toContain(res.status);
     expect((await request(port, { path: '/api/summary' })).status).toBe(200);
   });
 
@@ -290,6 +310,13 @@ describe('B9: Content-Security-Policy on the dashboard page', () => {
     );
     expect(scripts).toEqual(['a("<style>")', 'b()']);
     expect(styles).toEqual(['p{}']);
+  });
+
+  it('hashes CRLF (Windows line endings) the way browsers do, as LF', () => {
+    const crlf = '<script>\r\nconst a = 1;\r\nconst b = 2;\r</script><style>\r\np{}\r\n</style>';
+    const lf = '<script>\nconst a = 1;\nconst b = 2;\n</script><style>\np{}\n</style>';
+    expect(buildContentSecurityPolicy(crlf)).toBe(buildContentSecurityPolicy(lf));
+    expect(buildContentSecurityPolicy(crlf)).toContain(sha('\nconst a = 1;\nconst b = 2;\n'));
   });
 
   it("a page with no inline blocks gets script-src 'none'", () => {

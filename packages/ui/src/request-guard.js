@@ -26,6 +26,13 @@ const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
 export const MAX_OTLP_BODY_BYTES = 8 * 1024 * 1024;
 
 /**
+ * After a 413, the rest of an oversized upload is read and thrown away (so
+ * the sender can read the 413 instead of hitting a reset mid-write), up to
+ * this many bytes in total. Past it, the connection is cut.
+ */
+export const MAX_DISCARDED_BODY_BYTES = 64 * 1024 * 1024;
+
+/**
  * Splits a Host header value (`name[:port]`, IPv6 in brackets).
  *
  * @param {string} host

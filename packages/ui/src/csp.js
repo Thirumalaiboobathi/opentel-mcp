@@ -38,8 +38,16 @@ export function extractInlineBlocks(html) {
   return { scripts, styles };
 }
 
-/** @param {string} text */
-const sha256 = (text) => `'sha256-${createHash('sha256').update(text, 'utf8').digest('base64')}'`;
+/**
+ * The hash a browser computes for an inline block. The HTML parser turns
+ * every CRLF and lone CR into LF before the element's text exists, so a
+ * page with Windows line endings must be hashed the same way, or its own
+ * script and stylesheet would be blocked.
+ *
+ * @param {string} text
+ */
+const sha256 = (text) =>
+  `'sha256-${createHash('sha256').update(text.replace(/\r\n?/g, '\n'), 'utf8').digest('base64')}'`;
 
 /**
  * The CSP header value for `html`.

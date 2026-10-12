@@ -44,7 +44,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { computeSummary } from './summary.js';
 import { describeInMemoryTrackerAvailability, inspectTransport } from './meta.js';
 import { parseOtlpJsonTraceRequest } from './otlp-json-receiver.js';
-import { checkRequest, checkOtlpContentType, MAX_OTLP_BODY_BYTES } from './request-guard.js';
+import { checkRequest, checkOtlpContentType, MAX_OTLP_BODY_BYTES, MAX_DISCARDED_BODY_BYTES } from './request-guard.js';
 import { buildContentSecurityPolicy } from './csp.js';
 
 /** Sent on every response (v0.3.0). */
@@ -281,10 +281,25 @@ function writeSseEvent(res, span, seq) {
  */
 function handleOtlpTraces(req, res, collector) {
   return new Promise((resolve) => {
-    const reply = (status, payload, close = false) => {
-      if (!res.headersSent) res.writeHead(status, { 'Content-Type': 'application/json', ...(close ? { Connection: 'close' } : {}) });
+    const reply = (status, payload) => {
+      if (!res.headersSent) res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(payload));
       resolve();
+    };
+
+    // Too big: answer 413 straight away, then keep reading and discarding
+    // the rest of the body. Closing the connection while the sender is
+    // still writing races the 413 against a reset (EPIPE/ECONNRESET), and
+    // the sender often sees only the reset. A sender that keeps going far
+    // past the limit is cut off.
+    let received = 0;
+    const rejectTooLarge = () => {
+      reply(413, { error: `OTLP request body exceeds ${MAX_OTLP_BODY_BYTES} bytes; send smaller batches.` });
+      req.on('data', (chunk) => {
+        received += chunk.length;
+        if (received > MAX_DISCARDED_BODY_BYTES) req.destroy();
+      });
+      req.resume();
     };
 
     const badType = checkOtlpContentType(req.headers['content-type']);
@@ -294,30 +309,26 @@ function handleOtlpTraces(req, res, collector) {
       return;
     }
 
-    const tooLarge = { error: `OTLP request body exceeds ${MAX_OTLP_BODY_BYTES} bytes; send smaller batches.` };
     const declared = Number(req.headers['content-length']);
     if (Number.isFinite(declared) && declared > MAX_OTLP_BODY_BYTES) {
-      req.resume();
-      reply(413, tooLarge, true);
+      rejectTooLarge();
       return;
     }
 
     const chunks = [];
-    let received = 0;
     let done = false;
-    req.on('data', (chunk) => {
-      if (done) return;
+    const collect = (chunk) => {
       received += chunk.length;
       if (received > MAX_OTLP_BODY_BYTES) {
-        // Chunked body that turned out too big: stop buffering, answer now,
-        // and discard the rest.
         done = true;
         chunks.length = 0;
-        reply(413, tooLarge, true);
+        req.off('data', collect);
+        rejectTooLarge();
         return;
       }
       chunks.push(chunk);
-    });
+    };
+    req.on('data', collect);
     req.on('error', () => {
       done = true;
       resolve();

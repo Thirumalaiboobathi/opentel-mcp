@@ -61,12 +61,17 @@ own machine, can use it.
   unaffected: server-to-server requests carry no `Origin` header.
 - **Behavior change: `/v1/traces` accepts OTLP/HTTP JSON only.** Any other
   `Content-Type` gets `415`, with a message saying so; opentel-mcp core's
-  `exporterUrl` already sends JSON. Bodies over 8 MiB get `413`. Malformed
+  `exporterUrl` already sends JSON. Bodies over 8 MiB get `413`; the rest
+  of the upload is read and discarded so the sender actually receives the
+  413 (rather than a connection reset mid-upload), and a sender still going
+  past 64 MiB is disconnected. Malformed
   or deeply nested payloads get `400`, and an aborted upload is dropped;
   neither can crash the server.
 - **Strict Content-Security-Policy on the dashboard page.** Only the page's
   own inline script and stylesheet may run, allowed by SHA-256 hash (no
-  `'unsafe-inline'`); no external loads, no framing. A custom `spaHtml`
+  `'unsafe-inline'`); no external loads, no framing. Hashes are computed
+  the way browsers compute them, with CRLF line endings treated as LF, so
+  a page built or edited on Windows isn't blocked by its own policy. A custom `spaHtml`
   passed to `withUI()` gets a policy computed from its own inline blocks,
   so one that loads scripts from elsewhere would now be blocked. Every
   response also carries `X-Content-Type-Options: nosniff`.

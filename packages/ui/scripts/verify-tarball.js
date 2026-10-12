@@ -44,8 +44,58 @@ const VERIFY_PORT = 18_319;
 
 class StopWithFailure extends Error {}
 
+
+/**
+ * On GitHub Actions, also emit the message as an `::error` annotation, so
+ * the reason shows on the PR and through the public API, not only in the
+ * (sign-in only) raw job log.
+ *
+ * @param {string} message
+ */
+function annotate(message) {
+  if (process.env.GITHUB_ACTIONS !== 'true') return;
+  const escaped = String(message).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+  console.log(`::error title=verify-tarball (opentel-mcp-ui)::${escaped}`);
+}
+
+/**
+ * Removes a temp dir without ever failing the gate: on Windows a process
+ * that just exited can hold a handle for a moment (EBUSY/EPERM), so retry,
+ * then just warn.
+ *
+ * @param {string} dir
+ */
+function removeTempDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (error) {
+    console.warn(`verify-tarball: could not remove temp dir ${dir} (${error?.code ?? error}); leaving it.`);
+  }
+}
+
+/**
+ * Stops the dashboard. On Windows it was started through npm's .cmd shim
+ * (shell: true), so child.kill() would end only cmd.exe and leave node.exe
+ * running in the temp project, which then can't be deleted. Kill the tree.
+ *
+ * @param {import('node:child_process').ChildProcess | undefined} child
+ */
+function stopChild(child) {
+  if (!child || child.exitCode !== null) return;
+  if (useShell && child.pid) {
+    try {
+      execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+      return;
+    } catch {
+      // fall through to a plain kill
+    }
+  }
+  child.kill();
+}
+
 function fail(message) {
   console.error(`\nverify-tarball: FAILED\n${message}\n`);
+  annotate(message);
   process.exitCode = 1;
   throw new StopWithFailure();
 }
@@ -166,13 +216,19 @@ async function main() {
     if (!(error instanceof StopWithFailure)) {
       console.error('\nverify-tarball: FAILED (unexpected error)\n');
       console.error(error);
+      annotate(`unexpected error: ${error?.stack ?? error}`);
       process.exitCode = 1;
     }
   } finally {
-    if (child && !child.killed) child.kill();
-    rmSync(packDir, { recursive: true, force: true });
-    rmSync(consumerDir, { recursive: true, force: true });
+    stopChild(child);
+    removeTempDir(packDir);
+    removeTempDir(consumerDir);
   }
 }
 
-main();
+main().catch((error) => {
+  console.error('\nverify-tarball: FAILED (unexpected error)\n');
+  console.error(error);
+  annotate(`unexpected error: ${error?.stack ?? error}`);
+  process.exitCode = 1;
+});

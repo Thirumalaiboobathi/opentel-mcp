@@ -98,15 +98,47 @@ function parseIndexExports(src) {
   // Locally declared exports (not re-exported from a sibling file).
   for (const m of src.matchAll(/export\s+interface\s+(\w+)/g)) types.add(m[1]);
   for (const m of src.matchAll(/export\s+type\s+(\w+)(?=[\s<=])/g)) types.add(m[1]);
-  for (const m of src.matchAll(/export\s+function\s+(\w+)/g)) values.add(m[1]);
-  for (const m of src.matchAll(/export\s+const\s+(\w+)/g)) values.add(m[1]);
-  for (const m of src.matchAll(/export\s+class\s+(\w+)/g)) values.add(m[1]);
+  // `declare` is optional: a hand-written .d.ts usually spells a value
+  // export `export declare const X: ...` (FRESHNESS_META_KEY, v0.17.0).
+  for (const m of src.matchAll(/export\s+(?:declare\s+)?function\s+(\w+)/g)) values.add(m[1]);
+  for (const m of src.matchAll(/export\s+(?:declare\s+)?const\s+(\w+)/g)) values.add(m[1]);
+  for (const m of src.matchAll(/export\s+(?:declare\s+)?class\s+(\w+)/g)) values.add(m[1]);
 
   return { values: [...values], types: [...types] };
 }
 
+
+/**
+ * On GitHub Actions, also emit the message as an `::error` annotation, so
+ * the reason shows on the PR and through the public API, not only in the
+ * (sign-in only) raw job log.
+ *
+ * @param {string} message
+ */
+function annotate(message) {
+  if (process.env.GITHUB_ACTIONS !== 'true') return;
+  const escaped = String(message).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+  console.log(`::error title=verify-tarball (opentel-mcp)::${escaped}`);
+}
+
+/**
+ * Removes a temp dir without ever failing the gate: on Windows a process
+ * that just exited can hold a handle for a moment (EBUSY/EPERM), so retry,
+ * then just warn.
+ *
+ * @param {string} dir
+ */
+function removeTempDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (error) {
+    console.warn(`verify-tarball: could not remove temp dir ${dir} (${error?.code ?? error}); leaving it.`);
+  }
+}
+
 function fail(message) {
   console.error(`\nverify-tarball: FAILED\n${message}\n`);
+  annotate(message);
   process.exitCode = 1;
   throw new StopWithFailure();
 }
@@ -213,8 +245,8 @@ async function main() {
 
     console.log('\nverify-tarball: PASSED — packed tarball type-checks under --strict and loads at runtime.\n');
   } finally {
-    rmSync(packDir, { recursive: true, force: true });
-    rmSync(consumerDir, { recursive: true, force: true });
+    removeTempDir(packDir);
+    removeTempDir(consumerDir);
   }
 }
 
@@ -222,6 +254,7 @@ main().catch((error) => {
   if (!(error instanceof StopWithFailure)) {
     console.error('\nverify-tarball: FAILED (unexpected error)\n');
     console.error(error);
+    annotate(`unexpected error: ${error?.stack ?? error}`);
     process.exitCode = 1;
   }
 });
