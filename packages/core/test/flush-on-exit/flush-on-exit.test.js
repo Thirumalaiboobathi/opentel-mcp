@@ -26,6 +26,8 @@ import {
 const FIXTURE = fileURLToPath(new URL('./fixture.mjs', import.meta.url));
 const FLUSH_MARKER = '[opentel-mcp metrics] mcp.tool.calls';
 const POSIX = process.platform !== 'win32';
+/** OTLPTraceExporter's default export timeout: how long shutdown would hang on a dead endpoint without the cap. */
+const UNCAPPED_EXPORT_TIMEOUT_MS = 10_000;
 
 /**
  * @param {{ mode?: string, options?: object, env?: Record<string, string>, signal?: NodeJS.Signals }} spec
@@ -116,8 +118,12 @@ describe('flushOnExit in a real process (ADR 024)', { timeout: 20_000 }, () => {
           signal: 'SIGTERM',
         });
         expect(result.signal).toBe('SIGTERM');
-        // Cap plus generous scheduling tolerance; without the cap this would take ~10 s.
-        expect(result.msFromSignal).toBeLessThan(FLUSH_ON_EXIT_MAX_TIMEOUT_MS + 1500);
+        // Without the cap, shutdown waits out the OTLP exporter's own 10 s
+        // timeout. Half of that is still an unambiguous proof the cap
+        // applied, and leaves ~4 s of slack over the 1 s cap for process
+        // spawn/exit latency on a loaded CI runner (this test failed once
+        // at cap + 1.5 s under a full parallel suite).
+        expect(result.msFromSignal).toBeLessThan(UNCAPPED_EXPORT_TIMEOUT_MS / 2);
       } finally {
         for (const socket of sockets) socket.destroy();
         await new Promise((resolve) => blackhole.close(resolve));

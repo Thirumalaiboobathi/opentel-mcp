@@ -15,24 +15,31 @@ npx opentel-mcp-ui --demo
 ```
 
 Opens a dashboard at `http://127.0.0.1:4319` seeded with realistic
-fixture data: 60 tool calls (42 clean successes, 7 ordinary thrown/protocol
+fixture data: 86 tool calls (68 clean successes, 7 ordinary thrown/protocol
 failures a standard OTel setup would also catch, and 11 silent failures it
-wouldn't), plus a few resource and prompt calls. Nothing to configure, no
+wouldn't), plus a few resource and prompt calls. Two of the tools are
+market-data tools whose successful responses are sometimes stale. Nothing to configure, no
 MCP server required. The panels:
 
 - **Observation matrix** — SUCCESS/FAILURE rows × visible-to-OTel/missed-by-OTel
   columns. The "missed" + "failure" cell is the whole point: calls a
   plain OTel setup would show as green.
 - **Tool health** — an A–F grade per tool from silent-failure rate, error
-  rate, thrash episodes and p95 latency. The grade is the worst of the four
+  rate, thrash episodes, p95 latency and, for tools that report freshness
+  (opentel-mcp 0.17.0+), stale-data rate. The grade is the worst of them
   (latency alone never goes below C), and hovering a grade tells you which
-  signal set it. Tools with fewer than 10 calls show "Not enough data".
+  signal set it. Tools with fewer than 10 calls show "Not enough data". With
+  freshness data, the panel also counts stale responses.
   Formula and thresholds: [`docs/health-grades.md`](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/docs/health-grades.md).
 - **Silent-failure feed** — defaults to that exact cell, newest-first,
   with the side-by-side comparison of what standard tracing would have
   shown versus what actually happened. With opentel-mcp 0.16.0+, a filter
   narrows it to **errors your agent can't act on**: `isError: true` with
-  no content, or under 10 characters of text and nothing else.
+  no content, or under 10 characters of text and nothing else. With
+  opentel-mcp 0.17.0+, rows show the data's age when the tool reported it,
+  and a **Stale data** filter lists successful responses whose data was
+  older than the tool's own limit ("data 4m old · limit 5s"). See
+  opentel-mcp's "Staleness detection" section for how a tool reports it.
 - **Resources & prompts** — with opentel-mcp 0.16.0+'s opt-in
   `coverage: { resources: true, prompts: true }`, calls to `resources/*`
   and `prompts/*` by method (and prompt name), with their failures. Hidden
@@ -159,6 +166,18 @@ topology and want a confident answer instead.
 - **Never binds to anything but `127.0.0.1`.** This dashboard has no
   authentication, so it is never reachable from another machine, even on
   your own local network, regardless of flags.
+- **Never answers other websites (0.3.0+).** Requests must be addressed to
+  `localhost`, `127.0.0.1` or `[::1]` on the dashboard's own port, and
+  browser requests to `/api/*` or `/v1/traces` must come from the
+  dashboard itself; anything else gets `403`. That stops a page open in
+  your browser from reading your spans or posting fake ones, including via
+  DNS rebinding. Reaching it through a port forward? Forward to the same
+  port number it listens on.
+- **Never accepts anything but OTLP/HTTP JSON on `/v1/traces`** (`415`
+  otherwise), up to 8 MiB per request (`413` above that).
+- **Never runs anything the page didn't ship with.** The dashboard is
+  served with a strict Content-Security-Policy that allows only its own
+  inline script and stylesheet, by hash.
 
 ## Version compatibility
 

@@ -62,12 +62,14 @@ export interface ErrorRecordingConfig {
    * unaffected by this option) puts on the `tools/call`/`tools/list`
    * span, per ADR 019 Part 1:
    *
-   * - `'full'` — `span.recordException(err)` plus `span.setStatus({
-   *   message: err.message })`, exactly as every release before
-   *   v0.13.0. `exception.message`/`exception.stacktrace` carry
-   *   `err.message`/`err.stack` verbatim, uncapped — matching the OTel
-   *   ecosystem's own default (see ADR 019's "What OpenTelemetry's own
-   *   semantic conventions say").
+   * - `'full'` — the same `exception` event `span.recordException(err)`
+   *   records, plus `span.setStatus({ message })`, from the raw
+   *   `err.message`/`err.stack` (ids, paths, URLs kept). Since v0.17.0,
+   *   credentials (Bearer/Basic tokens, AWS key ids, `sk-`/`ghp_`/`xox…`
+   *   keys, JWTs, URL passwords, `token=`/`api_key=`/`password=` values)
+   *   are replaced with `<SECRET>`, and the message/stack are capped at
+   *   4096/16384 characters. Before v0.17.0 they were verbatim and
+   *   uncapped.
    * - `'normalized'` — the same `exception` event shape, but
    *   `exception.message` is run through `normalizeMessage()`
    *   (`src/fingerprint/normalize/message.js` — the same

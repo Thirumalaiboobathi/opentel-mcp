@@ -11,6 +11,7 @@
  */
 
 import { diag } from '@opentelemetry/api';
+import { isPlainObject, readResultMetaField } from '../result-meta.js';
 
 /**
  * @typedef {Object} TokenUsage
@@ -34,14 +35,6 @@ const TOKEN_FIELD_PAIRS = [
   ['prompt_tokens', 'completion_tokens'],
   ['inputTokens', 'outputTokens'],
 ];
-
-/**
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlainObject(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 /**
  * @param {unknown} value
@@ -84,7 +77,7 @@ function readModel(root) {
   const candidates = [
     root.model,
     isPlainObject(root.usage) ? root.usage.model : undefined,
-    isPlainObject(root._meta) ? root._meta.model : undefined,
+    readResultMetaField(root, 'model'),
   ];
 
   for (const candidate of candidates) {
@@ -176,10 +169,8 @@ export function defaultExtractor(toolResult) {
       if (fromParsedRoot) return fromParsedRoot;
     }
 
-    if (isPlainObject(toolResult._meta)) {
-      const fromMeta = buildUsage(toolResult._meta.usage, toolResult);
-      if (fromMeta) return fromMeta;
-    }
+    const fromMeta = buildUsage(readResultMetaField(toolResult, 'usage'), toolResult);
+    if (fromMeta) return fromMeta;
 
     return null;
   } catch (error) {

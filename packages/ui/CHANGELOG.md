@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.3.0
+
+Staleness: with opentel-mcp core 0.17.0+, the dashboard shows when a tool
+returned data older than its own freshness limit, a failure standard OTel
+renders as a clean 200 OK. Suggested by the r/mcp community. Everything
+new is hidden against older cores. The peer range is unchanged
+(`opentel-mcp >=0.8.0 <1.0.0`, which includes 0.17.0).
+
+### Added
+
+- **Stale data in the feed.** Rows show the data's age ("data 4m old")
+  when core reported it. A new **Stale data** filter lists stale responses
+  across all tools, each with the side-by-side comparison: "Standard OTel
+  would show: 200 OK · no error" vs "opentel-mcp detected: data 4m old ·
+  limit 5s".
+- **Stale-data rate, the fifth health-grade signal.** Stale responses ÷
+  responses with a `fresh` or `stale` verdict, with the same A–F bounds as
+  the failure rates. Tools with fewer than 10 such responses (including
+  every tool that doesn't report freshness) get n/a and are graded on the
+  other four. `docs/health-grades.md` is updated and still checked against
+  the code.
+- **Stale count in the Tool health panel:** "N stale responses across M
+  tools".
+- **A stale-data line under the headline:** "N responses served stale data
+  across M tools". Clicking it opens the feed's Stale data view. Hidden
+  when nothing is stale, and on older cores.
+- **Demo:** two market-data tools, `get_quote` (5 s window: 10 fresh, 3
+  stale, 1 malformed) and `get_daily_bars` (fresh until the session
+  closes: 10 fresh, 1 stale, 1 with no freshness data). The demo now has 86
+  tool calls (68 successes, 7 visible failures, 11 silent failures); the
+  silent-failure headline is unchanged (11 of 18). `get_quote` grades D and
+  `get_daily_bars` C, both on stale data alone.
+
+### Fixed
+
+- **Spans could be counted twice on page load.** The page loads the span
+  history and opens the live stream, and the stream replays the buffer on
+  connect; when the history arrived first, every span already buffered
+  showed up twice (doubling feed rows, tool call counts and grades' inputs
+  until reload). Spans are now de-duplicated by id.
+
+### Security
+
+The dashboard has no login, so these changes make sure only you, on your
+own machine, can use it.
+
+- **Still listens on `127.0.0.1` only** (unchanged, now covered by tests).
+  There is no `--host` option.
+- **Behavior change: requests must be addressed to this machine.** Any
+  request whose `Host` header isn't `localhost`, `127.0.0.1` or `[::1]` on
+  the dashboard's own port gets `403`. This blocks DNS-rebinding attacks,
+  where a website points its own domain at 127.0.0.1 to read your spans.
+  If you reach the dashboard through a port forward (SSH, a dev container),
+  forward to the **same port number** it listens on (default 4319).
+- **Behavior change: other websites can't use the API.** Browser requests
+  to `/api/*` and `/v1/traces` from any other origin (including other
+  `localhost` ports) get `403`, so a page open in your browser can neither
+  read your spans nor post fake ones. Your MCP server's OTLP export is
+  unaffected: server-to-server requests carry no `Origin` header.
+- **Behavior change: `/v1/traces` accepts OTLP/HTTP JSON only.** Any other
+  `Content-Type` gets `415`, with a message saying so; opentel-mcp core's
+  `exporterUrl` already sends JSON. Bodies over 8 MiB get `413`; the rest
+  of the upload is read and discarded so the sender actually receives the
+  413 (rather than a connection reset mid-upload), and a sender still going
+  past 64 MiB is disconnected. Malformed
+  or deeply nested payloads get `400`, and an aborted upload is dropped;
+  neither can crash the server.
+- **Strict Content-Security-Policy on the dashboard page.** Only the page's
+  own inline script and stylesheet may run, allowed by SHA-256 hash (no
+  `'unsafe-inline'`); no external loads, no framing. Hashes are computed
+  the way browsers compute them, with CRLF line endings treated as LF, so
+  a page built or edited on Windows isn't blocked by its own policy. A custom `spaHtml`
+  passed to `withUI()` gets a policy computed from its own inline blocks,
+  so one that loads scripts from elsewhere would now be blocked. Every
+  response also carries `X-Content-Type-Options: nosniff`.
+- Span data (tool names, error types, attribute values) is rendered as
+  text, never HTML; a test now renders `<script>` and `<img onerror>`
+  payloads to check this.
+
+### Compatibility
+
+- Against a core older than 0.17.0 (no `mcp.tool.freshness.*`
+  attributes): no filter, no count, no data age, and grades exactly as in
+  0.2.0.
+
 ## 0.2.0
 
 A connect screen for a fresh, empty dashboard, per-tool health grades,

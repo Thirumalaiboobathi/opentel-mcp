@@ -32,6 +32,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { npmCommand } from './npm-command.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8'));
@@ -44,19 +45,71 @@ const VERIFY_PORT = 18_319;
 
 class StopWithFailure extends Error {}
 
+
+/**
+ * On GitHub Actions, also emit the message as an `::error` annotation, so
+ * the reason shows on the PR and through the public API, not only in the
+ * (sign-in only) raw job log.
+ *
+ * @param {string} message
+ */
+function annotate(message) {
+  if (process.env.GITHUB_ACTIONS !== 'true') return;
+  const escaped = String(message).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+  console.log(`::error title=verify-tarball (opentel-mcp-ui)::${escaped}`);
+}
+
+/**
+ * Removes a temp dir without ever failing the gate: on Windows a process
+ * that just exited can hold a handle for a moment (EBUSY/EPERM), so retry,
+ * then just warn.
+ *
+ * @param {string} dir
+ */
+function removeTempDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (error) {
+    console.warn(`verify-tarball: could not remove temp dir ${dir} (${error?.code ?? error}); leaving it.`);
+  }
+}
+
+/**
+ * Stops the dashboard. On Windows it was started through npm's .cmd shim
+ * (shell: true), so child.kill() would end only cmd.exe and leave node.exe
+ * running in the temp project, which then can't be deleted. Kill the tree.
+ *
+ * @param {import('node:child_process').ChildProcess | undefined} child
+ */
+function stopChild(child) {
+  if (!child || child.exitCode !== null) return;
+  if (useShell && child.pid) {
+    try {
+      execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+      return;
+    } catch {
+      // fall through to a plain kill
+    }
+  }
+  child.kill();
+}
+
 function fail(message) {
   console.error(`\nverify-tarball: FAILED\n${message}\n`);
+  annotate(message);
   process.exitCode = 1;
   throw new StopWithFailure();
 }
 
-// On Windows, npm/npx are .cmd shims, which Node refuses to execute
-// without a shell (EINVAL since the CVE-2024-27980 fix). Elsewhere, no
-// shell -- unchanged behavior.
+// On Windows, the installed bin in node_modules/.bin is a .cmd shim,
+// which Node refuses to execute without a shell (EINVAL since the
+// CVE-2024-27980 fix). Elsewhere, no shell.
 const useShell = process.platform === 'win32';
 
-function run(cmd, args, options) {
-  return execFileSync(cmd, args, { stdio: 'pipe', encoding: 'utf8', shell: useShell, ...options });
+/** `npm <args>`, with no shell parsing the arguments (see npm-command.js). */
+function runNpm(args, options) {
+  const command = npmCommand(args);
+  return execFileSync(command.file, command.args, { stdio: 'pipe', encoding: 'utf8', shell: command.shell, ...options });
 }
 
 /**
@@ -89,15 +142,15 @@ async function main() {
 
   try {
     console.log('verify-tarball: npm pack...');
-    const packOutput = run('npm', ['pack', '--json', '--pack-destination', packDir], { cwd: rootDir });
+    const packOutput = runNpm(['pack', '--json', '--pack-destination', packDir], { cwd: rootDir });
     const [{ filename }] = JSON.parse(packOutput);
     const tarballPath = join(packDir, filename);
 
     console.log('verify-tarball: installing the packed tarball + real peer deps into a clean project...');
-    run('npm', ['init', '-y'], { cwd: consumerDir });
+    runNpm(['init', '-y'], { cwd: consumerDir });
     const peerSpecs = Object.entries(pkg.peerDependencies ?? {}).map(([name, range]) => `${name}@${range}`);
     try {
-      run('npm', ['install', tarballPath, ...peerSpecs], { cwd: consumerDir });
+      runNpm(['install', tarballPath, ...peerSpecs], { cwd: consumerDir });
     } catch (error) {
       fail(`npm install of the packed tarball + peer deps failed:\n\n${error.stdout || error.stderr || error.message}`);
     }
@@ -166,13 +219,19 @@ async function main() {
     if (!(error instanceof StopWithFailure)) {
       console.error('\nverify-tarball: FAILED (unexpected error)\n');
       console.error(error);
+      annotate(`unexpected error: ${error?.stack ?? error}`);
       process.exitCode = 1;
     }
   } finally {
-    if (child && !child.killed) child.kill();
-    rmSync(packDir, { recursive: true, force: true });
-    rmSync(consumerDir, { recursive: true, force: true });
+    stopChild(child);
+    removeTempDir(packDir);
+    removeTempDir(consumerDir);
   }
 }
 
-main();
+main().catch((error) => {
+  console.error('\nverify-tarball: FAILED (unexpected error)\n');
+  console.error(error);
+  annotate(`unexpected error: ${error?.stack ?? error}`);
+  process.exitCode = 1;
+});

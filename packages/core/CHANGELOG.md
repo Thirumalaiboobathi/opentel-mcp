@@ -1,5 +1,96 @@
 # Changelog
 
+## 0.17.0
+
+Staleness detection: a read tool that returns data older than its own
+freshness window now shows up, even though the call succeeded. Suggested by
+the r/mcp community. Opt-in per tool; tools that don't report freshness
+are untouched. No new metric label keys.
+
+### Added
+
+- **Staleness detection (ADR 027, `docs/adr/027-staleness-detection.md`).**
+  A tool reports freshness in its result's `_meta` under
+  `FRESHNESS_META_KEY` (`'io.github.thirumalaiboobathi.opentel-mcp/freshness'`,
+  a reverse-DNS key per the MCP spec): `{ asOf, maxAgeMs }` or
+  `{ asOf, freshUntil }` (both allowed; the earlier deadline wins).
+  `asOf`/`freshUntil` are epoch milliseconds or ISO 8601 strings with a
+  timezone. Every successful `tools/call` carrying it gets:
+  - span attributes `mcp.tool.freshness.verdict` (`fresh` | `stale` |
+    `unknown`), `.data_age_ms`, `.max_age_ms`, `.limit_source`
+    (`max_age_ms` | `fresh_until` | `config`) and, for `unknown`,
+    `.unknown_reason` (`invalid_as_of` | `future_as_of` | `missing_window`
+    | `invalid_window`);
+  - `+1` on the new `mcp.tool.stale_responses` counter (label:
+    `gen_ai.tool.name` only) when stale.
+  - **Stale is not an error:** span status stays `OK`, no `error.type`,
+    never a silent failure, ToolOutcome stays `SUCCESS`.
+  - Responses without the key get no verdict and no attributes.
+    `isError: true` responses are skipped.
+  - Malformed input (epoch seconds, timezone-less ISO strings, negative
+    windows, `freshUntil` before `asOf`, `asOf` more than 5 s in the
+    future, throwing getters…) never throws: it yields `unknown` with a
+    reason and at most one `diag.warn` per tool.
+  - Only `asOf`, `maxAgeMs` and `freshUntil` under that one key are read;
+    content and other `_meta` fields are never read for this, and raw
+    values never reach spans, metrics or logs (canary-tested).
+- **`staleness` option.** `staleness.tools[toolName].maxAgeMs` overrides a
+  tool's own window (config can't supply `asOf`); `staleness.enabled:
+  false` turns the feature off. On by default, which is a no-op for tools
+  that don't report freshness.
+- **Types:** `FRESHNESS_META_KEY`, `FreshnessMeta` (autocomplete for the
+  `_meta` value), `FreshnessTimestamp`, `FreshnessVerdict`, and
+  `InstrumentOptions.staleness`.
+
+### Security
+
+- **Credentials are scrubbed from recorded exceptions, in every mode.**
+  Bearer and Basic tokens, AWS access key ids, `sk-`/`sk-proj-`/`sk-ant-`,
+  Stripe, `ghp_`/`github_pat_`, Slack `xox…` and Google `AIza…` keys, JWTs,
+  passwords in URLs (`https://user:<password>@host`), and the values of keys like
+  `token=`, `api_key=`, `access_token=`, `password=`, `client_secret` are
+  replaced with `<SECRET>`. Ordinary words and ids (`token expired`, UUIDs,
+  commit hashes) are left alone.
+- **Behavior change: the default `errorRecording.mode: 'full'` is no
+  longer raw and uncapped.** It still records the error's type, message and
+  stack, keeping ids, paths, URLs and line numbers, but with credentials
+  scrubbed as above, the message capped at 4096 characters and the stack at
+  16384 (a ` …[truncated by opentel-mcp]` marker shows where).
+  `exception.type` is capped at 128 characters, as in `'normalized'` mode.
+  Ordinary errors are recorded exactly as before. There is no switch back
+  to unscrubbed output. To record *less*, use `'normalized'`, `'none'`, or
+  a `redactor`.
+- **Fingerprints change only for errors that contain a credential.** The
+  same patterns now run first in `'normalized'` mode and in fingerprinting,
+  so two errors that differ only by a leaked token now share one
+  fingerprint (before, each token value made its own). Expect a one-time
+  regrouping of those errors only.
+- A thrown value whose properties throw when read (e.g. a throwing
+  `message` getter) now still marks the span `ERROR`; before, the span was
+  left with no status.
+- New test: one canary test runs every feature at once (fingerprinting,
+  cost and budget, thrash, schema drift, unactionable errors,
+  resources/prompts coverage, staleness) on SDK v1 and v2, `Server` and
+  `McpServer`, and checks that no tool argument, result content, `_meta`
+  value, resource URI, prompt argument or request `_meta` reaches any span,
+  metric or diag log. Nothing leaked; no code change was needed.
+- New `SECURITY.md` at the repository root: private vulnerability reporting
+  and what the library does and doesn't record.
+
+### Changed
+
+- The cost extractor and staleness detection now read `result._meta`
+  through one shared accessor (`src/result-meta.js`). Extraction behavior is
+  unchanged.
+- Dev-mode metrics (`setupNodeSdk: true`) print 13 instruments, up from 12.
+- README examples and `examples/hello-mcpserver` use `registerTool()`
+  instead of the deprecated `server.tool()`.
+- README's configuration table now lists `unactionableErrors`, `coverage`
+  and `staleness`; the misplaced `unactionableErrors` doc comment in
+  `index.d.ts` is back on its own option.
+- Test: the flush-on-exit "capped at 1000 ms" check now allows up to 5 s
+  (half the uncapped 10 s), so a loaded CI runner can't fail it.
+
 ## 0.16.0
 
 Finishes what 0.15 started. Telemetry now survives the way MCP clients

@@ -19,6 +19,7 @@ import { toSpanAttributes, ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
 import { classifyFailureChannel } from './fingerprint/classify/channel.js';
 import { extractValidationPaths } from './fingerprint/classify/validation-paths.js';
 import { normalizeException, coerceError } from './fingerprint/normalize/exception.js';
+import { scrubSecrets } from './fingerprint/normalize/secrets.js';
 import { applyRedactor } from './error-recording/redactor.js';
 import { calculateCost, normalizeModelName, isValidModelId, describeInvalidModelId } from './cost/calculator.js';
 import { DEFAULT_PRICING_LAST_VERIFIED } from './cost/pricing.js';
@@ -33,6 +34,7 @@ import { detectObservationIntegrity } from './observation/integrity.js';
 import { InstanceRegistry } from './registry/instance-registry.js';
 import { registerFlushOnExit } from './flush-on-exit.js';
 import { applyUnactionableAttributes } from './unactionable.js';
+import { applyStaleness, createStalenessState } from './staleness.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_PROMPT_NAME,
@@ -514,6 +516,9 @@ export function instrumentMcpServer(input, options) {
   // not correctness-critical state, so a fresh instrumented server simply
   // gets a fresh warning budget rather than sharing one process-wide.
   const errorRecordingState = { warnedFailed: false };
+  // ADR 027: same "plain holder, not instanceKey-shared" reasoning — only
+  // the once-per-tool malformed-freshness warning lives here.
+  const stalenessState = createStalenessState();
   // Additive to instrumentMcpServer()'s existing return contract (the same
   // input object, for chaining — see this function's own docblock): a
   // getThrashSummary() method attached the same way shutdown() is, just
@@ -617,6 +622,8 @@ export function instrumentMcpServer(input, options) {
           costAttributionState,
           errorRecordingState,
           resolved.unactionableErrors,
+          resolved.staleness,
+          stalenessState,
         );
       } else if (schema === v1.ListToolsRequestSchema && schemaDriftDetector) {
         handler = wrapToolsListHandler(
@@ -677,6 +684,8 @@ export function instrumentMcpServer(input, options) {
           costAttributionState,
           errorRecordingState,
           resolved.unactionableErrors,
+          resolved.staleness,
+          stalenessState,
         );
       } else if (maybeHandler === undefined && method === TOOLS_LIST_METHOD && schemaDriftDetector) {
         handlerOrSchemas = wrapToolsListHandler(
@@ -1679,6 +1688,53 @@ function applyToolOutcomeThrown(toolOutcomeCounter) {
   }
 }
 
+/** v0.17.0: 'full' mode caps. Double 'normalized''s 2048-character message input, so 'full' stays the detailed mode. */
+export const MAX_FULL_EXCEPTION_MESSAGE_LENGTH = 4096;
+export const MAX_FULL_EXCEPTION_STACK_LENGTH = 16384;
+const TRUNCATION_MARKER = ' …[truncated by opentel-mcp]';
+
+/**
+ * @param {string} text
+ * @param {number} max
+ * @returns {string}
+ */
+function scrubAndCap(text, max) {
+  const scrubbed = scrubSecrets(text.length > max * 2 ? text.slice(0, max * 2) : text);
+  return scrubbed.length > max ? scrubbed.slice(0, max) + TRUNCATION_MARKER : scrubbed;
+}
+
+/**
+ * The 'full'-mode exception event, mirroring the installed SDK's own
+ * Span.recordException() (exception.type from `code`, else `name`;
+ * exception.message; exception.stacktrace), with scrubSecrets() applied
+ * and lengths capped. `attributes` is null when there is neither a type
+ * nor a message, where recordException() would also record nothing.
+ *
+ * @param {unknown} err
+ * @returns {{ attributes: Record<string, string> | null, statusMessage: string | undefined }}
+ */
+function describeFullException(err) {
+  /** @type {Record<string, string>} */
+  const attributes = {};
+  let statusMessage;
+  if (typeof err === 'string') {
+    attributes['exception.message'] = scrubAndCap(err, MAX_FULL_EXCEPTION_MESSAGE_LENGTH);
+  } else if (err) {
+    const e = /** @type {any} */ (err);
+    if (e.code) attributes['exception.type'] = String(e.code).slice(0, MAX_ERROR_CLASS_LENGTH);
+    else if (e.name) attributes['exception.type'] = String(e.name).slice(0, MAX_ERROR_CLASS_LENGTH);
+    if (typeof e.message === 'string' && e.message !== '') {
+      attributes['exception.message'] = scrubAndCap(e.message, MAX_FULL_EXCEPTION_MESSAGE_LENGTH);
+      statusMessage = attributes['exception.message'];
+    }
+    if (typeof e.stack === 'string' && e.stack !== '') {
+      attributes['exception.stacktrace'] = scrubAndCap(e.stack, MAX_FULL_EXCEPTION_STACK_LENGTH);
+    }
+  }
+  const hasAny = attributes['exception.type'] !== undefined || attributes['exception.message'] !== undefined;
+  return { attributes: hasAny ? attributes : null, statusMessage };
+}
+
 /**
  * Records a thrown exception onto `span` per `errorRecordingConfig.mode`
  * (ADR 019 Part 1, docs/adr/019-raw-content-on-spans.md, v0.13.0 Phase 1).
@@ -1689,12 +1745,15 @@ function applyToolOutcomeThrown(toolOutcomeCounter) {
  * SpanStatusCode.ERROR })` with no message, a few lines above in
  * wrapToolCallHandler — the exact pattern 'none' mode below reuses).
  *
- * - `'full'` (default): `span.recordException(err)` +
- *   `setStatus({ message: err?.message })` — byte-identical to every
- *   release before v0.13.0. This is the literal two-line call the
- *   catch blocks used inline before this function existed; taken
- *   unconditionally, with no new branching evaluated first, whenever
- *   mode is `'full'`.
+ * - `'full'` (default): the event `span.recordException(err)` would
+ *   record (`exception.type` from `code` else `name`, `exception.message`,
+ *   `exception.stacktrace`) plus `setStatus({ message })`, built by
+ *   describeFullException() with credentials scrubbed (scrubSecrets(),
+ *   `fingerprint/normalize/secrets.js`) and the message/stack capped at
+ *   MAX_FULL_EXCEPTION_MESSAGE_LENGTH / MAX_FULL_EXCEPTION_STACK_LENGTH
+ *   (v0.17.0). Ids, paths, URLs and line numbers are kept, which is what
+ *   still separates it from `'normalized'`. Before v0.17.0 this was the
+ *   native `recordException(err)` call, raw and uncapped.
  * - `'none'`: `setStatus({ code: ERROR })` only — no message, no
  *   `exception` event.
  * - `'normalized'`: a hand-built `exception` event carrying the same
@@ -1718,16 +1777,9 @@ function applyToolOutcomeThrown(toolOutcomeCounter) {
  *
  * `error.type` (`ATTR_ERROR_TYPE`, set by each call site immediately
  * after this call returns) is capped at `MAX_ERROR_CLASS_LENGTH`
- * regardless of mode — see each call site's own comment. The native
- * `exception.type` a `'full'`-mode `span.recordException(err)` call sets
- * internally is deliberately NOT capped here: `'full'` mode is defined
- * as byte-identical to pre-v0.13.0 behavior, so the native OTel SDK call
- * is left completely untouched, uncapped exception.type included. Only
- * `'normalized'` mode's hand-built event applies the cap to
- * `exception.type` too (mirroring `recordException()`'s own
- * `err.code?.toString() ?? err.name` derivation for what goes in that
- * field), since that event is already being constructed by hand either
- * way — there is no "untouched native call" to preserve for that mode.
+ * regardless of mode — see each call site's own comment. Since v0.17.0
+ * both hand-built events (`'full'` and `'normalized'`) cap
+ * `exception.type` the same way.
  *
  * Never throws — matches this library's fail-open discipline for
  * everything downstream of a real thrown error, the same guarantee
@@ -1821,12 +1873,22 @@ function recordThrownException(span, err, errorRecordingConfig, errorRecordingSt
       return;
     }
 
-    // 'full' (default) — byte-identical to pre-v0.13.0 behavior. Never
-    // references errorRecordingConfig.redactor at all (Decision 6).
-    span.recordException(err);
-    span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
+    // 'full' (default): the same three attributes span.recordException(err)
+    // sets, from the raw message and stack, but with credentials scrubbed
+    // and each capped (v0.17.0). Keeps the ids, paths, URLs and line numbers
+    // 'normalized' strips. Never references errorRecordingConfig.redactor
+    // at all (Decision 6).
+    const full = describeFullException(err);
+    if (full.attributes) span.addEvent('exception', full.attributes);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: full.statusMessage });
   } catch {
-    // Never throw — see this function's own docblock.
+    // Never throw — see this function's own docblock. Still mark the span
+    // failed when reading the error itself threw (e.g. a throwing getter).
+    try {
+      span.setStatus({ code: SpanStatusCode.ERROR });
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -1930,6 +1992,8 @@ function recordThrownException(span, err, errorRecordingConfig, errorRecordingSt
  *   through to applyCostAttribution() — see that function's own docblock and warnRejectedModel()'s.
  * @param {{ warnedFailed: boolean }} errorRecordingState - ADR 020 (v0.14.0 Phase 2): threaded through
  *   to recordThrownException()/applyRedactor() — see redactor.js's own docblock for what "once" means here.
+ * @param {import('./staleness.js').StalenessConfig} stalenessConfig - ADR 027: resolved `staleness` option.
+ * @param {{ warnedTools: Set<string> }} stalenessState - ADR 027: once-per-tool malformed-freshness warnings.
  */
 function wrapToolCallHandler(
   handler,
@@ -1950,6 +2014,8 @@ function wrapToolCallHandler(
   costAttributionState,
   errorRecordingState,
   unactionableErrorsConfig,
+  stalenessConfig,
+  stalenessState,
 ) {
   return (request, extra) => {
     const toolName = request?.params?.name;
@@ -2084,6 +2150,9 @@ function wrapToolCallHandler(
           );
         } else {
           span.setStatus({ code: SpanStatusCode.OK });
+          // ADR 027: freshness verdict from the tool's own _meta. Success
+          // branch only, and it never touches status: stale is not an error.
+          applyStaleness(span, metricsRecorder, toolName, result, stalenessConfig, stalenessState);
           applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker, costAttributionState);
           if (thrashSessionId !== null) {
             applyThrashSuccessClear(thrashConfig, thrashDetector, thrashSessionId, toolName);

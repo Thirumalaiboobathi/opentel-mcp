@@ -1333,6 +1333,26 @@ question rather than a content-exposure one).
 
 ---
 
+## Update (2026-10-12): default `'full'` mode now scrubs credentials and caps length (v0.17.0)
+
+The `recordException`/`setStatus` channel above was still raw and uncapped
+under the default `errorRecording.mode: 'full'`. As of v0.17.0, `'full'`
+builds the same exception event itself
+(`describeFullException()`, `src/instrument.js`), with credentials replaced
+by `<SECRET>` (`src/fingerprint/normalize/secrets.js`: Bearer/Basic tokens,
+AWS key ids, `sk-`/`sk-ant-`/`sk_live_`/`ghp_`/`github_pat_`/`xox…`/`AIza…`
+keys, JWTs, URL passwords, and values of `token=`/`api_key=`/`password=`
+and similar keys) and the message and stack capped at 4096 and 16384
+characters. Ids, paths, URLs and line numbers are kept, so `'full'` is still
+more detailed than `'normalized'`. The same credential patterns now run
+first in `normalizeMessage()`, so `'normalized'` mode and fingerprints
+cover them too.
+
+Still open: free-text content in an error message (a name in prose, a
+credential in a format no pattern matches) is recorded under `'full'`. This
+is a targeted scrubber, not a PII filter. `mcp.tool.model` is unchanged.
+Tests: `test/security.secrets.test.js`.
+
 ## 11. `gen_ai.tool.name` (and two related attributes) carry unvalidated, unbounded values onto metric labels
 
 **Target:** Unscheduled — the real options each have a genuine cost and

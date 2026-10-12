@@ -21,3 +21,33 @@
   font-weight: 500;
   color: var(--text-secondary);
 }
+
+/* ADR 027: secondary line under the hero, opens the Stale data view. */
+.hero-stale-line {
+  display: block;
+  margin: calc(-1 * var(--space-4)) 0 var(--space-6);
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.hero-stale-line:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
+.hero-stale-line:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+.hero-stale-number {
+  color: var(--color-stale);
+  font-weight: 700;
+}

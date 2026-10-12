@@ -62,7 +62,7 @@ export interface InstrumentOptions {
    * **Also stands up a dev-mode `MeterProvider` (ADR 023,
    * `docs/adr/023-dev-mode-metrics.md`, v0.15.0+)**, gated additionally by
    * `enableMetrics` (above, default `true`): a `PeriodicExportingMetricReader`
-   * exporting all 12 `mcp.tool.*`/`mcp.tool.loop.*`/`mcp.tool.schema_drift.*`
+   * exporting all 13 `mcp.tool.*`/`mcp.tool.loop.*`/`mcp.tool.schema_drift.*`
    * instruments to stderr every 5 seconds, in a compact
    * `name{attrs} = value` format — never `@opentelemetry/sdk-metrics`'
    * own `ConsoleMetricExporter`, which writes to stdout and would corrupt
@@ -105,20 +105,6 @@ export interface InstrumentOptions {
   flushOnExit?: boolean | { timeoutMs?: number };
 
   /**
-   * ADR 025: on every `isError: true` result, sets the span attributes
-   * `mcp.failure.unactionable` (boolean) and
-   * `mcp.failure.content_length_bucket` (`'empty' | 'tiny' | 'short' |
-   * 'medium' | 'long'`). Computed only from the whitespace-trimmed length of
-   * the text items and the count of non-text items, never from the text
-   * itself. Unactionable means no content, or fewer than `minTextLength`
-   * characters of text with no image/audio/resource item. Span-only (never a
-   * metric label); independent of `fingerprinting`. Also settable via
-   * `OTEL_MCP_UNACTIONABLE_ERRORS_ENABLED` /
-   * `OTEL_MCP_UNACTIONABLE_ERRORS_MIN_TEXT_LENGTH` (lower precedence).
-   *
-   * @default { enabled: true, minTextLength: 10 }
-   */
-  /**
    * ADR 026, opt-in (both off by default): also trace `resources/read`,
    * `resources/list`, `resources/templates/list` (`resources: true`) and
    * `prompts/get`, `prompts/list` (`prompts: true`). Spans are named by
@@ -139,10 +125,49 @@ export interface InstrumentOptions {
     prompts?: boolean;
   };
 
+  /**
+   * ADR 025: on every `isError: true` result, sets the span attributes
+   * `mcp.failure.unactionable` (boolean) and
+   * `mcp.failure.content_length_bucket` (`'empty' | 'tiny' | 'short' |
+   * 'medium' | 'long'`). Computed only from the whitespace-trimmed length of
+   * the text items and the count of non-text items, never from the text
+   * itself. Unactionable means no content, or fewer than `minTextLength`
+   * characters of text with no image/audio/resource item. Span-only (never a
+   * metric label); independent of `fingerprinting`. Also settable via
+   * `OTEL_MCP_UNACTIONABLE_ERRORS_ENABLED` /
+   * `OTEL_MCP_UNACTIONABLE_ERRORS_MIN_TEXT_LENGTH` (lower precedence).
+   *
+   * @default { enabled: true, minTextLength: 10 }
+   */
   unactionableErrors?: {
     enabled?: boolean;
     /** Integer 0–200. `0` flags only empty (or whitespace-only) errors. @default 10 */
     minTextLength?: number;
+  };
+
+  /**
+   * ADR 027 (docs/adr/027-staleness-detection.md): staleness detection. A
+   * tool reports how fresh its data is in
+   * `result._meta[FRESHNESS_META_KEY]` (see {@link FreshnessMeta}), and every
+   * successful `tools/call` that carries it gets `mcp.tool.freshness.*` span
+   * attributes (`verdict`: `fresh` | `stale` | `unknown`, `data_age_ms`,
+   * `max_age_ms`, `limit_source`, `unknown_reason`) and, when stale, `+1` on
+   * the `mcp.tool.stale_responses` counter (label: `gen_ai.tool.name`). A
+   * stale response is NOT an error: span status stays OK and it is never a
+   * silent failure. Tools that don't report freshness are untouched.
+   *
+   * @default { enabled: true }
+   */
+  staleness?: {
+    /** `false` turns the feature off: `_meta` isn't read. @default true */
+    enabled?: boolean;
+    /**
+     * Per-tool override of the freshness window, keyed by tool name. Replaces
+     * the tool's own `maxAgeMs`/`freshUntil`. Config can't supply `asOf`: a
+     * response without the freshness key still gets no verdict. An invalid
+     * value (negative, non-finite) is ignored with a `diag.warn`.
+     */
+    tools?: Record<string, { maxAgeMs: number }>;
   };
 
   /**
@@ -201,8 +226,9 @@ export interface InstrumentOptions {
    * `Error` and is unaffected by this option) puts on the `tools/call`/`tools/list` span (ADR 019,
    * `docs/adr/019-raw-content-on-spans.md` Part 1, v0.13.0).
    *
-   * Defaults to `{ mode: 'full' }` — byte-identical to every release before v0.13.0:
-   * `span.recordException(err)` plus `span.setStatus({ message: err.message })`, both uncapped.
+   * Defaults to `{ mode: 'full' }`: the exception event `span.recordException(err)` would record plus
+   * `span.setStatus({ message })`, from the raw message and stack but with credentials replaced by
+   * `<SECRET>` and the message/stack capped at 4096/16384 characters (v0.17.0; raw and uncapped before).
    * `'normalized'` reuses `normalizeException()` (`src/fingerprint/normalize/exception.js`) — the same
    * coercion + `normalizeMessage()`/`parseAndNormalizeStack()` step `computeFingerprint()`
    * (`src/fingerprint/compose.js`) uses for `mcp.failure.*` on the same `err` — for the exception message
@@ -546,3 +572,49 @@ export type { ErrorRecordingConfig, ErrorRecordingRedactor, ErrorRecordingRedact
 // not part of the public API.
 
 export type { ToolOutcome, ToolOutcomeCounts, ObservationIntegrity, ObservationState } from './observation/types.d.ts';
+
+// --- Staleness detection (ADR 027, src/staleness.js) ---
+
+/**
+ * The `result._meta` key a tool reports its data freshness under:
+ * `'io.github.thirumalaiboobathi.opentel-mcp/freshness'`. A reverse-DNS
+ * prefix, per the MCP spec's `_meta` key-name rules.
+ */
+export declare const FRESHNESS_META_KEY: 'io.github.thirumalaiboobathi.opentel-mcp/freshness';
+
+/** A timestamp: an ISO 8601 string WITH a timezone (`Z` or `±hh:mm`), or epoch milliseconds. */
+export type FreshnessTimestamp = string | number;
+
+/**
+ * The value a tool puts at `result._meta[FRESHNESS_META_KEY]`. `asOf` plus
+ * at least one of `maxAgeMs` / `freshUntil`; with both, the earlier
+ * deadline wins.
+ *
+ * @example
+ * return {
+ *   content: [{ type: 'text', text: JSON.stringify(quote) }],
+ *   _meta: {
+ *     [FRESHNESS_META_KEY]: { asOf: quote.timestamp, maxAgeMs: 5_000 } satisfies FreshnessMeta,
+ *   },
+ * };
+ */
+export type FreshnessMeta =
+  | {
+      /** When the data is from (not when the tool ran). */
+      asOf: FreshnessTimestamp;
+      /** How old the data may be and still count as fresh. Finite, >= 0. */
+      maxAgeMs: number;
+      /** Optional absolute deadline; the earlier of the two wins. */
+      freshUntil?: FreshnessTimestamp;
+    }
+  | {
+      /** When the data is from (not when the tool ran). */
+      asOf: FreshnessTimestamp;
+      /** Optional duration window; the earlier of the two wins. */
+      maxAgeMs?: number;
+      /** Absolute deadline, e.g. the close of the trading session. Not before `asOf`. */
+      freshUntil: FreshnessTimestamp;
+    };
+
+/** `mcp.tool.freshness.verdict`. */
+export type FreshnessVerdict = 'fresh' | 'stale' | 'unknown';

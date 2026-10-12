@@ -6,7 +6,7 @@
  *   npm install
  *   npm start
  *
- * Same idea as examples/hello-server, but using McpServer's `.tool()`
+ * Same idea as examples/hello-server, but using McpServer's `registerTool()`
  * registration API instead of the low-level Server's
  * `setRequestHandler(CallToolRequestSchema, ...)` — this is the API most
  * MCP servers actually use. instrumentMcpServer() auto-detects McpServer
@@ -31,13 +31,13 @@ import { z } from 'zod';
 
 const server = new McpServer({ name: 'hello-mcpserver', version: '0.1.0' });
 
-// Must run before any .tool()/.registerTool() call — see ADR 002.
+// Must run before any registerTool() call — see ADR 002.
 instrumentMcpServer(server, {
   serviceName: 'hello-mcpserver',
   setupNodeSdk: true,
 });
 
-server.tool('echo', { text: z.string() }, async ({ text }) => ({
+server.registerTool('echo', { inputSchema: { text: z.string() } }, async ({ text }) => ({
   content: [{ type: 'text', text: JSON.stringify({ echoed: text }) }],
 }));
 

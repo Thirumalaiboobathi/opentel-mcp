@@ -12,6 +12,58 @@
  * the exact comparison this whole project exists to make visible.
  */
 
+// Market-data tools (0.3.0, core 0.17.0's staleness detection, ADR 027).
+// Every one of these calls SUCCEEDS -- status OK, no error.type -- so they
+// add 26 to the clean-success count and nothing to the failure counts.
+// What standard OTel can't see is the data age: get_quote reports a 5 s
+// window and is stale 3 times out of 13 verdicts (D); get_daily_bars is
+// fresh until the session closes and served yesterday's bars once (C).
+// [verdict, dataAgeMs, maxAgeMs, limitSource] -- null = no freshness data.
+const QUOTE_FRESHNESS = [
+  ['fresh', 420, 5_000, 'max_age_ms'],
+  ['fresh', 1_150, 5_000, 'max_age_ms'],
+  ['fresh', 380, 5_000, 'max_age_ms'],
+  ['stale', 240_000, 5_000, 'max_age_ms'],
+  ['fresh', 2_600, 5_000, 'max_age_ms'],
+  ['fresh', 900, 5_000, 'max_age_ms'],
+  ['unknown', undefined, undefined, undefined, 'invalid_as_of'],
+  ['fresh', 3_800, 5_000, 'max_age_ms'],
+  ['stale', 18_400, 5_000, 'max_age_ms'],
+  ['fresh', 610, 5_000, 'max_age_ms'],
+  ['fresh', 1_900, 5_000, 'max_age_ms'],
+  ['stale', 95_000, 5_000, 'max_age_ms'],
+  ['fresh', 270, 5_000, 'max_age_ms'],
+  ['fresh', 4_100, 5_000, 'max_age_ms'],
+];
+const SESSION_MS = 6.5 * 3_600_000;
+const BARS_FRESHNESS = [
+  ['fresh', 1_800_000, SESSION_MS, 'fresh_until'],
+  ['fresh', 2_400_000, SESSION_MS, 'fresh_until'],
+  null,
+  ['fresh', 3_000_000, SESSION_MS, 'fresh_until'],
+  ['stale', 21 * 3_600_000, SESSION_MS, 'fresh_until'],
+  ['fresh', 3_600_000, SESSION_MS, 'fresh_until'],
+  ['fresh', 4_200_000, SESSION_MS, 'fresh_until'],
+  ['fresh', 4_800_000, SESSION_MS, 'fresh_until'],
+  ['fresh', 5_400_000, SESSION_MS, 'fresh_until'],
+  ['fresh', 6_000_000, SESSION_MS, 'fresh_until'],
+  ['fresh', 6_600_000, SESSION_MS, 'fresh_until'],
+  ['fresh', 7_200_000, SESSION_MS, 'fresh_until'],
+];
+
+/** The mcp.tool.freshness.* attributes core 0.17.0 sets (ADR 027 §5). */
+function freshnessAttributes(entry) {
+  if (!entry) return {};
+  const [verdict, dataAgeMs, maxAgeMs, limitSource, unknownReason] = entry;
+  return {
+    'mcp.tool.freshness.verdict': verdict,
+    ...(dataAgeMs !== undefined ? { 'mcp.tool.freshness.data_age_ms': dataAgeMs } : {}),
+    ...(maxAgeMs !== undefined ? { 'mcp.tool.freshness.max_age_ms': maxAgeMs } : {}),
+    ...(limitSource ? { 'mcp.tool.freshness.limit_source': limitSource } : {}),
+    ...(unknownReason ? { 'mcp.tool.freshness.unknown_reason': unknownReason } : {}),
+  };
+}
+
 // Per-tool allocation (0.2.0): chosen so the per-tool health grades
 // (web/data/healthGrades.ts, docs/health-grades.md) show a realistic
 // spread -- read_file A, search B (latency), write_file C, run_query D,
@@ -29,6 +81,7 @@ const SUCCESS_ALLOCATION = [
 const THRASH_ATTRIBUTE = 'mcp.tool.thrash_detected';
 
 let idCounter = 0;
+
 function nextId(prefix) {
   idCounter += 1;
   return `${prefix}-${idCounter.toString(16).padStart(6, '0')}`;
@@ -80,6 +133,25 @@ export function buildDemoFixture() {
         durationMs: toolName === 'search' ? 1200 + 100 * searchCalls++ : 20 + (i % 7) * 15,
         status: 'OK',
         attributes: { 'mcp.tool.argument_count': 1 + (i % 3) },
+      }),
+    );
+  }
+
+  // 26 market-data successes, interleaved quote/bars the way an agent
+  // polls them. Successes to OTel; the freshness attributes tell the rest.
+  const market = [];
+  for (let i = 0; i < Math.max(QUOTE_FRESHNESS.length, BARS_FRESHNESS.length); i++) {
+    if (i < QUOTE_FRESHNESS.length) market.push(['get_quote', QUOTE_FRESHNESS[i]]);
+    if (i < BARS_FRESHNESS.length) market.push(['get_daily_bars', BARS_FRESHNESS[i]]);
+  }
+  for (const [toolName, entry] of market) {
+    spans.push(
+      makeSpan({
+        toolName,
+        startTimeMs: tick(1_100),
+        durationMs: toolName === 'get_quote' ? 35 + (idCounter % 6) * 9 : 120 + (idCounter % 5) * 30,
+        status: 'OK',
+        attributes: { 'mcp.tool.argument_count': toolName === 'get_quote' ? 1 : 3, ...freshnessAttributes(entry) },
       }),
     );
   }

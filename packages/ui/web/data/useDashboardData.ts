@@ -43,7 +43,13 @@ export function useDashboardData(): DashboardData {
       ]);
       if (cancelled) return;
       capacityRef.current = history.capacity;
-      setSpans(history.spans);
+      // The SSE stream below also replays the buffer on connect, and either
+      // can arrive first: keep history, then anything SSE already added
+      // that history doesn't have.
+      setSpans((prev) => {
+        const ids = new Set(history.spans.map((s) => s.id));
+        return [...history.spans, ...prev.filter((s) => !ids.has(s.id))];
+      });
       setSummary(initialSummary);
       setMeta(initialMeta);
     }
@@ -56,6 +62,8 @@ export function useDashboardData(): DashboardData {
     source.onmessage = (event) => {
       const span = JSON.parse(event.data) as SerializedSpan;
       setSpans((prev) => {
+        // Already have it (from /api/spans/history, or a replay after reconnect).
+        if (prev.some((s) => s.id === span.id)) return prev;
         const next = [...prev, span];
         return next.length > capacityRef.current ? next.slice(next.length - capacityRef.current) : next;
       });

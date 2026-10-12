@@ -7,3 +7,5 @@ export { DEFAULT_CLASSIFIERS } from './fingerprint/classify/index.js';
 export { DEFAULT_PRICING, DEFAULT_PRICING_LAST_VERIFIED, isDefaultPricingStale } from './cost/pricing.js';
 export { defaultExtractor } from './cost/extractor.js';
 export { calculateCost } from './cost/calculator.js';
+
+export { FRESHNESS_META_KEY } from './staleness.js';

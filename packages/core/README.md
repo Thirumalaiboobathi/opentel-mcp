@@ -77,7 +77,7 @@ import { z } from 'zod';
 
 const server = new McpServer({ name: 'my-server', version: '1.0.0' });
 
-// Wraps every tool registered below. Must run BEFORE server.tool() —
+// Wraps every tool registered below. Must run BEFORE server.registerTool() —
 // see "Ordering constraint" below for why.
 instrumentMcpServer(server, {
   serviceName: 'my-mcp-server', // shows up on your traces
@@ -85,7 +85,7 @@ instrumentMcpServer(server, {
 });
 
 // A normal tool, registered exactly as usual.
-server.tool('echo', { text: z.string() }, async ({ text }) => ({
+server.registerTool('echo', { inputSchema: { text: z.string() } }, async ({ text }) => ({
   content: [{ type: 'text', text: `you said: ${text}` }],
 }));
 
@@ -300,7 +300,7 @@ problem" above) — exactly like the quickstart's `echo` tool, but with
 `isError: true` added and no `throw` involved:
 
 ```js
-server.tool('fetch_weather', { city: z.string() }, async ({ city }) => ({
+server.registerTool('fetch_weather', { inputSchema: { city: z.string() } }, async ({ city }) => ({
   isError: true,
   content: [{ type: 'text', text: `couldn't reach the weather service for ${city}` }],
 }));
@@ -399,11 +399,12 @@ The four base `mcp.tool.*` call/duration metrics below, via
 registered — **except under `setupNodeSdk: true`, which registers one for
 you (v0.15.0+); see "Dev-mode metrics" below.** Set `enableMetrics: false`
 to opt out even when one is (dev-mode included); tracing is unaffected
-either way. Source of truth: `src/metrics.js`. Twelve metrics exist
-across the library in total — this section's four, plus two cost/token
-metrics ("Cost & Token Attribution" below), five Agent Thrash Detection
-metrics ("Agent Thrash Detection" below), and one schema-drift metric
-("Tool schema drift detection" below).
+either way. Source of truth: `src/metrics.js`. Thirteen `mcp.tool.*`
+metrics exist across the library in total — this section's four, plus two
+cost/token metrics ("Cost & Token Attribution" below), five Agent Thrash
+Detection metrics ("Agent Thrash Detection" below), one schema-drift metric
+("Tool schema drift detection" below), and `mcp.tool.stale_responses`
+("Staleness detection" below).
 
 | Metric | Type | Unit | Attributes | Emitted when |
 |---|---|---|---|---|
@@ -579,6 +580,181 @@ See `dashboards/grafana-mcp-health.json` and `dashboards/dev/` in the repo
 for a full worked example (dashboard JSON + a script that exercises this
 exact setup end to end).
 
+## Staleness detection (v0.17.0)
+
+A read tool can return data older than it should be: a quote from four
+minutes ago, yesterday's bars after today's session opened. The call
+succeeds, the span is green, and the agent acts on stale data with full
+confidence. opentel-mcp can flag that, if the tool says how fresh its data
+is. The tool is the source of truth, because only it knows its own data
+cadence. Config is only an override. (Suggested by the r/mcp community.)
+
+**It's opt-in, per tool.** A tool adds one key to its result's `_meta`:
+
+```js
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { instrumentMcpServer, FRESHNESS_META_KEY } from 'opentel-mcp';
+import { z } from 'zod';
+
+const server = new McpServer({ name: 'market-data', version: '1.0.0' });
+
+// Before any registerTool() call.
+instrumentMcpServer(server, {
+  serviceName: 'market-data',
+  setupNodeSdk: true, // dev mode: prints spans to stderr
+});
+
+// Stand-in for your real feed. This quote is 4 minutes old.
+async function fetchQuote(symbol) {
+  return { symbol, price: 101.5, timestamp: Date.now() - 4 * 60_000 };
+}
+
+server.registerTool(
+  'get_quote',
+  { description: 'Latest quote for a symbol', inputSchema: { symbol: z.string() } },
+  async ({ symbol }) => {
+    const quote = await fetchQuote(symbol);
+    return {
+      content: [{ type: 'text', text: JSON.stringify(quote) }],
+      _meta: {
+        [FRESHNESS_META_KEY]: {
+          asOf: quote.timestamp, // when the data is from: epoch ms, or ISO 8601 with a timezone
+          maxAgeMs: 5_000, // a quote is fresh for 5 seconds
+        },
+      },
+    };
+  },
+);
+
+await server.connect(new StdioServerTransport());
+```
+
+Save it as `server.js` and send it one call:
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_quote","arguments":{"symbol":"ACME"}}}' | node server.js
+```
+
+The span on stderr (from a real run) is still `OK`, and now says why the
+answer shouldn't be trusted:
+
+```
+name: 'tools/call get_quote'
+attributes: {
+  ...
+  'mcp.tool.freshness.verdict': 'stale',
+  'mcp.tool.freshness.data_age_ms': 240001,
+  'mcp.tool.freshness.max_age_ms': 5000,
+  'mcp.tool.freshness.limit_source': 'max_age_ms'
+},
+status: { code: 1 }   // OK: stale data isn't an error
+[opentel-mcp metrics] mcp.tool.stale_responses{gen_ai.tool.name=get_quote} = 1
+```
+
+### The `_meta` contract
+
+`FRESHNESS_META_KEY` is `'io.github.thirumalaiboobathi.opentel-mcp/freshness'`
+(a reverse-DNS key, as the MCP spec recommends for custom `_meta` keys).
+Its value:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `asOf` | epoch **milliseconds**, or ISO 8601 string **with** `Z`/`±hh:mm` | When the data is from (the quote's timestamp, the bar's close), not when the tool ran. Required. |
+| `maxAgeMs` | number ≥ 0 | How long the data stays fresh. |
+| `freshUntil` | same as `asOf` | An absolute deadline, for windows that aren't a fixed duration. |
+
+Give `asOf` plus `maxAgeMs`, `freshUntil`, or both. With both, the
+**earlier deadline wins**. For data that's good until the trading session
+closes:
+
+```js
+_meta: {
+  [FRESHNESS_META_KEY]: {
+    asOf: bars.closeTime,              // '2026-10-12T20:00:00Z'
+    freshUntil: nextSessionClose,      // '2026-10-13T20:00:00Z'
+  },
+},
+```
+
+TypeScript users get autocomplete from the exported `FreshnessMeta` type:
+`{ asOf, maxAgeMs } satisfies FreshnessMeta`.
+
+### Overriding a tool's window from config
+
+```js
+instrumentMcpServer(server, {
+  staleness: {
+    tools: {
+      get_quote: { maxAgeMs: 2_000 }, // replaces get_quote's own maxAgeMs/freshUntil
+    },
+  },
+});
+```
+
+The override replaces the tool's window entirely (`limit_source` becomes
+`config`). It can't supply `asOf`: a response without the freshness key
+gets no verdict, whatever the config says. An invalid value (negative,
+non-finite) is ignored with one `diag.warn`. `staleness: { enabled: false }`
+turns the whole feature off.
+
+### What gets emitted
+
+| Attribute | Type | When |
+| --- | --- | --- |
+| `mcp.tool.freshness.verdict` | `fresh` \| `stale` \| `unknown` | The tool sent the freshness key |
+| `mcp.tool.freshness.data_age_ms` | integer ms | `asOf` was readable |
+| `mcp.tool.freshness.max_age_ms` | integer ms | A verdict exists: the effective window (deadline minus `asOf`) |
+| `mcp.tool.freshness.limit_source` | `max_age_ms` \| `fresh_until` \| `config` | A verdict exists |
+| `mcp.tool.freshness.unknown_reason` | `invalid_as_of` \| `future_as_of` \| `missing_window` \| `invalid_window` | Verdict is `unknown` |
+
+Plus one counter, `mcp.tool.stale_responses` (label: `gen_ai.tool.name`),
+`+1` per stale response.
+
+- **Tools that don't report freshness get nothing.** No attribute, no
+  verdict; never `fresh`, never `stale`. Their spans are unchanged.
+- **Stale isn't an error.** Span status stays `OK`, there's no
+  `error.type`, and it's never counted as a silent failure. Alert on the
+  verdict or the counter, not on error rate.
+- **`isError: true` responses are skipped.** They're already failures.
+- **Malformed freshness never breaks a call.** It gets `unknown` with a
+  reason, at most one `diag.warn` per tool, and the result goes back to
+  the client untouched. Common mistakes it catches: epoch **seconds**
+  instead of milliseconds, an ISO string with no timezone, `asOf` more than
+  5 s in the future (up to 5 s is treated as clock skew), and `freshUntil`
+  before `asOf`.
+- **Privacy:** only `asOf`, `maxAgeMs` and `freshUntil` under that one key
+  are read. Result content and other `_meta` fields are never read for
+  this, and raw values are never emitted, only the derived numbers
+  (checked by a canary test in `test/staleness.test.js`).
+- **Data age is span-only**, never a metric label.
+
+### Seeing it in the dashboard
+
+`opentel-mcp-ui` 0.3.0+ shows the data age in its feed, a **Stale data**
+filter, and stale rate as a fifth health-grade signal. Start it, then point
+the server above at it with one more option:
+
+```bash
+npx opentel-mcp-ui    # dashboard at http://127.0.0.1:4319
+```
+
+```js
+instrumentMcpServer(server, {
+  serviceName: 'market-data',
+  setupNodeSdk: true,
+  exporterUrl: 'http://127.0.0.1:4319/v1/traces', // send spans to the dashboard too
+});
+```
+
+Each run of the `echo … | node server.js` command above now shows up in the
+dashboard's feed and under **Stale data**. The tool gets a grade once it has
+10 calls, and the stale-data signal joins it once 10 of those carried a
+`fresh` or `stale` verdict, so send the command ten times. With every call
+stale, `get_quote` grades **F**, "set by stale data 100% (F)".
+
+Design and every edge case: [ADR 027](../../docs/adr/027-staleness-detection.md).
+
 ## Failure Fingerprinting (v0.4.0+)
 
 Groups logically identical failures under one stable identifier, even
@@ -663,7 +839,11 @@ per-call-site wrapping; tracked in the roadmap below.
 **What this controls, and who needs it.** Whenever a `tools/call`/
 `tools/list` handler throws, this library records the thrown error's
 message and stack trace onto the span it creates for that call — by
-default, exactly as the tool wrote them, no redaction. If your tools call
+default, as the tool wrote them, except that recognizable credentials
+(Bearer/Basic tokens, AWS key ids, `sk-`/`ghp_`/`xox…` API keys, JWTs,
+passwords in URLs, `token=`/`api_key=`/`password=` values) are replaced
+with `<SECRET>` and the message and stack are capped at 4096 and 16384
+characters (v0.17.0). If your tools call
 third-party services, wrap unaudited dependencies, or you otherwise don't
 control every string a tool might throw, that's a real channel for
 whatever those errors happen to contain (an email address, an internal
@@ -683,7 +863,7 @@ span:
 
 | Mode | `exception.message` / status message | `exception.stacktrace` | When to use |
 |---|---|---|---|
-| `'full'` (default) | Raw `err.message`, unmodified | Raw `err.stack`, unmodified | Today's behavior, unchanged — matches what every other OTel-instrumented library in the same trace does for the same kind of event |
+| `'full'` (default) | Raw `err.message`, credentials → `<SECRET>`, capped at 4096 chars (v0.17.0) | Raw `err.stack`, same scrubbing, capped at 16384 chars | Everything else kept: ids, paths, URLs, line numbers. Before v0.17.0 both were unmodified |
 | `'normalized'` | `normalizeMessage(err.message)` — the exact scrubbing pipeline (`src/fingerprint/normalize/message.js`) fingerprinting already runs before hashing: UUIDs, emails, URLs, IPs, timestamps, filesystem paths, hex runs, quoted ids | Reconstructed from `parseAndNormalizeStack()` (`src/fingerprint/normalize/stack.js`) — keeps every function name/file/line, strips only the local `cwd` prefix (and collapses `node_modules` package versions) | Tool results come from third-party or unaudited MCP servers and you want the same scrubbing fingerprinting already trusts, applied to the raw exception content too |
 | `'none'` | Not set — `span.setStatus({ code: ERROR })` with no message, the same pattern already used for tool-level `isError: true` failures | Not set | You rely entirely on `mcp.failure.*` (category/fingerprint/signature — already hashed/normalized) and don't want any free-text exception content on the span at all |
 
@@ -2221,11 +2401,13 @@ found')`, or a tool result puts a credential in a field this library
 reads, that content is exactly what reaches your telemetry backend. Three
 channels carry it:
 
-- **`span.recordException(err)` / `span.setStatus({ message })`** on every
+- **The `exception` event / `span.setStatus({ message })`** on every
   thrown `tools/call`/`tools/list` error — `exception.message` and
-  `exception.stacktrace` are set from `err.message`/`err.stack` verbatim
-  by default. `errorRecording.mode` controls this; see "Error recording"
-  above.
+  `exception.stacktrace` are set from `err.message`/`err.stack` by
+  default, with recognizable credentials replaced by `<SECRET>` and
+  lengths capped (v0.17.0), but otherwise unchanged: a customer's name or
+  any other free text in a message still reaches the span.
+  `errorRecording.mode` controls this; see "Error recording" above.
 - **`mcp.tool.model` / `gen_ai.response.model`** — a tool result's own
   declared model field, admitted once it passes a length/character-shape
   check (v0.13.0). The check bounds shape, not content: a well-formed but
@@ -2319,9 +2501,10 @@ so they're spelled out instead of forced into one bucket.
 | `mcp.failure.fingerprint` / `.signature` / `.category` / `.origin` / `.channel` | span attr (2 also metric labels) | library-computed | hashes/enums — the governed core this project has kept clean since v0.4.0 |
 | `mcp.failure.error_class` | span attr | **blend — tool-controlled, capped only** | `err.name`, length-capped at 128 characters but, unlike everything hashed into the fingerprint, *not* pattern-scrubbed — a documented, deliberate tradeoff (`docs/known-gaps.md` entry 10) |
 | `mcp.failure.unactionable` / `.content_length_bucket` | span attr | library-computed | a boolean and a 5-value enum derived from the trimmed text LENGTH and non-text item COUNT of an `isError: true` result — no text is read for anything but its length (ADR 025, v0.16.0) |
+| `mcp.tool.freshness.verdict` / `.data_age_ms` / `.max_age_ms` / `.limit_source` / `.unknown_reason` | span attr | library-computed | enums and integer ms derived from the tool's own `_meta[FRESHNESS_META_KEY]` `asOf`/`maxAgeMs`/`freshUntil`; raw values are never emitted, and no other `_meta` field or content is read (ADR 027, v0.17.0) |
 | `mcp.failure.validation_paths` | span attr | mostly library-computed (gated) | one legacy Zod-issue-rendering path can still carry a tool-controlled dynamic object key, now redacted to a `<KEY>` placeholder rather than closed structurally (`docs/known-gaps.md` entry 10, item 3) |
-| `exception.type` (event) | event attr | tool-controlled | length-capped only under `'normalized'` mode; uncapped under `'full'` (the native SDK call) |
-| `exception.message` / `.stacktrace` (event), status message | event attr + status | **blend — layered** | raw tool content under `'full'`; this library's `normalizeMessage()`/`parseAndNormalizeStack()` transform of that same content under `'normalized'`; optionally a host-supplied `errorRecording.redactor`'s output feeding *that*, first (v0.14.0) — the most layered-provenance attribute in the system |
+| `exception.type` (event) | event attr | tool-controlled | length-capped at 128 characters under both `'full'` and `'normalized'` (v0.17.0) |
+| `exception.message` / `.stacktrace` (event), status message | event attr + status | **blend — layered** | raw tool content under `'full'`, minus recognizable credentials and length-capped (v0.17.0); this library's `normalizeMessage()`/`parseAndNormalizeStack()` transform of that same content under `'normalized'`; optionally a host-supplied `errorRecording.redactor`'s output feeding *that*, first (v0.14.0) — the most layered-provenance attribute in the system |
 | `mcp.tool.schema_drift_detected` / `mcp.tool.thrash_detected` | boolean span attr | library-computed | only ever set to `true`; omitted on a clean call |
 | `mcp.tool.schema_drift.type` | event attr, metric label | library-computed | classifier enum |
 | `mcp.tool.schema_drift.previous_hash` / `.current_hash` | event attr | library-computed | a hash *of* tool-controlled content (the tool's own `inputSchema`), not the schema itself |
@@ -2399,6 +2582,9 @@ truth: `src/config.js`.
 | `thrashDetection` | object | see below | Controls Agent Thrash Detection[^10] — see "Agent Thrash Detection" above. Requires `fingerprinting: true` |
 | `schemaDrift` | object | see below | Controls tool schema drift detection[^11] — see "Tool schema drift detection" above. `enabled: true` by default changes `instrumentMcpServer()`'s throw behavior on upgrade — see that section's "Behavior change on upgrade" |
 | `errorRecording` | object | see below | Controls what raw exception content reaches `recordException()`/`setStatus()`[^12] — see "Error recording" above |
+| `unactionableErrors` | object | `{ enabled: true, minTextLength: 10 }` | `{ enabled?, minTextLength? }`: flags `isError: true` results with no usable text via `mcp.failure.unactionable` / `mcp.failure.content_length_bucket` (span-only). Env: `OTEL_MCP_UNACTIONABLE_ERRORS_ENABLED`, `OTEL_MCP_UNACTIONABLE_ERRORS_MIN_TEXT_LENGTH` — see "Errors your agent can't act on" above |
+| `coverage` | object | `{ resources: false, prompts: false }` | Opt-in tracing of `resources/*` and `prompts/*` — see "Resources and prompts" above |
+| `staleness` | object | `{ enabled: true }` | `{ enabled?, tools?: { [toolName]: { maxAgeMs } } }`: per-tool override of the freshness window a tool reports in `_meta` — see "Staleness detection" above |
 
 [^10]: `{ enabled?, threshold?, windowMs?, maxTrackedKeys?, entryTtlMs?, reEmitAfter?, assumeSingleSession? }`, all fields optional, individually defaulted, and individually overridable via an `OTEL_MCP_THRASH_*` env var — see "Agent Thrash Detection" → "Configuration" above for the full table.
 [^11]: `{ enabled?, maxTrackedTools? }`, all fields optional, individually defaulted, and individually overridable via an `OTEL_MCP_SCHEMA_DRIFT_*` env var — see "Tool schema drift detection" → "Configuration" above for the full table.

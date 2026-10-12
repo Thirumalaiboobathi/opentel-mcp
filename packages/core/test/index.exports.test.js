@@ -18,6 +18,7 @@ describe('package root exports', () => {
     'DEFAULT_PRICING', // v0.5.0 cost attribution
     'defaultExtractor',
     'calculateCost',
+    'FRESHNESS_META_KEY', // v0.17.0 staleness detection (ADR 027)
   ];
 
   it.each(REQUIRED_RUNTIME_EXPORTS)('exports %s', (name) => {

@@ -572,3 +572,196 @@ describe('App: resources & prompts view (ADR 026)', () => {
     expect(el.querySelector('.operations-table')).toBeNull();
   });
 });
+
+describe('App: stale data (ADR 027, core 0.17.0+)', () => {
+  const VERDICT = 'mcp.tool.freshness.verdict';
+  const quote = (id: string, verdict: 'fresh' | 'stale' | 'unknown', dataAgeMs?: number) =>
+    span({
+      id,
+      toolName: `quote-${id}`,
+      attributes: {
+        [VERDICT]: verdict,
+        ...(dataAgeMs !== undefined ? { 'mcp.tool.freshness.data_age_ms': dataAgeMs } : {}),
+        ...(verdict !== 'unknown' ? { 'mcp.tool.freshness.max_age_ms': 5_000 } : {}),
+      },
+    });
+  const failing = span({ id: 'f', toolName: 'flaky', status: 'ERROR', errorType: 'tool_error' });
+
+  it('the Stale data filter shows only stale rows, each with the OTel-vs-opentel-mcp comparison', async () => {
+    mockBackend([quote('a', 'fresh', 1_200), quote('b', 'stale', 240_000), quote('c', 'unknown'), failing], metaWith());
+    const el = await renderApp();
+    const feed = () => el.querySelector('.feed-panel')?.textContent ?? '';
+
+    const filter = el.querySelector('[data-testid="stale-filter"]') as HTMLButtonElement;
+    expect(filter).not.toBeNull();
+    expect(el.querySelector('[data-testid="stale-count"]')?.textContent).toBe('(1)');
+    // Default view is still the silent-failure cell.
+    expect(feed()).toContain('flaky');
+    expect(feed()).not.toContain('quote-b');
+
+    act(() => filter.click());
+    expect(filter.getAttribute('aria-pressed')).toBe('true');
+    expect(feed()).toContain('Stale data — missed by standard OTel');
+    expect(feed()).toContain('quote-b');
+    expect(feed()).not.toContain('quote-a');
+    expect(feed()).not.toContain('flaky');
+    const row = el.querySelector('[data-testid="stale-row"]');
+    expect(row?.textContent).toContain('Standard OTel would show');
+    expect(row?.textContent).toContain('200 OK · no error');
+    expect(row?.textContent).toContain('data 4m old · limit 5s');
+  });
+
+  it('a stale response is not a failure: it stays out of the hero number and the failure cells', async () => {
+    mockBackend([quote('b', 'stale', 240_000), failing], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('.hero-stat')?.textContent).toContain('1 of 1');
+  });
+
+  it('shows data age on successful rows that have it', async () => {
+    mockBackend([quote('a', 'fresh', 1_200), span({ id: 'plain', toolName: 'plain' })], metaWith());
+    const el = await renderApp();
+    const successCell = el.querySelectorAll('.matrix-cell')[0] as HTMLButtonElement;
+    act(() => successCell.click());
+    const ages = [...el.querySelectorAll('[data-testid="feed-age"]')].map((n) => n.textContent);
+    expect(ages).toEqual(['data 1.2s old']);
+  });
+
+  it('counts stale responses in the Tool health panel and grades the tool on them', async () => {
+    const spans = [
+      ...Array.from({ length: 7 }, (_, i) => ({ ...quote(`f${i}`, 'fresh', 500), toolName: 'get_quote' })),
+      ...Array.from({ length: 3 }, (_, i) => ({ ...quote(`s${i}`, 'stale', 60_000), toolName: 'get_quote' })),
+    ];
+    mockBackend(spans, metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('[data-testid="tool-health-stale-count"]')?.textContent).toContain('3 stale responses across 1 tool');
+    const grade = el.querySelector('[data-testid="health-row-get_quote"] .health-grade');
+    expect(grade?.textContent).toBe('F');
+    expect(grade?.getAttribute('title')).toContain('stale data 30% (F)');
+  });
+
+  it('an older core (no freshness attributes): no filter, no count, no data age, no errors', async () => {
+    mockBackend([...Array.from({ length: 10 }, (_, i) => span({ id: `o${i}`, toolName: 'echo' })), failing], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('[data-testid="stale-filter"]')).toBeNull();
+    expect(el.querySelector('[data-testid="tool-health-stale-count"]')).toBeNull();
+    expect(el.querySelector('[data-testid="feed-age"]')).toBeNull();
+    expect(el.querySelector('[data-testid="health-row-echo"] .health-grade')?.getAttribute('title')).not.toMatch(/stale/i);
+  });
+
+  it('clicking a matrix cell after choosing Stale data goes back to that cell', async () => {
+    mockBackend([quote('b', 'stale', 240_000), failing], metaWith());
+    const el = await renderApp();
+    act(() => (el.querySelector('[data-testid="stale-filter"]') as HTMLButtonElement).click());
+    expect(el.querySelector('.feed-panel h2')?.textContent).toContain('Stale data');
+    act(() => (el.querySelectorAll('.matrix-cell')[0] as HTMLButtonElement).click());
+    expect(el.querySelector('.feed-panel h2')?.textContent).toBe('Successful calls');
+  });
+});
+
+describe('App: stale line under the hero (ADR 027)', () => {
+  const VERDICT = 'mcp.tool.freshness.verdict';
+  const withVerdict = (id: string, toolName: string, verdict: 'fresh' | 'stale') =>
+    span({ id, toolName, attributes: { [VERDICT]: verdict, 'mcp.tool.freshness.data_age_ms': 60_000, 'mcp.tool.freshness.max_age_ms': 5_000 } });
+  const failing = span({ id: 'f', toolName: 'flaky', status: 'ERROR', errorType: 'tool_error' });
+
+  it('says how many responses were stale across how many tools, and opens the Stale data view when clicked', async () => {
+    mockBackend(
+      [withVerdict('a', 'get_quote', 'stale'), withVerdict('b', 'get_quote', 'stale'), withVerdict('c', 'get_bars', 'stale'), withVerdict('d', 'get_bars', 'fresh'), failing],
+      metaWith(),
+    );
+    const el = await renderApp();
+    const line = el.querySelector('[data-testid="hero-stale-line"]') as HTMLButtonElement;
+    expect(line.textContent?.replace(/\s+/g, ' ').trim()).toBe('3 responses served stale data across 2 tools →');
+    // The feed starts on silent failures.
+    expect(el.querySelector('.feed-panel h2')?.textContent).toContain('Silent failures');
+
+    act(() => line.click());
+    expect(el.querySelector('.feed-panel h2')?.textContent).toBe('Stale data — missed by standard OTel');
+    expect(el.querySelector('[data-testid="stale-filter"]')?.getAttribute('aria-pressed')).toBe('true');
+    expect(el.querySelectorAll('[data-testid="stale-row"]')).toHaveLength(3);
+  });
+
+  it('singular wording for one stale response on one tool', async () => {
+    mockBackend([withVerdict('a', 'get_quote', 'stale')], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('[data-testid="hero-stale-line"]')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      '1 response served stale data across 1 tool →',
+    );
+  });
+
+  it('hidden when freshness is reported but nothing is stale', async () => {
+    mockBackend([withVerdict('a', 'get_quote', 'fresh'), failing], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('[data-testid="hero-stale-line"]')).toBeNull();
+  });
+
+  it('hidden on an older core (no freshness attributes)', async () => {
+    mockBackend([span({ id: 'x', toolName: 'echo' }), failing], metaWith());
+    const el = await renderApp();
+    expect(el.querySelector('[data-testid="hero-stale-line"]')).toBeNull();
+  });
+});
+
+describe('B8: span data is always rendered as text, never as HTML', () => {
+  const IMG = '<img src=x onerror="window.__xss=1">';
+  const SCRIPT = '<script>window.__xss=2</script>';
+
+  it('payloads in tool names, error types, categories and attributes show up as literal text', async () => {
+    (window as unknown as { __xss?: number }).__xss = undefined;
+    const silent = Array.from({ length: 10 }, (_, i) =>
+      span({
+        id: `x${i}`,
+        toolName: IMG,
+        status: 'ERROR',
+        errorType: 'tool_error',
+        failureCategory: SCRIPT,
+        attributes: { 'mcp.failure.unactionable': true, 'mcp.tool.freshness.verdict': 'stale', 'mcp.tool.freshness.data_age_ms': 1 },
+      }),
+    );
+    const thrown = span({ id: 't', toolName: SCRIPT, status: 'ERROR', errorType: IMG });
+    const prompt = span({
+      id: 'p',
+      name: `prompts/get ${IMG}`,
+      status: 'ERROR',
+      errorType: SCRIPT,
+      attributes: { 'mcp.method.name': 'prompts/get', 'gen_ai.prompt.name': IMG },
+    });
+    mockBackend([...silent, thrown, prompt], metaWith());
+    const el = await renderApp();
+
+    // Visit every view that renders span strings.
+    const cells = el.querySelectorAll('.matrix-cell');
+    for (const cell of [...cells]) act(() => (cell as HTMLButtonElement).click());
+    act(() => (el.querySelectorAll('.matrix-cell')[3] as HTMLButtonElement).click());
+
+    const text = el.textContent ?? '';
+    expect(text).toContain(IMG);
+    expect(el.innerHTML).toContain('&lt;img src=x onerror=');
+    // No element was created from span data.
+    expect(el.querySelector('img')).toBeNull();
+    expect(el.querySelector('script')).toBeNull();
+    expect([...el.querySelectorAll('*')].some((n) => n.hasAttribute('onerror'))).toBe(false);
+    expect((window as unknown as { __xss?: number }).__xss).toBeUndefined();
+    // Tooltips carry it as an attribute value, also inert.
+    const grade = el.querySelector('.health-grade');
+    expect(grade?.getAttribute('title') ?? '').not.toContain('<script');
+  });
+});
+
+describe('App: history and the SSE replay never double-count a span', () => {
+  it('a span delivered by both /api/spans/history and the SSE replay appears once', async () => {
+    const stale = Array.from({ length: 3 }, (_, i) =>
+      span({ id: `dup${i}`, toolName: 'get_quote', attributes: { 'mcp.tool.freshness.verdict': 'stale', 'mcp.tool.freshness.data_age_ms': 9_000 } }),
+    );
+    mockBackend(stale, metaWith());
+    const el = await renderApp();
+    // The server's SSE route replays the whole buffer on connect.
+    await act(async () => {
+      for (const s of stale) FakeEventSource.instances[0]!.emit(s);
+      await Promise.resolve();
+    });
+    expect(el.querySelector('[data-testid="hero-stale-line"]')?.textContent).toContain('3 responses served stale data');
+    expect(el.querySelector('[data-testid="health-row-get_quote"] .health-num')?.textContent).toBe('3');
+    expect(el.querySelector('[data-testid="tool-health-stale-count"]')?.textContent).toContain('3 stale responses');
+  });
+});

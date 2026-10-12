@@ -7,6 +7,7 @@
  */
 
 import { NORMALIZE_STEPS } from './patterns.js';
+import { scrubSecrets } from './secrets.js';
 
 // Exported as of v0.14.0 (ADR 020, docs/adr/020-redactor-hook.md, Decision
 // 5): errorRecording.redactor's own defensive output cap reuses this exact
@@ -26,7 +27,9 @@ export const MAX_INPUT_LENGTH = 2048;
  *   this again on its own output returns the same string.
  */
 export function normalizeMessage(raw) {
-  let result = raw.slice(0, MAX_INPUT_LENGTH);
+  // Credentials first (v0.17.0): a leaked token must neither reach the
+  // span nor split one error into a fingerprint per token value.
+  let result = scrubSecrets(raw.slice(0, MAX_INPUT_LENGTH));
   for (const { pattern, replacement } of NORMALIZE_STEPS) {
     result = result.replace(pattern, replacement);
   }

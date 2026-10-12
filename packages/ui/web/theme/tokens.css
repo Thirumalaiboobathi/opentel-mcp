@@ -18,6 +18,8 @@
  *   --color-success      muted, low-saturation green
  *   --color-failure      a real, visible red
  *   --color-unobservable amber -- NEVER red. "Can't tell" is not "broken."
+ *   --color-stale        orange -- stale data (ADR 027): known-bad data, but
+ *                        not a failed call, so neither red nor "can't tell" amber.
  *   --color-caught       the accent colour, reused deliberately for the
  *                        "we caught what standard OTel missed" cell --
  *                        that is a confident, positive claim, not an
@@ -47,6 +49,8 @@
   --color-failure-bg: rgba(229, 72, 77, 0.12);
   --color-unobservable: #d4a24e;
   --color-unobservable-bg: rgba(212, 162, 78, 0.12);
+  --color-stale: #f0883e;
+  --color-stale-bg: rgba(240, 136, 62, 0.14);
 
   --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-border);
 
@@ -108,6 +112,8 @@
   --color-failure-bg: rgba(198, 44, 49, 0.08);
   --color-unobservable: #9a6b1f;
   --color-unobservable-bg: rgba(154, 107, 31, 0.1);
+  --color-stale: #b04a0a;
+  --color-stale-bg: rgba(176, 74, 10, 0.1);
 
   --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-border);
 }
