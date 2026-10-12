@@ -38,6 +38,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSy
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { npmCommand } from './npm-command.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8'));
@@ -145,13 +146,17 @@ function fail(message) {
 
 class StopWithFailure extends Error {}
 
-// On Windows, npm/npx are .cmd shims, which Node refuses to execute
-// without a shell (EINVAL since the CVE-2024-27980 fix). Elsewhere, no
-// shell -- unchanged behavior.
-const useShell = process.platform === 'win32';
+// No step here goes through a shell: npm runs from its JS entry point
+// (npm-command.js), tsc and the runtime check run with this node directly.
+// So no argument is ever re-parsed by cmd.exe on Windows.
+function run(file, args, options) {
+  return execFileSync(file, args, { stdio: 'pipe', encoding: 'utf8', ...options });
+}
 
-function run(cmd, args, options) {
-  return execFileSync(cmd, args, { stdio: 'pipe', encoding: 'utf8', shell: useShell, ...options });
+/** `npm <args>`, with no shell parsing the arguments (see npm-command.js). */
+function runNpm(args, options) {
+  const command = npmCommand(args);
+  return execFileSync(command.file, command.args, { stdio: 'pipe', encoding: 'utf8', shell: command.shell, ...options });
 }
 
 async function main() {
@@ -173,7 +178,7 @@ async function main() {
 
   try {
     console.log('\nverify-tarball: npm pack...');
-    const packOutput = run('npm', ['pack', '--json', '--pack-destination', packDir], { cwd: rootDir });
+    const packOutput = runNpm(['pack', '--json', '--pack-destination', packDir], { cwd: rootDir });
     const [{ filename }] = JSON.parse(packOutput);
     const tarballPath = join(packDir, filename);
 
@@ -181,15 +186,15 @@ async function main() {
     const tarballPaths = [tarballPath];
     for (const dependencyDir of localWorkspaceDependencyDirs) {
       console.log(`verify-tarball: npm pack local workspace dependency ${dependencyDir}...`);
-      const depPackOutput = run('npm', ['pack', '--json', '--pack-destination', packDir], { cwd: dependencyDir });
+      const depPackOutput = runNpm(['pack', '--json', '--pack-destination', packDir], { cwd: dependencyDir });
       const [{ filename: depFilename }] = JSON.parse(depPackOutput);
       tarballPaths.push(join(packDir, depFilename));
     }
 
     console.log('verify-tarball: installing the packed tarball(s) into a clean project...');
-    run('npm', ['init', '-y'], { cwd: consumerDir });
-    run('npm', ['install', ...tarballPaths], { cwd: consumerDir });
-    run('npm', ['install', '-D', 'typescript'], { cwd: consumerDir });
+    runNpm(['init', '-y'], { cwd: consumerDir });
+    runNpm(['install', ...tarballPaths], { cwd: consumerDir });
+    runNpm(['install', '-D', 'typescript'], { cwd: consumerDir });
 
     const checkTsLines = [];
     if (values.length > 0) checkTsLines.push(`import { ${values.join(', ')} } from '${pkg.name}';`);
@@ -207,8 +212,8 @@ async function main() {
     console.log('verify-tarball: tsc --noEmit --strict (nodenext) against the packed tarball...');
     try {
       run(
-        'npx',
-        ['tsc', '--noEmit', '--strict', '--module', 'nodenext', '--moduleResolution', 'nodenext', 'check.ts'],
+        process.execPath,
+        [join(consumerDir, 'node_modules', 'typescript', 'bin', 'tsc'), '--noEmit', '--strict', '--module', 'nodenext', '--moduleResolution', 'nodenext', 'check.ts'],
         { cwd: consumerDir },
       );
     } catch (error) {
@@ -235,7 +240,7 @@ async function main() {
     writeFileSync(join(consumerDir, 'check-runtime.mjs'), runtimeCheckLines.join('\n') + '\n', 'utf8');
 
     try {
-      const out = run('node', ['check-runtime.mjs'], { cwd: consumerDir });
+      const out = run(process.execPath, ['check-runtime.mjs'], { cwd: consumerDir });
       console.log(out.trim());
     } catch (error) {
       fail(

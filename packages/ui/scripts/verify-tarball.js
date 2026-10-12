@@ -32,6 +32,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { npmCommand } from './npm-command.js';
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8'));
@@ -100,13 +101,15 @@ function fail(message) {
   throw new StopWithFailure();
 }
 
-// On Windows, npm/npx are .cmd shims, which Node refuses to execute
-// without a shell (EINVAL since the CVE-2024-27980 fix). Elsewhere, no
-// shell -- unchanged behavior.
+// On Windows, the installed bin in node_modules/.bin is a .cmd shim,
+// which Node refuses to execute without a shell (EINVAL since the
+// CVE-2024-27980 fix). Elsewhere, no shell.
 const useShell = process.platform === 'win32';
 
-function run(cmd, args, options) {
-  return execFileSync(cmd, args, { stdio: 'pipe', encoding: 'utf8', shell: useShell, ...options });
+/** `npm <args>`, with no shell parsing the arguments (see npm-command.js). */
+function runNpm(args, options) {
+  const command = npmCommand(args);
+  return execFileSync(command.file, command.args, { stdio: 'pipe', encoding: 'utf8', shell: command.shell, ...options });
 }
 
 /**
@@ -139,15 +142,15 @@ async function main() {
 
   try {
     console.log('verify-tarball: npm pack...');
-    const packOutput = run('npm', ['pack', '--json', '--pack-destination', packDir], { cwd: rootDir });
+    const packOutput = runNpm(['pack', '--json', '--pack-destination', packDir], { cwd: rootDir });
     const [{ filename }] = JSON.parse(packOutput);
     const tarballPath = join(packDir, filename);
 
     console.log('verify-tarball: installing the packed tarball + real peer deps into a clean project...');
-    run('npm', ['init', '-y'], { cwd: consumerDir });
+    runNpm(['init', '-y'], { cwd: consumerDir });
     const peerSpecs = Object.entries(pkg.peerDependencies ?? {}).map(([name, range]) => `${name}@${range}`);
     try {
-      run('npm', ['install', tarballPath, ...peerSpecs], { cwd: consumerDir });
+      runNpm(['install', tarballPath, ...peerSpecs], { cwd: consumerDir });
     } catch (error) {
       fail(`npm install of the packed tarball + peer deps failed:\n\n${error.stdout || error.stderr || error.message}`);
     }
