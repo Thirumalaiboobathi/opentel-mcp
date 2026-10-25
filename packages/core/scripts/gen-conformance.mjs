@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Regenerates the language-neutral conformance fixtures in <repo>/conformance
  * (ADR 028, Decision 6) by running the CURRENT, unmodified core functions.

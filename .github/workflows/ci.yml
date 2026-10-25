@@ -179,10 +179,14 @@ jobs:
           npm ci
           npm run build --workspace=packages/ui
 
+      # setup-uv@v5 with `python-version` also creates and activates a venv at the repo root, so a bare
+      # `uv pip install` would put the SDK there instead of in the project's packages/python/.venv that
+      # `uv run` uses (pytest then fails at collection). `--python .venv` targets the project env explicitly.
       - name: Install dependencies (uv.lock) and the mcp SDK under test
         run: |
           uv sync --locked --group test
-          uv pip install "${{ matrix.mcp }}"
+          uv pip install --python .venv "${{ matrix.mcp }}"
+          uv run --no-sync python -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
 
       - name: Lint
         run: uv run --no-sync ruff check .

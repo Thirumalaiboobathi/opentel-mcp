@@ -1,0 +1,2 @@
+# The shared conformance fixtures are compared byte-for-byte by the JS and Python tests, so keep LF on every OS.
+conformance/** text eol=lf
