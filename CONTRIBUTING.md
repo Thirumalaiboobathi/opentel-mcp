@@ -85,6 +85,42 @@ carry [npm provenance](https://docs.npmjs.com/generating-provenance-statements)
 (npm only generates it inside a CI provider's OIDC context), which is the
 accepted trade-off for publishing by hand.
 
+## Releasing the Python package
+
+The Python package (`packages/python`, PyPI name `opentel-mcp`, import name `opentel_mcp`) is versioned and
+released independently of the npm packages, by hand, like them. There is no CI publishing (ADR 028, round-2
+decision E). Design: `docs/adr/028-python-port.md`.
+
+**Before you start**
+
+- Bump `version` in `packages/python/pyproject.toml` and `src/opentel_mcp/_version.py` (keep them equal) and add an
+  entry to `packages/python/CHANGELOG.md`. If the JS contract changed, regenerate the shared fixtures
+  (`node packages/core/scripts/gen-conformance.mjs`) and make sure the README states the contract version it
+  implements.
+- From `packages/python`, with an environment that has the SDK under test installed, all of these must pass:
+  `ruff check .`, `ruff format --check .`, `mypy`, `pytest`. Run `pytest` once per supported SDK line (`mcp==1.25.*`,
+  latest 1.x, latest 2.x). CI runs the same matrix.
+- From the repo root: `node packages/core/scripts/gen-conformance.mjs --check` and `npm test`.
+
+**Credentials.** Use a PyPI API token **scoped to the `opentel-mcp` project**, and a separate TestPyPI token. Keep
+them in your `~/.pypirc` or pass them as `TWINE_USERNAME=__token__` / `TWINE_PASSWORD=...`. They never go in the
+repo or in CI. The very first upload can only use an account-wide token (a project-scoped token can only be created
+once the project exists): replace it with a project-scoped one straight after, and revoke the account-wide token.
+
+**Steps** (from `packages/python`)
+
+1. Build the sdist and wheel: `uv build` (or `python -m build`). Output is in `dist/`.
+2. Check the metadata and README rendering: `twine check dist/*`.
+3. Upload to TestPyPI: `twine upload -r testpypi dist/*`.
+4. In a **clean virtualenv outside the repo**, install from TestPyPI and run the smoke test:
+   `pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "opentel-mcp[dev]" "mcp>=2,<3"`
+   (also try `mcp<2`), then instrument a small server with `setup_sdk=True`, call a tool that returns `isError`,
+   and confirm the span and metrics appear (ideally in `npx opentel-mcp-ui`).
+5. Upload to PyPI: `twine upload dist/*`.
+6. Tag and push: `git tag python-v<version> && git push --tags`.
+
+A PyPI release cannot be replaced: if something is wrong, yank it and publish a new version.
+
 ## Dependency updates
 
 `.github/dependabot.yml` configures Dependabot **version updates** —
@@ -108,6 +144,8 @@ non-configurable cap). Neither is enabled by adding this file.
 ## PR checklist
 
 - [ ] `npm test` passes
+- [ ] if `packages/python` changed: `ruff check .`, `ruff format --check .`, `mypy` and `pytest` pass (see `packages/python`)
+- [ ] if core's behaviour, a regex or the telemetry contract changed: `node packages/core/scripts/gen-conformance.mjs` was re-run and the diff in `conformance/` reviewed
 - [ ] `npm run typecheck` passes if you touched `src/config.js`, any `src/*/types.d.ts`, or `src/index.d.ts`
 - [ ] New behavior has test coverage
 - [ ] A new ADR was added if the change involves a non-trivial design

@@ -15,3 +15,15 @@ package.json.workspaces-backup
 # path instead, and ARE meant to be committed.
 bench/thrash-data-benchmark-results.json
 bench/thrash-data-benchmark-results.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+packages/python/dist/
+.coverage
+pytest.log

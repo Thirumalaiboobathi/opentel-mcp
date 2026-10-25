@@ -1,0 +1,653 @@
+{
+  "schema": 1,
+  "kind": "thrown-python",
+  "note": "Python-only. Hand-written expectations; see conformance/gen_thrown_py.py.",
+  "cases": [
+    {
+      "id": "user-frames-innermost-first",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/srv/app/server.py",
+              "lineno": 40,
+              "name": "main"
+            },
+            {
+              "filename": "/srv/app/tools/search.py",
+              "lineno": 12,
+              "name": "run_query"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "run_query@tools/search.py:12|main@server.py:40",
+        "signature": "RuntimeError@run_query:12",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|boom|run_query@tools/search.py:12|main@server.py:40",
+        "fingerprint": "c921b0b99c36e4db"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "at-most-five-user-frames",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/srv/app/m1.py",
+              "lineno": 10,
+              "name": "f1"
+            },
+            {
+              "filename": "/srv/app/m2.py",
+              "lineno": 20,
+              "name": "f2"
+            },
+            {
+              "filename": "/srv/app/m3.py",
+              "lineno": 30,
+              "name": "f3"
+            },
+            {
+              "filename": "/srv/app/m4.py",
+              "lineno": 40,
+              "name": "f4"
+            },
+            {
+              "filename": "/srv/app/m5.py",
+              "lineno": 50,
+              "name": "f5"
+            },
+            {
+              "filename": "/srv/app/m6.py",
+              "lineno": 60,
+              "name": "f6"
+            },
+            {
+              "filename": "/srv/app/m7.py",
+              "lineno": 70,
+              "name": "f7"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "f7@m7.py:70|f6@m6.py:60|f5@m5.py:50|f4@m4.py:40|f3@m3.py:30",
+        "signature": "RuntimeError@f7:70",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|boom|f7@m7.py:70|f6@m6.py:60|f5@m5.py:50|f4@m4.py:40|f3@m3.py:30",
+        "fingerprint": "d053997c5693a182"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "stdlib-frames-skipped",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/srv/app/a.py",
+              "lineno": 1,
+              "name": "f"
+            },
+            {
+              "filename": "/usr/lib/python3.12/json/decoder.py",
+              "lineno": 355,
+              "name": "raw_decode"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "f@a.py:1",
+        "signature": "RuntimeError@f:1",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|boom|f@a.py:1",
+        "fingerprint": "bdc04d796542997e"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "frozen-and-string-frames-skipped",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/srv/app/a.py",
+              "lineno": 3,
+              "name": "g"
+            },
+            {
+              "filename": "<frozen importlib._bootstrap>",
+              "lineno": 1,
+              "name": "_load"
+            },
+            {
+              "filename": "<string>",
+              "lineno": 1,
+              "name": "<module>"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "g@a.py:3",
+        "signature": "RuntimeError@g:3",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|boom|g@a.py:3",
+        "fingerprint": "59d2577d74e0676d"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "site-packages-fallback-is-dependency",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/venv/lib/python3.12/site-packages/httpx/_client.py",
+              "lineno": 100,
+              "name": "send"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "send@site-packages/httpx/_client.py:100",
+        "signature": "RuntimeError@send:100",
+        "category": "dependency",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|dependency|thrown|t|boom|send@site-packages/httpx/_client.py:100",
+        "fingerprint": "853712ba0c6f403d"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "user-frames-win-over-site-packages",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/venv/lib/python3.12/site-packages/mcp/server.py",
+              "lineno": 9,
+              "name": "dispatch"
+            },
+            {
+              "filename": "/srv/app/tool.py",
+              "lineno": 7,
+              "name": "handler"
+            },
+            {
+              "filename": "/venv/lib/python3.12/site-packages/httpx/_client.py",
+              "lineno": 100,
+              "name": "send"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "handler@tool.py:7",
+        "signature": "RuntimeError@handler:7",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|boom|handler@tool.py:7",
+        "fingerprint": "5440327088b47a9a"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "dist-packages-normalized",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/usr/lib/python3/dist-packages/yaml/scanner.py",
+              "lineno": 55,
+              "name": "scan"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "scan@site-packages/yaml/scanner.py:55",
+        "signature": "RuntimeError@scan:55",
+        "category": "dependency",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|dependency|thrown|t|boom|scan@site-packages/yaml/scanner.py:55",
+        "fingerprint": "69b2b0bc66d86e34"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "site-packages-inside-stdlib-dir-is-not-native",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/usr/lib/python3.12/site-packages/foo/bar.py",
+              "lineno": 5,
+              "name": "go"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "go@site-packages/foo/bar.py:5",
+        "signature": "RuntimeError@go:5",
+        "category": "dependency",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|dependency|thrown|t|boom|go@site-packages/foo/bar.py:5",
+        "fingerprint": "c3de4b5301d7dd07"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "top-level-site-packages-module",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/venv/lib/python3.12/site-packages/six.py",
+              "lineno": 8,
+              "name": "helper"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "helper@site-packages/six.py:8",
+        "signature": "RuntimeError@helper:8",
+        "category": "dependency",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|dependency|thrown|t|boom|helper@site-packages/six.py:8",
+        "fingerprint": "623e2fa2536de543"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "windows-paths",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "C:\\srv\\app\\tools\\x.py",
+              "lineno": 9,
+              "name": "run"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "C:\\srv\\app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "run@tools/x.py:9",
+        "signature": "RuntimeError@run:9",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|boom|run@tools/x.py:9",
+        "fingerprint": "99c2a3d2aaa0c630"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "unknown-line-number",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/srv/app/a.py",
+              "lineno": null,
+              "name": "f"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "f@a.py:?",
+        "signature": "RuntimeError@f:?",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|boom|f@a.py:?",
+        "fingerprint": "b307fe413bf730cc"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "outside-cwd-stays-absolute",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/other/place/x.py",
+              "lineno": 2,
+              "name": "f"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "f@/other/place/x.py:2",
+        "signature": "RuntimeError@f:2",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|boom|f@/other/place/x.py:2",
+        "fingerprint": "a94fc416977f13a3"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "no-frames",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": []
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "",
+        "signature": "RuntimeError@anon:?",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|boom|",
+        "fingerprint": "eef8bdb5c56b2c8d"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "os-error-code-classifies-network",
+      "input": {
+        "error": {
+          "name": "ConnectionRefusedError",
+          "message": "[Errno 111] Connection refused",
+          "code": "ECONNREFUSED",
+          "frames": [
+            {
+              "filename": "/srv/app/a.py",
+              "lineno": 4,
+              "name": "connect"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "connect@a.py:4",
+        "signature": "ConnectionRefusedError@connect:4",
+        "category": "network",
+        "errorClass": "ConnectionRefusedError",
+        "normalizedMessage": "[Errno <NUM>] Connection refused",
+        "hashInput": "v1|ConnectionRefusedError|network|thrown|t|[Errno <NUM>] Connection refused|connect@a.py:4",
+        "fingerprint": "72677941f785d122"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "message-normalized-in-hash",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "user 123e4567-e89b-12d3-a456-426614174000 failed at /var/x/y.json",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/srv/app/a.py",
+              "lineno": 4,
+              "name": "f"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "f@a.py:4",
+        "signature": "RuntimeError@f:4",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "user <UUID> failed at <PATH>",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|user <UUID> failed at <PATH>|f@a.py:4",
+        "fingerprint": "87fdeb14e0997387"
+      },
+      "languages": [
+        "py"
+      ]
+    },
+    {
+      "id": "function-name-not-qualname",
+      "input": {
+        "error": {
+          "name": "RuntimeError",
+          "message": "boom",
+          "code": null,
+          "frames": [
+            {
+              "filename": "/srv/app/a.py",
+              "lineno": 4,
+              "name": "method"
+            }
+          ]
+        }
+      },
+      "ctx": {
+        "toolName": "t",
+        "origin": "thrown",
+        "cwd": "/srv/app",
+        "stdlib": [
+          "/usr/lib/python3.12"
+        ]
+      },
+      "expect": {
+        "stackSignature": "method@a.py:4",
+        "signature": "RuntimeError@method:4",
+        "category": "internal",
+        "errorClass": "RuntimeError",
+        "normalizedMessage": "boom",
+        "hashInput": "v1|RuntimeError|internal|thrown|t|boom|method@a.py:4",
+        "fingerprint": "de18272b0380b443"
+      },
+      "languages": [
+        "py"
+      ]
+    }
+  ]
+}
