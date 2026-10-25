@@ -123,3 +123,110 @@ jobs:
           npm init -y >/dev/null
           npm install "$pack_dir"/opentel-mcp-ui-*.tgz
           npm audit --omit=dev --audit-level=high
+
+  # --- Python port (ADR 028, docs/adr/028-python-port.md) -----------------------------------------
+  # 13 jobs, listed explicitly (not a cross product): ubuntu x 5 Pythons x {latest mcp 1.x, latest mcp 2.x},
+  # plus macOS and Windows on the newest Python with mcp 2.x, plus the oldest supported pairing
+  # (Python 3.10 with mcp 1.25). Inside every 2.x job pytest also parametrizes both `sdk_tracing` modes and
+  # "SDK middleware already removed", and runs the contract pins for mcp's private surface.
+  python:
+    name: python ${{ matrix.python }} / mcp ${{ matrix.label }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.10", mcp: "mcp>=1.25,<2", label: "latest 1.x" }
+          - { os: ubuntu-latest, python: "3.10", mcp: "mcp>=2,<3", label: "latest 2.x" }
+          - { os: ubuntu-latest, python: "3.11", mcp: "mcp>=1.25,<2", label: "latest 1.x" }
+          - { os: ubuntu-latest, python: "3.11", mcp: "mcp>=2,<3", label: "latest 2.x" }
+          - { os: ubuntu-latest, python: "3.12", mcp: "mcp>=1.25,<2", label: "latest 1.x" }
+          - { os: ubuntu-latest, python: "3.12", mcp: "mcp>=2,<3", label: "latest 2.x" }
+          - { os: ubuntu-latest, python: "3.13", mcp: "mcp>=1.25,<2", label: "latest 1.x" }
+          - { os: ubuntu-latest, python: "3.13", mcp: "mcp>=2,<3", label: "latest 2.x" }
+          - { os: ubuntu-latest, python: "3.14", mcp: "mcp>=1.25,<2", label: "latest 1.x" }
+          - { os: ubuntu-latest, python: "3.14", mcp: "mcp>=2,<3", label: "latest 2.x" }
+          - { os: macos-latest, python: "3.14", mcp: "mcp>=2,<3", label: "latest 2.x" }
+          - { os: windows-latest, python: "3.14", mcp: "mcp>=2,<3", label: "latest 2.x" }
+          # oldest supported: the floor of the supported range
+          - { os: ubuntu-latest, python: "3.10", mcp: "mcp==1.25.*", label: "1.25 (oldest)" }
+    defaults:
+      run:
+        working-directory: packages/python
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The end-to-end test starts the real opentel-mcp-ui, so it only runs on the ubuntu legs (it skips itself
+      # when the monorepo's node_modules are absent).
+      - name: Use Node.js 22 (end-to-end test with the real dashboard)
+        if: startsWith(matrix.os, 'ubuntu')
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Build the dashboard
+        if: startsWith(matrix.os, 'ubuntu')
+        working-directory: .
+        run: |
+          npm ci
+          npm run build --workspace=packages/ui
+
+      - name: Install dependencies (uv.lock) and the mcp SDK under test
+        run: |
+          uv sync --locked --group test
+          uv pip install "${{ matrix.mcp }}"
+
+      - name: Lint
+        run: uv run --no-sync ruff check .
+
+      - name: Format check
+        run: uv run --no-sync ruff format --check .
+
+      - name: Type check
+        run: uv run --no-sync mypy
+
+      - name: Test
+        run: uv run --no-sync pytest --cov=opentel_mcp --cov-report=term-missing
+
+  # The shared conformance suite (ADR 028 Decision 6): core generates the fixtures, then both implementations
+  # assert them. Neither side needs the mcp SDK for this.
+  conformance:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Fixtures are up to date with core
+        run: node packages/core/scripts/gen-conformance.mjs --check
+
+      - name: JS conformance and contract tests
+        run: npx vitest run test/conformance
+        working-directory: packages/core
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python conformance and contract tests
+        working-directory: packages/python
+        run: |
+          uv sync --locked --group test
+          uv run --no-sync pytest tests/conformance tests/test_contract.py -p no:cacheprovider
