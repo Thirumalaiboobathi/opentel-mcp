@@ -110,7 +110,7 @@ instrument_mcp_server(
 
 Dev mode (`pip install "opentel-mcp[dev]"`) registers a tracer and meter provider, prints spans and metrics to
 **stderr** (never stdout, which is the JSON-RPC channel of stdio servers), posts spans to `exporter_url` as OTLP/HTTP
-JSON, and **flushes on exit**, including on `SIGTERM`/`SIGINT`. Call `opentel_mcp.force_flush()` to flush sooner. If
+JSON, and **flushes on exit**, including on `SIGTERM`/`SIGINT`. Call `opentel_mcp.force_flush()` to flush sooner; it returns within its `timeout_ms` (default 5000) whatever the endpoint does, logging one warning if it could not finish. If
 a provider is already registered, dev mode warns and reuses it. The small JSON exporter exists only because the
 dashboard accepts OTLP/HTTP JSON and the standard Python exporter sends protobuf; it is private and not a general
 purpose exporter.
@@ -209,6 +209,9 @@ Differences:
 * Thrown-exception fingerprints and signatures never equal the JS ones (a Python traceback is not a V8 stack).
 * `str(e)` is not `err.message` (`KeyError('x')` stringifies to `'x'` with quotes), and the SDKs word errors
   differently, so the same logical failure can fingerprint differently across languages.
+* An `OSError` raised by the OS (connection refused, timed out, reset, ...) fingerprints from its canonical code
+  (`ECONNREFUSED`), not from `str(e)`, so the same failure has the same fingerprint on Linux, macOS and Windows
+  (their errno numbers and message wording differ). Windows' `WSAE...` names are mapped to the POSIX/Node ones.
 * Python-only exception names (`JSONDecodeError`, `httpx.ConnectTimeout`, `CancelledError`) are not classified by
   name; they fall through to message rules or `internal`. Category rules are shared with JS and are not
   Python-specific.

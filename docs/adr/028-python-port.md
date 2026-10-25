@@ -466,7 +466,10 @@ same as JS; the input parsing is Python-specific:
 - `code` is `e.code` if it is a `str`; otherwise
   `errno.errorcode[e.errno]` for an `OSError`. That makes
   `ConnectionRefusedError` produce `ECONNREFUSED`, so it classifies as
-  `network` exactly as in Node.
+  `network` exactly as in Node. Windows' Winsock names (`WSAECONNREFUSED`)
+  are normalized to the POSIX/Node name (`ECONNREFUSED`); a name with no
+  POSIX equivalent is dropped, and a typed subclass (`ConnectionRefusedError`)
+  is the fallback when errno gives no usable name.
 - `status` is `e.status`, then `e.status_code`, then
   `e.response.status_code`, taking ints only.
 - For `MCPError`/`McpError`, `code` is the JSON-RPC code, so `classifyFailureChannel` works.
@@ -486,6 +489,16 @@ same as JS; the input parsing is Python-specific:
    `UnexpectedToolError` would collapse every crash in one tool into a
    single fingerprint. Cause capture (Decision 3) avoids that by
    fingerprinting the chained original.
+3a. **`OSError` fingerprints are OS-independent.** `str(OSError)` carries the
+   platform's errno number (`[Errno 111]` Linux, `[Errno 61]` macOS,
+   `[WinError 10061]` Windows) and its own `strerror` wording, so hashing it
+   would give one fingerprint per OS for the same failure. When the OS supplied
+   an integer errno that maps to a canonical code, the fingerprinted message is
+   that code (`ECONNREFUSED`), not `str(e)`. Hand-built errors with no errno
+   (`ConnectionRefusedError("upstream down")`) keep their own message. The
+   recorded `exception.message` under `error_recording` mode `"full"` is unchanged. This
+   applies to the Python thrown path only, which already differs from JS
+   (point 1); the shared normalization and the conformance cases are untouched.
 4. Python-native exception names that JS never sees, such as
    `json.JSONDecodeError`, `httpx.ConnectTimeout` and
    `asyncio.CancelledError`, fall through to message rules or `internal`.

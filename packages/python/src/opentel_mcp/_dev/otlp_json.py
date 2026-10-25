@@ -108,9 +108,13 @@ def encode_export_request(spans: Sequence[ReadableSpan]) -> dict[str, Any]:
 
 
 class OtlpJsonSpanExporter(SpanExporter):
-    """POSTs OTLP/HTTP JSON (``Content-Type: application/json``) with the stdlib; failures never raise."""
+    """POSTs OTLP/HTTP JSON (``Content-Type: application/json``) with the stdlib; failures never raise.
 
-    def __init__(self, url: str, timeout_s: float = 5.0) -> None:
+    One attempt per batch, no retries; ``timeout_s`` bounds connect and every socket read, so an unreachable or
+    silent endpoint costs at most about that long.
+    """
+
+    def __init__(self, url: str, timeout_s: float = 2.0) -> None:
         self._url = url
         self._timeout_s = timeout_s
         self._warned = False

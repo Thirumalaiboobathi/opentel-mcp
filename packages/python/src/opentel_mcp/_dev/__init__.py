@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import sys
+import threading
+import time
 from typing import Any
 
 from .._config import Options
@@ -24,15 +26,35 @@ class DevSdk:
         self._unregister: Any = None
 
     def force_flush(self, timeout_ms: int = 5000) -> bool:
-        ok = True
-        for provider in (self.tracer_provider, self.meter_provider):
-            if provider is None:
-                continue
-            try:
-                ok = bool(provider.force_flush(timeout_ms)) and ok
-            except Exception:
-                ok = False
-        return ok
+        """Flush both providers; returns within ``timeout_ms`` (plus scheduling slack) whatever the exporters do.
+
+        The work runs on a daemon thread that is abandoned on timeout: a slow collector, a full stderr pipe or a
+        provider that never returns must not hang the host process. One warning is logged per failed call.
+        """
+        deadline = time.monotonic() + max(timeout_ms, 0) / 1000.0
+        result: list[bool] = []
+
+        def work() -> None:
+            ok = True
+            for provider in (self.tracer_provider, self.meter_provider):
+                if provider is None:
+                    continue
+                remaining_ms = max(int((deadline - time.monotonic()) * 1000), 0)
+                try:
+                    ok = bool(provider.force_flush(remaining_ms)) and ok
+                except Exception:
+                    ok = False
+            result.append(ok)
+
+        thread = threading.Thread(target=work, name="opentel-mcp-force-flush", daemon=True)
+        thread.start()
+        thread.join(max(deadline - time.monotonic(), 0))
+        if not result:
+            logger.warning("opentel-mcp: force_flush did not finish within %d ms; continuing.", timeout_ms)
+            return False
+        if not result[0]:
+            logger.warning("opentel-mcp: force_flush did not complete cleanly; some telemetry may be unsent.")
+        return result[0]
 
     def shutdown(self) -> None:
         if self._done:

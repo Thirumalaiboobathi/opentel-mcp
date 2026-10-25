@@ -43,29 +43,105 @@ def test_oserror_errno_becomes_the_node_style_code() -> None:
     assert fp.category == "network"  # classifies exactly as a Node ECONNREFUSED does
 
 
-WINSOCK = {
-    10061: ("WSAECONNREFUSED", ConnectionRefusedError, "ECONNREFUSED"),
-    10060: ("WSAETIMEDOUT", TimeoutError, "ETIMEDOUT"),
-    10054: ("WSAECONNRESET", ConnectionResetError, "ECONNRESET"),
-    10053: ("WSAECONNABORTED", ConnectionAbortedError, "ECONNABORTED"),
-    10065: ("WSAEHOSTUNREACH", OSError, "EHOSTUNREACH"),
-    10051: ("WSAENETUNREACH", OSError, "ENETUNREACH"),
+# (kind, canonical code, {os: (errno number, errno name on that OS, strerror text on that OS)})
+OS_VARIANTS = {
+    "refused": (
+        ConnectionRefusedError,
+        "ECONNREFUSED",
+        {
+            "linux": (111, "ECONNREFUSED", "Connection refused"),
+            "darwin": (61, "ECONNREFUSED", "Connection refused"),
+            "win32": (
+                10061,
+                "WSAECONNREFUSED",
+                "No connection could be made because the target machine actively refused it",
+            ),
+        },
+    ),
+    "timed-out": (
+        TimeoutError,
+        "ETIMEDOUT",
+        {
+            "linux": (110, "ETIMEDOUT", "Connection timed out"),
+            "darwin": (60, "ETIMEDOUT", "Operation timed out"),
+            "win32": (
+                10060,
+                "WSAETIMEDOUT",
+                "A connection attempt failed because the connected party did not properly respond",
+            ),
+        },
+    ),
+    "reset": (
+        ConnectionResetError,
+        "ECONNRESET",
+        {
+            "linux": (104, "ECONNRESET", "Connection reset by peer"),
+            "darwin": (54, "ECONNRESET", "Connection reset by peer"),
+            "win32": (
+                10054,
+                "WSAECONNRESET",
+                "An existing connection was forcibly closed by the remote host",
+            ),
+        },
+    ),
+    "aborted": (
+        ConnectionAbortedError,
+        "ECONNABORTED",
+        {
+            "linux": (103, "ECONNABORTED", "Software caused connection abort"),
+            "darwin": (53, "ECONNABORTED", "Software caused connection abort"),
+            "win32": (
+                10053,
+                "WSAECONNABORTED",
+                "An established connection was aborted by the software in your host machine",
+            ),
+        },
+    ),
+    "host-unreachable": (
+        OSError,
+        "EHOSTUNREACH",
+        {
+            "linux": (113, "EHOSTUNREACH", "No route to host"),
+            "darwin": (65, "EHOSTUNREACH", "No route to host"),
+            "win32": (10065, "WSAEHOSTUNREACH", "A socket operation was attempted to an unreachable host"),
+        },
+    ),
+    "net-unreachable": (
+        OSError,
+        "ENETUNREACH",
+        {
+            "linux": (101, "ENETUNREACH", "Network is unreachable"),
+            "darwin": (51, "ENETUNREACH", "Network is unreachable"),
+            "win32": (10051, "WSAENETUNREACH", "A socket operation was attempted to an unreachable network"),
+        },
+    ),
 }
 
 
-@pytest.mark.parametrize("number", sorted(WINSOCK))
-def test_windows_winsock_errno_names_match_the_linux_result(
-    monkeypatch: pytest.MonkeyPatch, number: int
+@pytest.mark.parametrize("failure", sorted(OS_VARIANTS))
+def test_one_os_error_gives_one_code_category_and_fingerprint_on_every_os(
+    monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    wsa_name, kind, posix_name = WINSOCK[number]
-    # Simulate Windows' errno table (Winsock names, 10000+ values) on any OS.
-    monkeypatch.setattr(errno, "errorcode", {**errno.errorcode, number: wsa_name})
-    windows = kind(number, "x")
-    linux = kind(getattr(errno, posix_name), "x")
-    assert _coerce.coerce_exception(windows).code == posix_name == _coerce.coerce_exception(linux).code
-    fw = compute_fingerprint(windows, tool_name="t", origin="thrown")
-    fl = compute_fingerprint(linux, tool_name="t", origin="thrown")
-    assert (fw.category, fw.fingerprint) == (fl.category, fl.fingerprint)
+    kind, canonical, variants = OS_VARIANTS[failure]
+    # Make every variant's errno number resolve to that OS's own name, whatever OS runs this test.
+    monkeypatch.setattr(errno, "errorcode", {number: name for number, name, _ in variants.values()})
+    results = {}
+    for os_name, (number, _, strerror) in variants.items():
+        exc = kind(number, strerror)
+        assert _coerce.coerce_exception(exc).code == canonical, os_name
+        fp = compute_fingerprint(exc, tool_name="t", origin="thrown", cwd="/srv/app")
+        results[os_name] = (fp.category, fp.fingerprint, fp.normalized_message)
+    assert len(set(results.values())) == 1, results
+
+
+def test_oserror_fingerprint_keeps_hand_built_messages() -> None:
+    # No OS errno: the author's own text is the identity, as for any other exception.
+    a = compute_fingerprint(ConnectionRefusedError("upstream a"), tool_name="t", origin="thrown")
+    b = compute_fingerprint(ConnectionRefusedError("upstream b"), tool_name="t", origin="thrown")
+    assert a.fingerprint != b.fingerprint
+    assert _coerce.coerce_exception(ConnectionRefusedError("upstream a")).fingerprint_message is None
+    os_raised = FileNotFoundError(errno.ENOENT, "No such file or directory", "/srv/app/one.json")
+    assert _coerce.coerce_exception(os_raised).fingerprint_message == "ENOENT"
 
 
 def test_errno_names_normalize_and_fall_back_to_the_exception_type(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,7 +151,11 @@ def test_errno_names_normalize_and_fall_back_to_the_exception_type(monkeypatch: 
     assert _coerce.posix_errno_name(None) is None
     monkeypatch.setattr(errno, "errorcode", {10061: "WSAHOST_NOT_FOUND"})
     assert _coerce.exception_code(ConnectionRefusedError(10061, "x")) == "ECONNREFUSED"
-    assert _coerce.exception_code(OSError(10061, "x")) is None
+    # An errno no OS defines has neither a name nor a typed subclass: no code.
+    assert _coerce.exception_code(OSError(99999, "x")) is None
+    # Windows maps 10061 to ConnectionRefusedError itself, so it resolves to ECONNREFUSED there; on other OSes the
+    # plain OSError has no name for it. Either way a typed ConnectionRefusedError resolves, so assert that.
+    assert _coerce.exception_code(ConnectionRefusedError(10061, "x")) == "ECONNREFUSED"
 
 
 def test_string_code_wins_and_mcp_errors_expose_the_jsonrpc_code() -> None:

@@ -88,7 +88,9 @@ def normalize_exception(
 ) -> NormalizedException:
     """The single coercion + normalization step shared by the fingerprint and ``normalized`` recording."""
     coerced = err if isinstance(err, Coerced) else coerce_error(err)
-    message = normalize_message(coerced.message)
+    message = normalize_message(
+        coerced.message if coerced.fingerprint_message is None else coerced.fingerprint_message
+    )
     frames, signature = normalize_frames(_frames_for(coerced), cwd=cwd, max_frames=max_frames, stdlib=stdlib)
     return NormalizedException(coerced, message, frames, signature)
 

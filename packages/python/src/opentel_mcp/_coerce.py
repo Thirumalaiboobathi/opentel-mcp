@@ -27,6 +27,8 @@ class Coerced:
     #: Raw frames (outermost first) given directly, used by synthetic conformance cases.
     frames: list[tuple[str, int | None, str]] | None = field(default=None, repr=False)
     is_exception: bool = False
+    #: OS-independent stand-in for ``message`` in the fingerprint (see ``oserror_fingerprint_message``); else ``None``.
+    fingerprint_message: str | None = None
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -92,6 +94,21 @@ def oserror_code(exc: OSError) -> str | None:
     return None
 
 
+def oserror_fingerprint_message(exc: BaseException, code: Any) -> str | None:
+    """The fingerprinted message for an OS-raised ``OSError``: the canonical code, never the OS's text.
+
+    ``str(OSError)`` carries the platform's errno number (``[Errno 111]`` Linux, ``[Errno 61]`` macOS,
+    ``[WinError 10061]`` Windows) and its own ``strerror`` wording, so hashing it would split one failure into one
+    fingerprint per OS. Only applies when the OS supplied an integer errno that maps to the canonical ``code``;
+    a hand-built ``ConnectionRefusedError("x")`` keeps its own message.
+    """
+    if not isinstance(exc, OSError) or not isinstance(exc.errno, int) or not isinstance(code, str):
+        return None
+    if code != oserror_code(exc):
+        return None
+    return code
+
+
 def exception_code(exc: BaseException) -> Any:
     """``e.code`` if a ``str``; ``errno.errorcode[e.errno]`` for ``OSError``; the JSON-RPC code for MCP errors."""
     try:
@@ -125,11 +142,13 @@ def coerce_exception(exc: BaseException, *, with_stack_text: bool = False) -> Co
         message: Any = mcp[1] if mcp is not None else str(exc)
     except Exception:
         message = ""
+    code = exception_code(exc)
     return Coerced(
         name=type(exc).__name__,
         message=message,
         stack=format_traceback(exc) if with_stack_text else None,
-        code=exception_code(exc),
+        code=code,
+        fingerprint_message=oserror_fingerprint_message(exc, code) if mcp is None else None,
         status=exception_status(exc),
         tb=exc.__traceback__,
         is_exception=True,

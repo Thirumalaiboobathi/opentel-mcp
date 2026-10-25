@@ -45,7 +45,26 @@ def sink() -> Any:
     thread.join(5)
 
 
-def spawn(**env: str) -> subprocess.Popen[str]:
+class Spawned(subprocess.Popen[str]):
+    """A child whose stdout/stderr are drained as it runs.
+
+    Dev mode writes ~35 KB to stderr before the child is ready. Nothing reading the pipe means the child blocks in
+    ``write`` once the OS buffer is full: 4 KB for a Windows anonymous pipe, 64 KB on Linux (so Linux hid it).
+    """
+
+    captured: dict[str, list[str]]
+    readers: list[threading.Thread]
+
+    def drained(self) -> tuple[str, str]:
+        for t in self.readers:
+            t.join(30)
+        for stream in (self.stdout, self.stderr):
+            if stream is not None:
+                stream.close()
+        return "".join(self.captured["out"]), "".join(self.captured["err"])
+
+
+def spawn(**env: str) -> Spawned:
     full = {
         **os.environ,
         "PYTHONPATH": str(PKG_ROOT),
@@ -53,7 +72,7 @@ def spawn(**env: str) -> subprocess.Popen[str]:
         "PYTHONIOENCODING": "utf-8",
         **env,
     }
-    return subprocess.Popen(
+    proc = Spawned(
         [sys.executable, "-m", "tests.dev._child"],
         cwd=PKG_ROOT,
         env=full,
@@ -62,6 +81,19 @@ def spawn(**env: str) -> subprocess.Popen[str]:
         text=True,
         encoding="utf-8",
     )
+    proc.captured = {"out": [], "err": []}
+
+    def pump(stream: Any, sink: list[str]) -> None:
+        for line in stream:
+            sink.append(line)
+
+    proc.readers = [
+        threading.Thread(target=pump, args=(proc.stdout, proc.captured["out"]), daemon=True),
+        threading.Thread(target=pump, args=(proc.stderr, proc.captured["err"]), daemon=True),
+    ]
+    for t in proc.readers:
+        t.start()
+    return proc
 
 
 def span_names(bodies: list[dict[str, Any]]) -> list[str]:
@@ -77,7 +109,8 @@ def span_names(bodies: list[dict[str, Any]]) -> list[str]:
 
 def test_stderr_gets_spans_and_metrics_and_stdout_stays_clean() -> None:
     proc = spawn()
-    out, err = proc.communicate(timeout=60)
+    proc.wait(timeout=60)
+    out, err = proc.drained()
     assert proc.returncode == 0, err
     assert out == "", "stdout is the JSON-RPC channel for stdio servers"
     span_lines = [
@@ -96,7 +129,8 @@ def test_stderr_gets_spans_and_metrics_and_stdout_stays_clean() -> None:
 def test_exporter_url_gets_otlp_json_with_hex_ids_flushed_on_normal_exit(sink: Any) -> None:
     _, url = sink
     proc = spawn(EXPORTER_URL=url)
-    _, err = proc.communicate(timeout=60)
+    proc.wait(timeout=60)
+    err = proc.drained()[1]
     assert proc.returncode == 0, err
     assert span_names(_Sink.bodies) == [span_names(_Sink.bodies)[0]] and len(span_names(_Sink.bodies)) == 1
     span = next(
@@ -119,12 +153,12 @@ def test_sigterm_flushes_then_exits_with_the_default_status(sink: Any, tmp_path:
     proc = spawn(EXPORTER_URL=url, WAIT="1", READY_FILE=str(ready))
     deadline = time.monotonic() + 60
     while not ready.exists():
-        assert proc.poll() is None, proc.communicate()[1]
+        assert proc.poll() is None, proc.drained()[1]
         assert time.monotonic() < deadline, "child never became ready"
         time.sleep(0.05)
     assert _Sink.bodies == [], "the batch processor has not flushed yet (5s schedule delay)"
     proc.send_signal(signal.SIGTERM)
-    proc.communicate(timeout=30)
+    proc.wait(timeout=30)
     assert proc.returncode == -signal.SIGTERM  # re-raised with the default handler: usual exit status
     assert len(span_names(_Sink.bodies)) == 1
 
@@ -139,15 +173,17 @@ def test_force_flush_sends_spans_without_waiting_for_exit(sink: Any, tmp_path: p
         deadline = time.monotonic() + 90
         while not ready.exists():
             if proc.poll() is not None:
-                out, err = proc.communicate()
+                out, err = proc.drained()
                 pytest.fail(f"child exited early ({proc.returncode})\nstdout: {out}\nstderr: {err}")
             if time.monotonic() >= deadline:
                 proc.kill()
-                out, err = proc.communicate(timeout=30)
+                proc.wait(timeout=30)
+                out, err = proc.drained()
                 pytest.fail(f"child never reached the ready file within 90 s\nstdout: {out}\nstderr: {err}")
             time.sleep(0.05)
         assert proc.poll() is None  # still running: the spans were not flushed by exiting
         assert len(span_names(_Sink.bodies)) == 1
     finally:
         proc.kill()
-        proc.communicate(timeout=30)
+        proc.wait(timeout=30)
+        proc.drained()
