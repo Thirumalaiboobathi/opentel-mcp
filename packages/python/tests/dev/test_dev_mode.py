@@ -134,11 +134,19 @@ def test_force_flush_sends_spans_without_waiting_for_exit(sink: Any, tmp_path: p
     ready = tmp_path / "ready"
     proc = spawn(EXPORTER_URL=url, WAIT="1", READY_FILE=str(ready), FORCE_FLUSH="1")
     try:
-        deadline = time.monotonic() + 60
+        # Generous: child start-up (imports, SDK) is slow on Windows runners. What matters is the ordering
+        # below: the span is at the sink while the child is still alive and has not exited.
+        deadline = time.monotonic() + 90
         while not ready.exists():
-            assert proc.poll() is None, proc.communicate()[1]
-            assert time.monotonic() < deadline
+            if proc.poll() is not None:
+                out, err = proc.communicate()
+                pytest.fail(f"child exited early ({proc.returncode})\nstdout: {out}\nstderr: {err}")
+            if time.monotonic() >= deadline:
+                proc.kill()
+                out, err = proc.communicate(timeout=30)
+                pytest.fail(f"child never reached the ready file within 90 s\nstdout: {out}\nstderr: {err}")
             time.sleep(0.05)
+        assert proc.poll() is None  # still running: the spans were not flushed by exiting
         assert len(span_names(_Sink.bodies)) == 1
     finally:
         proc.kill()

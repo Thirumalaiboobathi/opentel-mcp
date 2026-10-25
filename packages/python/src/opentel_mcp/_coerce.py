@@ -59,6 +59,39 @@ def exception_status(exc: BaseException) -> int | None:
     return None
 
 
+# Fallback when errno carries no usable POSIX name: the builtin exception type says what happened.
+_OSERROR_TYPE_CODES: tuple[tuple[type[OSError], str], ...] = (
+    (ConnectionRefusedError, "ECONNREFUSED"),
+    (ConnectionResetError, "ECONNRESET"),
+    (ConnectionAbortedError, "ECONNABORTED"),
+    (BrokenPipeError, "EPIPE"),
+    (TimeoutError, "ETIMEDOUT"),
+)
+
+
+def posix_errno_name(name: str | None) -> str | None:
+    """``WSAECONNREFUSED`` -> ``ECONNREFUSED``: Windows reports Winsock names, Node (and Linux) the POSIX ones.
+
+    Only ``E...`` names survive; anything else (``WSAHOST_NOT_FOUND``, ...) has no POSIX/Node equivalent.
+    """
+    if not name:
+        return None
+    if name.startswith("WSAE"):
+        name = name[3:]
+    return name if name.startswith("E") and name[1:].replace("_", "").isalnum() else None
+
+
+def oserror_code(exc: OSError) -> str | None:
+    """The Node-style code for an ``OSError``, identical on every OS."""
+    name = posix_errno_name(errno.errorcode.get(exc.errno)) if isinstance(exc.errno, int) else None
+    if name:
+        return name
+    for kind, code in _OSERROR_TYPE_CODES:
+        if isinstance(exc, kind):
+            return code
+    return None
+
+
 def exception_code(exc: BaseException) -> Any:
     """``e.code`` if a ``str``; ``errno.errorcode[e.errno]`` for ``OSError``; the JSON-RPC code for MCP errors."""
     try:
@@ -67,8 +100,8 @@ def exception_code(exc: BaseException) -> Any:
         code = None
     if isinstance(code, str) and code:
         return code
-    if isinstance(exc, OSError) and isinstance(exc.errno, int):
-        name = errno.errorcode.get(exc.errno)
+    if isinstance(exc, OSError):
+        name = oserror_code(exc)
         if name:
             return name
     mcp = _mcp_error_parts(exc)

@@ -43,6 +43,41 @@ def test_oserror_errno_becomes_the_node_style_code() -> None:
     assert fp.category == "network"  # classifies exactly as a Node ECONNREFUSED does
 
 
+WINSOCK = {
+    10061: ("WSAECONNREFUSED", ConnectionRefusedError, "ECONNREFUSED"),
+    10060: ("WSAETIMEDOUT", TimeoutError, "ETIMEDOUT"),
+    10054: ("WSAECONNRESET", ConnectionResetError, "ECONNRESET"),
+    10053: ("WSAECONNABORTED", ConnectionAbortedError, "ECONNABORTED"),
+    10065: ("WSAEHOSTUNREACH", OSError, "EHOSTUNREACH"),
+    10051: ("WSAENETUNREACH", OSError, "ENETUNREACH"),
+}
+
+
+@pytest.mark.parametrize("number", sorted(WINSOCK))
+def test_windows_winsock_errno_names_match_the_linux_result(
+    monkeypatch: pytest.MonkeyPatch, number: int
+) -> None:
+    wsa_name, kind, posix_name = WINSOCK[number]
+    # Simulate Windows' errno table (Winsock names, 10000+ values) on any OS.
+    monkeypatch.setattr(errno, "errorcode", {**errno.errorcode, number: wsa_name})
+    windows = kind(number, "x")
+    linux = kind(getattr(errno, posix_name), "x")
+    assert _coerce.coerce_exception(windows).code == posix_name == _coerce.coerce_exception(linux).code
+    fw = compute_fingerprint(windows, tool_name="t", origin="thrown")
+    fl = compute_fingerprint(linux, tool_name="t", origin="thrown")
+    assert (fw.category, fw.fingerprint) == (fl.category, fl.fingerprint)
+
+
+def test_errno_names_normalize_and_fall_back_to_the_exception_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _coerce.posix_errno_name("WSAECONNREFUSED") == "ECONNREFUSED"
+    assert _coerce.posix_errno_name("ECONNREFUSED") == "ECONNREFUSED"
+    assert _coerce.posix_errno_name("WSAHOST_NOT_FOUND") is None  # no POSIX/Node name: never leak it
+    assert _coerce.posix_errno_name(None) is None
+    monkeypatch.setattr(errno, "errorcode", {10061: "WSAHOST_NOT_FOUND"})
+    assert _coerce.exception_code(ConnectionRefusedError(10061, "x")) == "ECONNREFUSED"
+    assert _coerce.exception_code(OSError(10061, "x")) is None
+
+
 def test_string_code_wins_and_mcp_errors_expose_the_jsonrpc_code() -> None:
     class WithCode(Exception):
         code = "E_CUSTOM"
