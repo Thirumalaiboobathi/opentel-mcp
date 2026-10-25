@@ -50,6 +50,14 @@ def _slashes(p: str) -> str:
     return p.replace("\\", "/")
 
 
+def _under(file: str, directory: str) -> bool:
+    """``file`` is inside ``directory`` (both ``/``-separated). Windows paths compare case-insensitively (``C:`` vs ``c:``)."""
+    prefix = directory + "/"
+    if os.name == "nt":
+        return file.casefold().startswith(prefix.casefold())
+    return file.startswith(prefix)
+
+
 def _site_index(file: str) -> tuple[int, str] | None:
     best: tuple[int, str] | None = None
     for marker in _SITE_MARKERS:
@@ -67,8 +75,8 @@ def normalize_frame(raw: RawFrame, cwd: str, stdlib: tuple[str, ...]) -> Normali
     is_native = False
     if (
         (file.startswith("<") and file.endswith(">"))
-        or file.startswith(_PKG_DIR + "/")
-        or (site is None and any(file.startswith(d + "/") for d in stdlib))
+        or _under(file, _PKG_DIR)
+        or (site is None and any(_under(file, d) for d in stdlib))
     ):
         is_native = True
 
@@ -77,7 +85,7 @@ def normalize_frame(raw: RawFrame, cwd: str, stdlib: tuple[str, ...]) -> Normali
     if site is not None:
         idx, marker = site
         return NormalizedFrame(fn, "site-packages/" + file[idx + len(marker) :], lineno, False, False)
-    if cwd and file.startswith(cwd + "/"):
+    if cwd and _under(file, cwd):
         file = file[len(cwd) + 1 :]
     return NormalizedFrame(fn, file, lineno, False, True)
 

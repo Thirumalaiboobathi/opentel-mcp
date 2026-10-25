@@ -46,7 +46,13 @@ def sink() -> Any:
 
 
 def spawn(**env: str) -> subprocess.Popen[str]:
-    full = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "PYTHONUNBUFFERED": "1", **env}
+    full = {
+        **os.environ,
+        "PYTHONPATH": str(PKG_ROOT),
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONIOENCODING": "utf-8",
+        **env,
+    }
     return subprocess.Popen(
         [sys.executable, "-m", "tests.dev._child"],
         cwd=PKG_ROOT,
@@ -54,6 +60,7 @@ def spawn(**env: str) -> subprocess.Popen[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
     )
 
 

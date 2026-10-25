@@ -26,3 +26,4 @@ __pycache__/
 *.egg-info/
 packages/python/dist/
 .coverage
+pytest.log

@@ -197,8 +197,15 @@ jobs:
       - name: Type check
         run: uv run --no-sync mypy
 
+      # Failed test ids are also surfaced as annotations so they are readable without the raw job log.
       - name: Test
-        run: uv run --no-sync pytest --cov=opentel_mcp --cov-report=term-missing
+        shell: bash
+        run: |
+          set +e
+          uv run --no-sync pytest --cov=opentel_mcp --cov-report=term-missing --tb=short 2>&1 | tee pytest.log
+          status=${PIPESTATUS[0]}
+          grep -E "^(FAILED|ERROR) " pytest.log | head -20 | while IFS= read -r line; do echo "::error::${line:0:500}"; done
+          exit $status
 
   # The shared conformance suite (ADR 028 Decision 6): core generates the fixtures, then both implementations
   # assert them. Neither side needs the mcp SDK for this.
