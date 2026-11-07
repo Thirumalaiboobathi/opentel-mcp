@@ -1,17 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { trace, SpanKind } from '@opentelemetry/api';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { TracerProvider } from '@opentelemetry/sdk-trace';
 import { CollectorSpanProcessor } from '../src/collector-span-processor.js';
 
-/** @type {NodeTracerProvider} */
+/** @type {TracerProvider} */
 let provider;
 /** @type {CollectorSpanProcessor} */
 let collector;
 
 beforeEach(() => {
   collector = new CollectorSpanProcessor({ capacity: 10 });
-  provider = new NodeTracerProvider({ spanProcessors: [collector] });
-  provider.register();
+  provider = new TracerProvider({ spanProcessors: [collector] });
+  trace.setGlobalTracerProvider(provider);
 });
 
 afterEach(async () => {

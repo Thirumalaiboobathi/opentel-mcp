@@ -15,7 +15,7 @@
  * stable, JSON-serialisable projection of the handful of fields the
  * dashboard actually renders, produced by `serialize-span.js`. Keeping it
  * a separate, deliberate shape means the UI never depends on
- * `@opentelemetry/sdk-trace-base`'s own (larger, less stable)
+ * `@opentelemetry/sdk-trace`'s own (larger, less stable)
  * `ReadableSpan` interface.
  *
  * WHAT IS DELIBERATELY NOT HERE: `ObservationIntegrity`. Per ADR 008,

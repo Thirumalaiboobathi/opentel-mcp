@@ -14,8 +14,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { trace, context, SpanStatusCode } from '@opentelemetry/api';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
-import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { NodeTracerProvider } from '../test/helpers/tracer-provider.js';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace';
 import { MeterProvider, MetricReader } from '@opentelemetry/sdk-metrics';
 import { metrics } from '@opentelemetry/api';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -608,7 +608,7 @@ function buildClassifyCases() {
 /** Runs a throwing handler through the real instrumentMcpServer() and reports the exception event. */
 export async function recordedException(mode, spec) {
   const exporter = new InMemorySpanExporter();
-  const provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+  const provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
   provider.register({ contextManager: null, propagator: null });
   try {
     const server = new Server({ name: 's', version: '0.0.0' }, { capabilities: { tools: {} } });

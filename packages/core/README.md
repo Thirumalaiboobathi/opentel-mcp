@@ -429,7 +429,7 @@ SigNoz's local OTLP endpoint:
 import { metrics, trace } from '@opentelemetry/api';
 import { MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
-import { NodeTracerProvider, BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import { TracerProvider, BatchSpanProcessor } from '@opentelemetry/sdk-trace';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -447,7 +447,7 @@ const meterProvider = new MeterProvider({
 });
 metrics.setGlobalMeterProvider(meterProvider);
 
-const tracerProvider = new NodeTracerProvider({
+const tracerProvider = new TracerProvider({
   resource,
   spanProcessors: [new BatchSpanProcessor(new OTLPTraceExporter({ url: 'http://localhost:4318/v1/traces' }))],
 });
@@ -464,7 +464,7 @@ instrumentMcpServer(server, {});
 Protocol — the wire format traces/metrics travel over) endpoint; point it
 at your own collector in production. `@opentelemetry/exporter-metrics-otlp-http`
 is a host-app dependency — opentel-mcp doesn't bundle it. `@opentelemetry/sdk-metrics`,
-`@opentelemetry/sdk-trace-node`, and `@opentelemetry/exporter-trace-otlp-http`
+`@opentelemetry/sdk-trace`, and `@opentelemetry/exporter-trace-otlp-http`
 are already runtime dependencies of opentel-mcp itself (`@opentelemetry/sdk-metrics`
 as of v0.15.0, for the dev-mode metrics path below; the other two for
 `setupNodeSdk: true`'s dev tracing path, same as before), so no extra
@@ -537,7 +537,7 @@ nothing — your application owns its providers and its shutdown. Design:
 as of this feature — not an optional peer, not a dynamic import with a
 fallback path. See ADR 023's "Dependency strategy" section for the full
 reasoning: its own transitive dependencies were already in this package's
-tree via `@opentelemetry/resources`/`@opentelemetry/sdk-trace-node`, so
+tree via `@opentelemetry/resources`/`@opentelemetry/sdk-trace`, so
 this adds no new package beyond itself.
 
 #### Using the Prometheus exporter instead of OTLP — `service.name` needs an extra option
@@ -2957,7 +2957,7 @@ truth: `src/config.js`.
 
 [^9]: `{ enabled?: boolean; pricingTable?: PricingTable; extractor?: UsageExtractor; budget?: { perSessionUsd?: number; perToolUsd?: number } }`, all fields optional and individually defaulted — `{ enabled: true, pricingTable: DEFAULT_PRICING, extractor: defaultExtractor }` with budget tracking off.
 [^2]: Required only when `setupNodeSdk` is `true`. Has no effect otherwise — the host app's registered `TracerProvider` owns the resource; passing it anyway logs a one-time `diag.warn`.
-[^3]: Creates and registers a `NodeTracerProvider` that always prints to stderr (safe alongside stdio-transport servers — ADR 003), additionally exporting via OTLP/HTTP if `exporterUrl` is set.
+[^3]: Creates and registers a `TracerProvider` that always prints to stderr (safe alongside stdio-transport servers — ADR 003), additionally exporting via OTLP/HTTP if `exporterUrl` is set.
 [^4]: Only takes effect when `setupNodeSdk` is `true`.
 
 ## Ordering constraint
@@ -3314,7 +3314,7 @@ one looping agent apart from several unrelated callers of that same tool.
 
 ### Quick dev setup
 
-`setupNodeSdk: true` sets up a `NodeTracerProvider` that prints spans to
+`setupNodeSdk: true` sets up a `TracerProvider` that prints spans to
 stderr (safe alongside stdio-transport MCP servers — see ADR 003),
 optionally plus an OTLP exporter if `exporterUrl` is provided. No separate
 OTel SDK setup needed — `serviceName` is required in this mode, since it

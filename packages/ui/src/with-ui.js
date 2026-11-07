@@ -47,7 +47,7 @@ import { buildDemoFixture } from './demo-fixture.js';
  * the same technique opentel-mcp core's own `detectObservationIntegrity()`
  * uses (`src/observation/integrity.js`) — and checks whether it happens
  * to expose a dynamic `addSpanProcessor()`. Best-effort only: the
- * installed `@opentelemetry/sdk-trace-node` does NOT expose this (see
+ * installed `@opentelemetry/sdk-trace` does NOT expose this (see
  * this module's docblock) and this will return `null` against it. Kept
  * as a real attempt, not dead code, because a host-authored custom
  * `TracerProvider` (or a future OTel SDK version) reasonably might.
@@ -97,7 +97,7 @@ export function withUI(instrumentedServer, options = {}) {
   } else {
     diag.warn(
       "opentel-mcp-ui: this process's registered TracerProvider does not support attaching a SpanProcessor " +
-        "dynamically (true of the installed @opentelemetry/sdk-trace-node as of v2.x). The dashboard is still " +
+        "dynamically (true of the installed @opentelemetry/sdk-trace as of v2.x). The dashboard is still " +
         'fully functional: instrument your server with setupNodeSdk: true and exporterUrl pointing at ' +
         "this dashboard's URL + '/v1/traces' to send it spans over OTLP/HTTP JSON -- opentel-mcp core already " +
         'supports this today.',

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { trace } from '@opentelemetry/api';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { NodeTracerProvider } from '../helpers/tracer-provider.js';
 import { detectObservationIntegrity, OBSERVATION_INTEGRITY } from '../../src/observation/integrity.js';
 
 afterEach(() => {

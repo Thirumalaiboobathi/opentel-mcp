@@ -4,9 +4,11 @@
 
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
-import { trace, metrics, diag, SpanStatusCode, SpanKind } from '@opentelemetry/api';
+import { trace, metrics, context, propagation, diag, SpanStatusCode, SpanKind } from '@opentelemetry/api';
 import { getV1Sdk, getV2Sdk } from './sdk/detect.js';
-import { NodeTracerProvider, SimpleSpanProcessor, BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import { TracerProvider, SimpleSpanProcessor, BatchSpanProcessor } from '@opentelemetry/sdk-trace';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
+import { CompositePropagator, W3CTraceContextPropagator, W3CBaggagePropagator, getNumberFromEnv } from '@opentelemetry/core';
 import { MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
@@ -350,7 +352,7 @@ function detectServerKind(input) {
  * @returns {*} The same object that was passed in, for chaining. When
  *   `options.setupNodeSdk` is true, the inner Server (and, when instrumenting
  *   an McpServer, the outer object too) gets a `shutdown()` method that
- *   flushes and shuts down the NodeTracerProvider created for it — call it
+ *   flushes and shuts down the TracerProvider created for it — call it
  *   during your process's own shutdown sequence to avoid losing buffered
  *   spans. When `setupNodeSdk` is false (the default), no `shutdown()` is
  *   attached; lifecycle of the global provider belongs to whoever
@@ -981,8 +983,28 @@ export function __resetMeterProviderWarnedForTests() {
 }
 
 /**
+ * The deprecated sdk-trace-base BatchSpanProcessor read the spec's
+ * OTEL_BSP_* variables itself; the sdk-trace one only takes explicit
+ * options, so the same four are read here to keep tuning via env working.
+ * Unset (or invalid) values are omitted, leaving the SDK defaults.
+ */
+function batchProcessorConfigFromEnv() {
+  /** @type {Record<string, number>} */
+  const config = {};
+  const read = (key, name) => {
+    const value = getNumberFromEnv(name);
+    if (value !== undefined) config[key] = value;
+  };
+  read('maxQueueSize', 'OTEL_BSP_MAX_QUEUE_SIZE');
+  read('maxExportBatchSize', 'OTEL_BSP_MAX_EXPORT_BATCH_SIZE');
+  read('scheduledDelayMillis', 'OTEL_BSP_SCHEDULE_DELAY');
+  read('exportTimeoutMillis', 'OTEL_BSP_EXPORT_TIMEOUT');
+  return config;
+}
+
+/**
  * Resolves the Tracer to use for this server, optionally standing up an
- * owned NodeTracerProvider (and, per ADR 023, an owned dev-mode
+ * owned TracerProvider (and, per ADR 023, an owned dev-mode
  * MeterProvider) first.
  *
  * @param {import('@modelcontextprotocol/sdk/server/index.js').Server} server
@@ -994,9 +1016,9 @@ function setupTracer(server, resolved) {
     // StderrSpanExporter, not ConsoleSpanExporter — stdio-transport MCP
     // servers write JSON-RPC to stdout, so diagnostic span output must go
     // to stderr instead or it corrupts the protocol stream. See ADR 003.
-    const spanProcessors = [new SimpleSpanProcessor(new StderrSpanExporter())];
+    const spanProcessors = [new SimpleSpanProcessor({ exporter: new StderrSpanExporter() })];
     if (resolved.exporterUrl) {
-      spanProcessors.push(new BatchSpanProcessor(new OTLPTraceExporter({ url: resolved.exporterUrl })));
+      spanProcessors.push(new BatchSpanProcessor({ exporter: new OTLPTraceExporter({ url: resolved.exporterUrl }), ...batchProcessorConfigFromEnv() }));
     }
 
     // ADR 016 point 3: only attached when DEFAULT_PRICING is actually
@@ -1014,8 +1036,21 @@ function setupTracer(server, resolved) {
     // mode — one Resource construction, not two independently-built ones.
     const resource = resourceFromAttributes({ 'service.name': resolved.serviceName, ...pricingResourceAttributes });
 
-    const provider = new NodeTracerProvider({ resource, spanProcessors });
-    provider.register();
+    // @opentelemetry/sdk-trace-node (deprecated) bundled a NodeTracerProvider
+    // whose register() also installed the global async context manager and
+    // W3C propagator; the replacement sdk-trace TracerProvider has no
+    // register(), so the same three globals are set explicitly here to keep
+    // dev-mode behavior (async context propagation, trace-context
+    // propagation) identical. Each setter is first-wins and returns false
+    // when something is already registered — same as register() did.
+    const provider = new TracerProvider({ resource, spanProcessors });
+    trace.setGlobalTracerProvider(provider);
+    const contextManager = new AsyncLocalStorageContextManager();
+    contextManager.enable();
+    context.setGlobalContextManager(contextManager);
+    propagation.setGlobalPropagator(
+      new CompositePropagator({ propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()] }),
+    );
 
     // ADR 023 (v0.15.0): dev-mode metrics. Only attempted when metrics
     // aren't separately opted out via enableMetrics: false — a host who's

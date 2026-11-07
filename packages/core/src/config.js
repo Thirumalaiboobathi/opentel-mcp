@@ -41,7 +41,7 @@ import { resolveToolIntegrityConfig } from './tool-integrity/config.js';
 
 /**
  * @typedef {object} InstrumentOptions
- * @property {string} [serviceName] - Names the resource of the NodeTracerProvider this library creates.
+ * @property {string} [serviceName] - Names the resource of the TracerProvider this library creates.
  *   Required (and must be a non-empty string) when `setupNodeSdk` is true. Has no effect when `setupNodeSdk`
  *   is false or omitted — in that mode, resource attributes (including `service.name`) come from whatever
  *   TracerProvider the host application has already registered; passing `serviceName` anyway is harmless but
@@ -55,7 +55,7 @@ import { resolveToolIntegrityConfig } from './tool-integrity/config.js';
  *   @opentelemetry/api behavior — so this flag exists for opting out even when one *is* registered, not as a
  *   substitute for that default.
  * @property {boolean} [setupNodeSdk=false] - When true, instrumentMcpServer() creates and registers its own
- *   NodeTracerProvider (always exporting to stderr — safe alongside stdio-transport MCP servers, see ADR 003;
+ *   TracerProvider (always exporting to stderr — safe alongside stdio-transport MCP servers, see ADR 003;
  *   additionally to `exporterUrl` via OTLP/HTTP if set). When false (the default), spans are emitted via
  *   whatever OpenTelemetry TracerProvider the host application
  *   has already registered globally — or dropped silently if none has been registered. This default keeps

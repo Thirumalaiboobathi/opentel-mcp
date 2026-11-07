@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { trace, context, SpanStatusCode, SpanKind } from '@opentelemetry/api';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
-import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { NodeTracerProvider } from './helpers/tracer-provider.js';
+import { InMemorySpanExporter, SimpleSpanProcessor } from './helpers/tracer-provider.js';
 import { Server, McpServer, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { instrumentMcpServer } from '../src/instrument.js';

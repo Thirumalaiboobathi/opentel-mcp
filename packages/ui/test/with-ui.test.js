@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { trace, diag, DiagLogLevel } from '@opentelemetry/api';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { TracerProvider } from '@opentelemetry/sdk-trace';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
-import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import { BatchSpanProcessor } from '@opentelemetry/sdk-trace';
 import { withUI } from '../src/with-ui.js';
 
 /** @type {{ close: () => Promise<void> } | null} */
@@ -30,8 +30,8 @@ describe('withUI', () => {
       // -- this IS the real OTLPTraceExporter opentel-mcp core's own
       // dependency tree ships, pointed at the dashboard's receiver.
       const exporter = new OTLPTraceExporter({ url: `${handle.url}/v1/traces` });
-      const provider = new NodeTracerProvider({ spanProcessors: [new BatchSpanProcessor(exporter)] });
-      provider.register();
+      const provider = new TracerProvider({ spanProcessors: [new BatchSpanProcessor({ exporter })] });
+      trace.setGlobalTracerProvider(provider);
 
       const tracer = trace.getTracer('test');
       tracer.startSpan('tools/call echo').end();

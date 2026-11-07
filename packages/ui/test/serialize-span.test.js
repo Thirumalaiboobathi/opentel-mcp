@@ -1,18 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { trace, SpanStatusCode, SpanKind } from '@opentelemetry/api';
-import { NodeTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
-import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
+import { TracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace';
+import { InMemorySpanExporter } from '@opentelemetry/sdk-trace';
 import { serializeSpan } from '../src/serialize-span.js';
 
 /** @type {InMemorySpanExporter} */
 let exporter;
-/** @type {NodeTracerProvider} */
+/** @type {TracerProvider} */
 let provider;
 
 beforeEach(() => {
   exporter = new InMemorySpanExporter();
-  provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
-  provider.register();
+  provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+  trace.setGlobalTracerProvider(provider);
 });
 
 afterEach(async () => {
