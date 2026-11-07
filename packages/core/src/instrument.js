@@ -80,6 +80,8 @@ const { version: PACKAGE_VERSION } = require('../package.json');
 // derived from CallToolRequestSchema's zod internals — see ADR 001. Reused
 // as the mcp.method.name attribute value and span-name prefix (ADR 004).
 const TOOLS_CALL_METHOD = MCP_METHOD_NAME_TOOLS_CALL;
+// ADR 031: the failure-classifier category (fingerprint/classify/auth.js) that feeds mcp.tool.auth_failures.
+const AUTH_FAILURE_CATEGORY = 'auth';
 
 // Same reasoning as TOOLS_CALL_METHOD above, for the tools/list branch ADR
 // 010 (docs/adr/010-schema-drift.md) added alongside it — reused as both
@@ -2142,6 +2144,7 @@ function wrapToolCallHandler(
             );
           }
           metricsRecorder?.recordSilentFailure(toolName, failureCategory);
+          if (failureCategory === AUTH_FAILURE_CATEGORY) metricsRecorder?.recordAuthFailure(toolName);
           metricsRecorder?.recordDuration(
             toolName,
             performance.now() - startTime,
@@ -2219,6 +2222,7 @@ function wrapToolCallHandler(
           );
         }
         metricsRecorder?.recordError(toolName, errorType, failureCategory);
+        if (failureCategory === AUTH_FAILURE_CATEGORY) metricsRecorder?.recordAuthFailure(toolName);
         metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_ERROR, failureCategory);
         throw err;
       } finally {
