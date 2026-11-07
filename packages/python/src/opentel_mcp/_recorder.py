@@ -26,6 +26,7 @@ from ._classify import classify_failure_channel
 from ._coerce import exception_code
 from ._compose import ATTR_CHANNEL, Fingerprint, compute_fingerprint
 from ._config import Options
+from ._leak import apply_secret_leak
 from ._metrics import MetricsRecorder
 from ._recording import RecordingState, record_thrown_exception, thrown_error_type
 from ._sensitive import mark_sensitive, record_sensitive_audit
@@ -301,6 +302,7 @@ class ToolCallRecorder:
         if not is_tool_error(result):
             if span.is_recording():
                 span.set_status(StatusCode.OK)
+            self._scan_for_secrets(active, result)
             self._metric(lambda m: m.record_duration(tool, duration_ms, c.OUTCOME_SUCCESS))
             self._audit(active, c.OUTCOME_SUCCESS, duration_ms)
             return
@@ -309,6 +311,7 @@ class ToolCallRecorder:
         if span.is_recording():
             span.set_attribute(c.ATTR_ERROR_TYPE, c.ERROR_TYPE_TOOL_ERROR)
             span.set_status(StatusCode.ERROR)
+        self._scan_for_secrets(active, result)  # ADR 030: never touches the status set just above
 
         category = ""
         cause = original_cause(holder.exc) if holder is not None else None
@@ -351,6 +354,17 @@ class ToolCallRecorder:
         self._record_auth_failure(tool, category)
         self._metric(lambda m: m.record_duration(tool, duration_ms, c.OUTCOME_ERROR, category))
         self._audit(active, c.OUTCOME_ERROR, duration_ms, category)
+
+    def _scan_for_secrets(self, active: _Active, result: Any) -> None:
+        if not self.options.secret_leak.enabled:
+            return
+        tool = active.tool_name
+        apply_secret_leak(
+            active.span,
+            lambda: self._metric(lambda m: m.record_secret_leak(tool)),
+            result,
+            self.options.secret_leak,
+        )
 
     def _audit(self, active: _Active, outcome: str, duration_ms: float, category: str = "") -> None:
         """ADR 032: one ``mcp.audit.sensitive_call`` event, on every path, for a sensitive tool."""

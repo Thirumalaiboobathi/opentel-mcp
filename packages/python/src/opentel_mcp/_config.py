@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from ._leak import SecretLeakConfig, resolve_secret_leak_config
 from ._recording import ErrorRecordingConfig, resolve_error_recording_config
 from ._sensitive import SensitiveToolMatcher, compile_sensitive_tools
 
@@ -42,6 +43,7 @@ class Options:
     flush_timeout_ms: int | None  # None => flush on exit disabled
     sdk_tracing: str
     sensitive: SensitiveToolMatcher | None = None
+    secret_leak: SecretLeakConfig = field(default_factory=SecretLeakConfig)
 
 
 def _bool(name: str, value: Any, default: bool) -> bool:
@@ -96,6 +98,7 @@ def resolve_options(
     flush_on_exit: Any = None,
     sdk_tracing: Any = "replace",
     sensitive_tools: Any = None,
+    secret_leak_detection: Any = None,
     **unknown: Any,
 ) -> Options:
     """Raises ``ValueError`` only for ``setup_sdk=True`` without ``service_name`` (startup, never per request)."""
@@ -145,4 +148,5 @@ def resolve_options(
         flush_timeout_ms=_flush_timeout(flush_on_exit, sdk),
         sdk_tracing=str(tracing),
         sensitive=compile_sensitive_tools(sensitive_tools, _warn_once),
+        secret_leak=resolve_secret_leak_config(secret_leak_detection, _warn_once),
     )

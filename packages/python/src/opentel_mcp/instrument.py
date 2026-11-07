@@ -52,6 +52,7 @@ def instrument_mcp_server(
     flush_on_exit: bool | dict[str, int] | None = None,
     sdk_tracing: Literal["replace", "enrich"] = "replace",
     sensitive_tools: list[str] | None = None,
+    secret_leak_detection: dict[str, Any] | None = None,
     **unknown: Any,
 ) -> ServerT:
     """Instrument an MCP server's ``tools/call`` handler with OpenTelemetry spans and metrics.
@@ -78,6 +79,12 @@ def instrument_mcp_server(
             other pattern syntax; case-sensitive). A matching call gets ``mcp.tool.sensitive = True`` and one
             ``mcp.audit.sensitive_call`` span event (outcome, ``mcp.tool.duration_ms``, failure category). Never
             arguments or results. Invalid entries warn once and are skipped. Default: nothing is audited.
+        secret_leak_detection: ``{"enabled": bool, "max_scan_bytes": int}`` (ADR 030; opt-in, default off). Scans the
+            ``text`` content items of successful and ``isError`` results for credential-shaped strings and records
+            only ``mcp.tool.secret_leak.detected`` / ``.types`` / ``.count`` / ``.scan_truncated`` on the span and
+            the ``mcp.tool.secret_leaks`` counter. ``max_scan_bytes`` (default 65536) is counted in UTF-16 code
+            units, exactly like the JS package, not bytes. The matched text is never recorded. A signal, not a
+            guarantee: pattern-based, and it never changes span status.
 
     Never raises into the host, with one exception: ``setup_sdk=True`` without ``service_name`` raises
     ``ValueError`` here, at startup.
@@ -93,6 +100,7 @@ def instrument_mcp_server(
         flush_on_exit=flush_on_exit,
         sdk_tracing=sdk_tracing,
         sensitive_tools=sensitive_tools,
+        secret_leak_detection=secret_leak_detection,
         **unknown,
     )
     try:

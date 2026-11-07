@@ -27,6 +27,8 @@ TOOL_NAMES = (
     "leak_err",
     "auth_silent",
     "auth_raises",
+    "emit",
+    "emit_err",
 )
 INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -103,6 +105,16 @@ def _build_v1(flavour: str, instrument: Any) -> tuple[Any, Any]:
             raise ToolError(AUTH_TEXT)
 
         @server.tool()
+        def emit(text: str = "") -> str:
+            return text
+
+        @server.tool()
+        def emit_err(text: str = "") -> Any:
+            from mcp.server.fastmcp.exceptions import ToolError
+
+            raise ToolError(text)
+
+        @server.tool()
         def auth_raises() -> str:
             raise RuntimeError(AUTH_RAISE_MESSAGE)
 
@@ -130,6 +142,13 @@ def _build_v1(flavour: str, instrument: Any) -> tuple[Any, Any]:
         if name == "auth_silent":
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=AUTH_TEXT)], isError=True
+            )
+        if name == "emit":
+            return [types.TextContent(type="text", text=str((arguments or {}).get("text", "")))]
+        if name == "emit_err":
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str((arguments or {}).get("text", "")))],
+                isError=True,
             )
         if name == "auth_raises":
             raise RuntimeError(AUTH_RAISE_MESSAGE)
@@ -204,6 +223,14 @@ def _build_v2(flavour: str, instrument: Any, *, remove_sdk_middleware: bool = Fa
             )
 
         @server.tool()
+        def emit(text: str = "") -> str:
+            return text
+
+        @server.tool()
+        def emit_err(text: str = "") -> Any:
+            return types.CallToolResult(content=[types.TextContent(type="text", text=text)], is_error=True)
+
+        @server.tool()
         def auth_raises() -> str:
             raise RuntimeError(AUTH_RAISE_MESSAGE)
 
@@ -233,6 +260,15 @@ def _build_v2(flavour: str, instrument: Any, *, remove_sdk_middleware: bool = Fa
         if name == "auth_silent":
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=AUTH_TEXT)], is_error=True
+            )
+        if name == "emit":
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str((params.arguments or {}).get("text", "")))]
+            )
+        if name == "emit_err":
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str((params.arguments or {}).get("text", "")))],
+                is_error=True,
             )
         if name == "auth_raises":
             raise RuntimeError(AUTH_RAISE_MESSAGE)
