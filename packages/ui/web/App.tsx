@@ -10,6 +10,7 @@ import { DetectorBanner } from './components/DetectorBanner';
 import { HeroStat } from './components/HeroStat';
 import { ToolHealth } from './components/ToolHealth';
 import { Operations } from './components/Operations';
+import { SecurityPanel } from './components/SecurityPanel';
 import { useDashboardData } from './data/useDashboardData';
 import { matrixCountsFromSummary, type MatrixCell } from './data/classify';
 import { isToolCallSpan } from './data/method';
@@ -44,6 +45,7 @@ export function App() {
             <ObservationMatrix counts={counts} meta={meta} selectedCell={selectedCell} onSelectCell={setSelectedCell} />
             <ToolHealth spans={toolSpans} />
             <Operations spans={spans} />
+            <SecurityPanel spans={spans} />
             <SilentFailureFeed spans={toolSpans} selectedCell={selectedCell} choice={feedChoice} onChoice={setFeedChoice} />
           </>
         ) : meta && !meta.demo ? (

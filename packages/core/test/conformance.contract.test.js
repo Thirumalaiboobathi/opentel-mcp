@@ -37,4 +37,19 @@ describe('conformance/contract.json (ADR 028)', () => {
       for (const k of [...m.labelKeys, ...m.optionalLabelKeys]) expect(allowed.has(k), `${m.name}: ${k}`).toBe(true);
     }
   });
+
+  it('jsOnly (ADR 034): v0.18 signals are listed apart from the contract, use only allow-listed metric labels, and are not in `metrics`', () => {
+    const js = committed.jsOnly;
+    expect(js.since).toBe('core 0.18.0');
+    const contractNames = new Set(committed.metrics.map((m) => m.name));
+    const allowed = new Set([...committed.allowlists.metricSafeAttributes, ...committed.allowlists.fingerprintMetricSafeAttributes]);
+    expect(js.metrics.map((m) => m.name)).toEqual(['mcp.tool.auth_failures', 'mcp.tool.secret_leaks', 'mcp.tool.integrity_violations']);
+    for (const m of js.metrics) {
+      expect(contractNames.has(m.name)).toBe(false);
+      expect(m.labelKeys).toEqual(['gen_ai.tool.name']);
+      for (const k of [...m.labelKeys, ...m.optionalLabelKeys]) expect(allowed.has(k), `${m.name}: ${k}`).toBe(true);
+    }
+    for (const k of js.spanAttributes) expect(Object.values(committed.span.attributes)).not.toContain(k);
+    for (const e of js.spanEvents) expect(e.name).toMatch(/^mcp\.(tool\.integrity|audit)\./);
+  });
 });

@@ -1,6 +1,6 @@
 # ADR 027: Staleness detection
 
-**Status:** Accepted (implemented in core 0.17.0, ui 0.3.0).
+**Status:** Accepted (implemented in core 0.17.0, ui 0.3.0; amended in core 0.18.0, see the end of this document).
 
 **Suggested by:** the r/mcp community. A market-data MCP server operator
 pointed out a failure nothing currently catches: a read tool returns data
@@ -320,3 +320,48 @@ labelled with `gen_ai.tool.name` only.
 - Freshness is judged at response time. Data that goes stale between the
   response and the agent acting on it isn't caught, which is inherent to
   observing on the server.
+
+## Amendment (0.18.0): clock-skew visibility and configurable tolerance
+
+**Credit:** the r/mcp community, who pointed out that a producer clock running
+ahead of the observer is itself a signal, and that today it is invisible unless
+it exceeds the tolerance.
+
+### Current behavior (cited)
+
+- `FUTURE_SKEW_TOLERANCE_MS = 5_000` is a constant (`staleness.js:44`).
+- `assessFreshness()` computes `rawAge = now - asOf`; if `rawAge < -5000` the
+  verdict is `unknown`/`future_as_of` with no age
+  (`staleness.js:161-164`); otherwise `dataAgeMs = max(0, round(rawAge))`
+  (`staleness.js:165`). So an `asOf` up to 5 s in the future is silently
+  clamped to age 0: a producer clock that is 4 s ahead looks perfectly fresh
+  and the offset is not recorded anywhere.
+- `resolveStalenessConfig()` validates `enabled` and `tools` only
+  (`staleness.js:70-93`); the warning text hard-codes "5 s"
+  (`staleness.js:163`).
+
+### Decision
+
+1. **New span attribute** `mcp.tool.freshness.clock_skew_ms` (integer; positive
+   means the producer's `asOf` is ahead of the observer's clock). Set whenever
+   `asOf` is ahead of the observer, **including within tolerance**, whenever a
+   freshness value was assessed and `asOf` parsed. Value is
+   `round(asOf - now)`; if that rounds to 0 the attribute is not set. Span-only:
+   never a metric, no label.
+2. **New option** `staleness.clockSkewToleranceMs`, default `5000` (today's
+   behavior). It must be a finite number `>= 0`; anything else (negative,
+   non-finite, non-number) warns once at configuration time and falls back to
+   the default. `0` is valid and means no tolerance.
+3. **Within tolerance:** verdict computed exactly as today (age clamps to 0),
+   skew recorded. **Beyond tolerance:** unchanged (`unknown`/`future_as_of`),
+   skew recorded. The warning text states the configured tolerance.
+4. `unknownReason` values and verdict semantics are unchanged.
+
+### Privacy and compatibility
+
+The attribute is a derived integer. With no future `asOf`, spans are identical
+to 0.17. With a future `asOf` spans gain one attribute (the only behavior
+change that applies without opt-in, as the brief for this release decided: it
+exposes a number already implied by existing inputs). Python is unaffected
+(ADR 034).
+

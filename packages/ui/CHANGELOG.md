@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.4.0
+
+A read-only **Security** section for opentel-mcp core 0.18.0's security
+signals. Everything new is hidden against older cores (the peer range is
+unchanged: `opentel-mcp >=0.8.0 <1.0.0`, which includes 0.18.0).
+
+### Security
+
+- **Security section (ADR 033).** Shows, only when spans carry the signals:
+  **tool definitions** (changed since first seen, pin mismatch, added or
+  removed tool, with 12-character hash prefixes and the time), **secret-shaped
+  output** (per tool, results and types), **auth failures** (per tool, with a
+  burst highlighted at 5 or more within a minute; computed in the browser,
+  fixed threshold), **sensitive tool calls** (per tool, by outcome) and
+  **clock skew** (largest producer lead per tool). It is detection, not
+  enforcement. It has no controls and acts on nothing; every value is
+  rendered as text, never HTML.
+- **Whitelisted span events are carried.** `SerializedSpan` gains an optional
+  `events` field holding only the security events core emits (integrity events
+  and the sensitive-call audit event), reduced to their known attribute keys
+  with string (up to 256 characters), finite-number or boolean values, at most
+  32 per span. Everything else is dropped. A `tools/list` span is admitted only
+  when it carries one of these events, so ordinary `tools/list` traffic never
+  competes with tool calls for the buffer, and it never counts as a tool call.
+- **`--demo` tells the security story** on the existing fixture (the 42 / 7 / 11
+  mix and the per-tool grades do not move): a pinned tool whose definition
+  changed, secret-shaped output, an auth-failure burst, sensitive calls and a
+  skewed quote. The fixture contains no key or secret in any form; the leak is
+  represented only by its derived signal.
+- No new endpoint and no new input beyond the existing `POST /v1/traces`;
+  loopback binding, Origin/Host checks, the 8 MiB limit and the CSP are
+  unchanged.
+
+### Internal
+
+- Test tooling moved from vitest 5 (Node 22.12+) to vitest 4.1.12 so the
+  suites run on Node 20 as well (`engines` unchanged).
+
 ## 0.3.0
 
 Staleness: with opentel-mcp core 0.17.0+, the dashboard shows when a tool

@@ -41,8 +41,8 @@ security fixes; older minors do not.** Upgrade to the latest minor to receive a 
 
 | Package | Supported |
 | --- | --- |
-| `opentel-mcp` (npm) | 0.17.x |
-| `opentel-mcp-ui` (npm) | 0.3.x |
+| `opentel-mcp` (npm) | 0.18.x |
+| `opentel-mcp-ui` (npm) | 0.4.x |
 | `opentel-mcp` (PyPI) | 0.1.x |
 
 ## Scope

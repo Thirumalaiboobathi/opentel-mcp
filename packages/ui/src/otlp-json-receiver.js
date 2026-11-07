@@ -29,6 +29,7 @@
  */
 
 import { STATUS_CODE_NAMES, spanFieldsFromAttributes } from './serialize-span.js';
+import { sanitizeSpanEvents, isSecurityListSpan, MAX_EVENTS_PER_SPAN } from './security-events.js';
 
 /**
  * @param {{ key: string, value: Record<string, unknown> }} kv
@@ -62,6 +63,25 @@ function decodeAttributes(attributeList) {
 }
 
 /**
+ * @param {unknown} rawEvents - OTLP JSON `span.events`.
+ */
+function decodeSecurityEvents(rawEvents) {
+  if (!Array.isArray(rawEvents)) return [];
+  // Bound the decode work before sanitizing: more than this can never be retained anyway.
+  return sanitizeSpanEvents(
+    rawEvents.slice(0, 4 * MAX_EVENTS_PER_SPAN).map((e) => {
+      let timeMs;
+      try {
+        timeMs = e?.timeUnixNano !== undefined ? unixNanoToMs(e.timeUnixNano) : undefined;
+      } catch {
+        timeMs = undefined;
+      }
+      return { name: e?.name, attributes: decodeAttributes(e?.attributes), timeMs };
+    }),
+  );
+}
+
+/**
  * `startTimeUnixNano`/`endTimeUnixNano` arrive as decimal STRINGS (OTLP
  * JSON's convention for 64-bit integers, which don't fit safely in a JS
  * `number` — see `@opentelemetry/otlp-transformer`'s `encodeAsString()`,
@@ -87,7 +107,11 @@ export function parseOtlpJsonTraceRequest(body) {
   for (const resourceSpan of body?.resourceSpans ?? []) {
     for (const scopeSpan of resourceSpan?.scopeSpans ?? []) {
       for (const span of scopeSpan?.spans ?? []) {
-        if (typeof span?.name !== 'string' || !span.name.startsWith('tools/call')) continue;
+        if (typeof span?.name !== 'string') continue;
+        const isToolCall = span.name.startsWith('tools/call');
+        // ADR 033: tools/list spans are admitted only if they carry a whitelisted security event.
+        const events = isToolCall || span.name === 'tools/list' ? decodeSecurityEvents(span.events) : [];
+        if (!isToolCall && !isSecurityListSpan(span.name, events)) continue;
 
         const attributes = decodeAttributes(span.attributes);
         const startTimeMs = unixNanoToMs(span.startTimeUnixNano ?? '0');
@@ -101,6 +125,7 @@ export function parseOtlpJsonTraceRequest(body) {
           durationMs: endTimeMs - startTimeMs,
           status: STATUS_CODE_NAMES[span.status?.code ?? 0] ?? 'UNSET',
           ...spanFieldsFromAttributes(attributes),
+          ...(events.length > 0 ? { events } : {}),
         });
       }
     }

@@ -19,6 +19,7 @@ describe('package root exports', () => {
     'defaultExtractor',
     'calculateCost',
     'FRESHNESS_META_KEY', // v0.17.0 staleness detection (ADR 027)
+    'computeToolDefinitionHash', // v0.18.0 tool definition integrity (ADR 029)
   ];
 
   it.each(REQUIRED_RUNTIME_EXPORTS)('exports %s', (name) => {

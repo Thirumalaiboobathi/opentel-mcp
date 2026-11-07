@@ -1,6 +1,6 @@
 {
   "name": "opentel-mcp",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "One-line OpenTelemetry instrumentation for Model Context Protocol (MCP) servers",
   "type": "module",
   "main": "src/index.js",
@@ -78,10 +78,10 @@
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/context-async-hooks": "^2.9.0",
     "@opentelemetry/sdk-trace-base": "^2.9.0",
-    "@vitest/coverage-v8": "^5.1.0",
+    "@vitest/coverage-v8": "^4.1.12",
     "js-yaml": "^4.3.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.1.0",
+    "vitest": "^4.1.12",
     "zod": "^4.4.3"
   }
 }

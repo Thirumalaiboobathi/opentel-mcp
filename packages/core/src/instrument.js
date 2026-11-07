@@ -35,6 +35,10 @@ import { InstanceRegistry } from './registry/instance-registry.js';
 import { registerFlushOnExit } from './flush-on-exit.js';
 import { applyUnactionableAttributes } from './unactionable.js';
 import { applyStaleness, createStalenessState } from './staleness.js';
+import { markSensitive, recordSensitiveAudit } from './sensitive-tools.js';
+import { applySecretLeak } from './secret-leak.js';
+import { ToolIntegrityTracker } from './tool-integrity/tracker.js';
+import { createToolIntegrityEmitter, formatPinsSnippet } from './tool-integrity/emitter.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_PROMPT_NAME,
@@ -80,6 +84,8 @@ const { version: PACKAGE_VERSION } = require('../package.json');
 // derived from CallToolRequestSchema's zod internals — see ADR 001. Reused
 // as the mcp.method.name attribute value and span-name prefix (ADR 004).
 const TOOLS_CALL_METHOD = MCP_METHOD_NAME_TOOLS_CALL;
+// ADR 031: the failure-classifier category (fingerprint/classify/auth.js) that feeds mcp.tool.auth_failures.
+const AUTH_FAILURE_CATEGORY = 'auth';
 
 // Same reasoning as TOOLS_CALL_METHOD above, for the tools/list branch ADR
 // 010 (docs/adr/010-schema-drift.md) added alongside it — reused as both
@@ -587,6 +593,25 @@ export function instrumentMcpServer(input, options) {
     : null;
   const schemaDriftEmitter =
     resolved.schemaDrift.enabled && resolved.enableMetrics ? createSchemaDriftEmitter(PACKAGE_VERSION) : null;
+  // ADR 029 (v0.18.0): tool definition integrity rides on the same tools/list observation, but is independent of
+  // schema drift: with schemaDrift disabled and toolIntegrity enabled, tools/list is still wrapped.
+  const toolIntegrity = resolved.toolIntegrity.enabled
+    ? {
+        tracker: getOrCreateTracker(
+          resolved.instanceKey,
+          'tool-integrity',
+          () => new ToolIntegrityTracker(resolved.toolIntegrity.pins),
+        ),
+        emitter: createToolIntegrityEmitter(PACKAGE_VERSION, resolved.enableMetrics),
+        // Dev mode only: print the current hashes once, as a copy-pasteable pins snippet.
+        printPins: resolved.setupNodeSdk,
+      }
+    : null;
+  server.getToolIntegrityHashes = () => (toolIntegrity ? toolIntegrity.tracker.getHashes() : {});
+  if (outer) outer.getToolIntegrityHashes = server.getToolIntegrityHashes;
+
+  // v0.18.0 (ADRs 030, 032): resolved once; all off unless configured.
+  const securityOptions = { sensitive: resolved.sensitiveTools, secretLeak: resolved.secretLeakDetection };
 
   const originalSetRequestHandler = server.setRequestHandler.bind(server);
   // ADR 015 Phase 2: the two SDKs dispatch spec methods differently (ADR
@@ -624,8 +649,9 @@ export function instrumentMcpServer(input, options) {
           resolved.unactionableErrors,
           resolved.staleness,
           stalenessState,
+          securityOptions,
         );
-      } else if (schema === v1.ListToolsRequestSchema && schemaDriftDetector) {
+      } else if (schema === v1.ListToolsRequestSchema && (schemaDriftDetector || toolIntegrity)) {
         handler = wrapToolsListHandler(
           handler,
           tracer,
@@ -635,6 +661,7 @@ export function instrumentMcpServer(input, options) {
           kind,
           resolved.errorRecording,
           errorRecordingState,
+          toolIntegrity,
         );
       } else if (coveredMethods.size > 0) {
         const method = v1CoveredMethodForSchema(v1, schema);
@@ -686,8 +713,9 @@ export function instrumentMcpServer(input, options) {
           resolved.unactionableErrors,
           resolved.staleness,
           stalenessState,
+          securityOptions,
         );
-      } else if (maybeHandler === undefined && method === TOOLS_LIST_METHOD && schemaDriftDetector) {
+      } else if (maybeHandler === undefined && method === TOOLS_LIST_METHOD && (schemaDriftDetector || toolIntegrity)) {
         handlerOrSchemas = wrapToolsListHandler(
           handlerOrSchemas,
           tracer,
@@ -697,6 +725,7 @@ export function instrumentMcpServer(input, options) {
           kind,
           resolved.errorRecording,
           errorRecordingState,
+          toolIntegrity,
         );
       }
       if (maybeHandler === undefined && coveredMethods.has(method)) {
@@ -922,7 +951,7 @@ function assertInstrumentFirst(server, resolved) {
   }
   try {
     server.assertCanSetRequestHandler(TOOLS_CALL_METHOD);
-    if (resolved.schemaDrift.enabled) {
+    if (resolved.schemaDrift.enabled || resolved.toolIntegrity.enabled) {
       server.assertCanSetRequestHandler(TOOLS_LIST_METHOD);
     }
   } catch {
@@ -1994,6 +2023,8 @@ function recordThrownException(span, err, errorRecordingConfig, errorRecordingSt
  *   to recordThrownException()/applyRedactor() — see redactor.js's own docblock for what "once" means here.
  * @param {import('./staleness.js').StalenessConfig} stalenessConfig - ADR 027: resolved `staleness` option.
  * @param {{ warnedTools: Set<string> }} stalenessState - ADR 027: once-per-tool malformed-freshness warnings.
+ * @param {{ sensitive: import('./sensitive-tools.js').SensitiveToolMatcher | null, secretLeak: import('./secret-leak.js').SecretLeakConfig }} securityOptions - v0.18.0
+ *   security observability (ADRs 030, 032): resolved, opt-in features; every member is null/off by default.
  */
 function wrapToolCallHandler(
   handler,
@@ -2016,6 +2047,7 @@ function wrapToolCallHandler(
   unactionableErrorsConfig,
   stalenessConfig,
   stalenessState,
+  securityOptions,
 ) {
   return (request, extra) => {
     const toolName = request?.params?.name;
@@ -2062,6 +2094,8 @@ function wrapToolCallHandler(
       span.setAttribute(ATTR_GEN_AI_OPERATION_NAME, GEN_AI_OPERATION_NAME_EXECUTE_TOOL);
       span.setAttribute(ATTR_GEN_AI_TOOL_NAME, toolName);
       span.setAttribute(ATTR_MCP_TOOL_ARGUMENT_COUNT, argumentCount);
+      const isSensitive = securityOptions.sensitive !== null && securityOptions.sensitive.matches(toolName);
+      if (isSensitive) markSensitive(span);
       if (requestId !== undefined && requestId !== null) {
         span.setAttribute(ATTR_JSONRPC_REQUEST_ID, String(requestId));
       }
@@ -2080,6 +2114,8 @@ function wrapToolCallHandler(
           // try/catch, before fingerprinting so a classifier problem can't
           // suppress it. Doesn't feed the fingerprint or the category.
           applyUnactionableAttributes(span, result, unactionableErrorsConfig);
+          // ADR 030: opt-in; boolean/types/count only, and it never changes the status set just above.
+          if (securityOptions.secretLeak.enabled) applySecretLeak(span, metricsRecorder, toolName, result, securityOptions.secretLeak);
 
           let failureCategory = '';
           let failure = null;
@@ -2142,22 +2178,28 @@ function wrapToolCallHandler(
             );
           }
           metricsRecorder?.recordSilentFailure(toolName, failureCategory);
+          if (failureCategory === AUTH_FAILURE_CATEGORY) metricsRecorder?.recordAuthFailure(toolName);
           metricsRecorder?.recordDuration(
             toolName,
             performance.now() - startTime,
             MCP_TOOL_OUTCOME_SILENT_FAILURE,
             failureCategory,
           );
+          if (isSensitive) {
+            recordSensitiveAudit(span, toolName, MCP_TOOL_OUTCOME_SILENT_FAILURE, performance.now() - startTime, failureCategory);
+          }
         } else {
           span.setStatus({ code: SpanStatusCode.OK });
           // ADR 027: freshness verdict from the tool's own _meta. Success
           // branch only, and it never touches status: stale is not an error.
           applyStaleness(span, metricsRecorder, toolName, result, stalenessConfig, stalenessState);
+          if (securityOptions.secretLeak.enabled) applySecretLeak(span, metricsRecorder, toolName, result, securityOptions.secretLeak);
           applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker, costAttributionState);
           if (thrashSessionId !== null) {
             applyThrashSuccessClear(thrashConfig, thrashDetector, thrashSessionId, toolName);
           }
           metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_SUCCESS);
+          if (isSensitive) recordSensitiveAudit(span, toolName, MCP_TOOL_OUTCOME_SUCCESS, performance.now() - startTime);
         }
         return result;
       } catch (err) {
@@ -2219,7 +2261,9 @@ function wrapToolCallHandler(
           );
         }
         metricsRecorder?.recordError(toolName, errorType, failureCategory);
+        if (failureCategory === AUTH_FAILURE_CATEGORY) metricsRecorder?.recordAuthFailure(toolName);
         metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_ERROR, failureCategory);
+        if (isSensitive) recordSensitiveAudit(span, toolName, MCP_TOOL_OUTCOME_ERROR, performance.now() - startTime, failureCategory);
         throw err;
       } finally {
         span.end();
@@ -2280,6 +2324,7 @@ function wrapToolsListHandler(
   kind,
   errorRecordingConfig,
   errorRecordingState,
+  toolIntegrity,
 ) {
   return (request, extra) => {
     return tracer.startActiveSpan(TOOLS_LIST_METHOD, { kind: SpanKind.SERVER }, async (span) => {
@@ -2294,10 +2339,12 @@ function wrapToolsListHandler(
 
         try {
           const tools = Array.isArray(result?.tools) ? result.tools : [];
-          for (const tool of tools) {
-            const event = schemaDriftDetector.capture(schemaDriftScope, tool);
-            if (event) {
-              schemaDriftEmitter?.emit(event);
+          if (schemaDriftDetector) {
+            for (const tool of tools) {
+              const event = schemaDriftDetector.capture(schemaDriftScope, tool);
+              if (event) {
+                schemaDriftEmitter?.emit(event);
+              }
             }
           }
         } catch (err) {
@@ -2305,6 +2352,20 @@ function wrapToolsListHandler(
             'opentel-mcp: schema drift capture failed, skipping mcp.tool.schema_drift.* telemetry for this tools/list call',
             err,
           );
+        }
+
+        // ADR 029: tool definition integrity, in its own guard so neither feature can affect the other or the response.
+        if (toolIntegrity) {
+          try {
+            const complete = request?.params?.cursor === undefined && !result?.nextCursor;
+            const observation = toolIntegrity.tracker.observe(result?.tools, complete);
+            toolIntegrity.emitter.emit(observation, span);
+            if (toolIntegrity.printPins && observation.firstSnapshot) {
+              process.stderr.write(formatPinsSnippet(observation.firstSnapshot));
+            }
+          } catch (err) {
+            diag.debug('opentel-mcp: tool integrity check failed, skipping mcp.tool.integrity.* telemetry for this tools/list call', err);
+          }
         }
 
         span.setStatus({ code: SpanStatusCode.OK });

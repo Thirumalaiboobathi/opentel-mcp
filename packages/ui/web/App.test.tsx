@@ -765,3 +765,19 @@ describe('App: history and the SSE replay never double-count a span', () => {
     expect(el.querySelector('[data-testid="tool-health-stale-count"]')?.textContent).toContain('3 stale responses');
   });
 });
+
+describe('Security panel (ADR 033)', () => {
+  it('appears when spans carry core 0.18 security signals, and is absent for plain spans (older cores)', async () => {
+    mockBackend([span({ name: 'tools/call echo', toolName: 'echo' })], metaWith());
+    let el = await renderApp();
+    expect(el.querySelector('[data-testid="security-panel"]')).toBeNull();
+    act(() => root?.unmount());
+    el.remove();
+
+    const leaking = span({ toolName: 'read_file', name: 'tools/call read_file', attributes: { 'mcp.tool.secret_leak.detected': true, 'mcp.tool.secret_leak.types': ['jwt'] } });
+    mockBackend([leaking], metaWith());
+    el = await renderApp();
+    expect(el.querySelector('[data-testid="security-panel"]')).not.toBeNull();
+    expect(el.querySelector('[data-testid="leak-row-read_file"]')?.textContent).toContain('jwt');
+  });
+});

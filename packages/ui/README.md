@@ -18,7 +18,11 @@ Opens a dashboard at `http://127.0.0.1:4319` seeded with realistic
 fixture data: 86 tool calls (68 clean successes, 7 ordinary thrown/protocol
 failures a standard OTel setup would also catch, and 11 silent failures it
 wouldn't), plus a few resource and prompt calls. Two of the tools are
-market-data tools whose successful responses are sometimes stale. Nothing to configure, no
+market-data tools whose successful responses are sometimes stale, and the
+Security section has a story to show (a tool whose definition changed under a
+pin, secret-shaped output, an auth-failure burst, sensitive calls, a skewed
+clock). The demo holds no key or secret in any form; the "leak" is only the
+derived signal. Nothing to configure, no
 MCP server required. The panels:
 
 - **Observation matrix** — SUCCESS/FAILURE rows × visible-to-OTel/missed-by-OTel
@@ -45,8 +49,26 @@ MCP server required. The panels:
   and `prompts/*` by method (and prompt name), with their failures. Hidden
   for tools-only servers.
 
+- **Security** (0.4.0, opentel-mcp 0.18.0+) — a read-only section built from
+  opentel-mcp's security signals, shown only when spans carry them (it is
+  absent for older cores and for servers that have the features off):
+  **tool definitions** (a definition that changed since first seen, a pin
+  mismatch, an added or removed tool, with 12-character hash prefixes and
+  the time), **secret-shaped output** (per tool, how many results looked like
+  they held a credential, and which types), **auth failures** (per tool, with
+  a burst highlighted when 5 or more land within a minute; the threshold is
+  fixed), **sensitive tool calls** (per tool, by outcome) and **clock skew**
+  (tools whose data producer's clock runs ahead, with the largest lead). It is
+  detection, not enforcement: pattern-based checks can miss things and can
+  fire on look-alikes. It has no buttons, links or inputs and acts on nothing;
+  every value is rendered as text. `--demo` shows all five. Which signals
+  opentel-mcp emits, and what each never records: see its "Security
+  observability" section.
+
 Only `tools/call` spans count toward the matrix, the hero number, the feed
-and the grades. A `tools/list` or `resources/read` span isn't a tool call.
+and the grades. A `tools/list` or `resources/read` span isn't a tool call;
+the one exception is a `tools/list` span that carries a tool-definition
+integrity event, which the Security section reads (it never counts as a call).
 - **Detector status banner** — which of opentel-mcp's four in-memory
   trackers (thrash detection, cost/budget, schema drift, tool-outcome
   counting) are confidently live for the server you've pointed this at —
@@ -166,6 +188,8 @@ topology and want a confident answer instead.
 - **Never binds to anything but `127.0.0.1`.** This dashboard has no
   authentication, so it is never reachable from another machine, even on
   your own local network, regardless of flags.
+- **Never acts on a server.** The Security section only reads; nothing in the
+  dashboard sends anything anywhere. Beyond `POST /v1/traces` nothing accepts input.
 - **Never answers other websites (0.3.0+).** Requests must be addressed to
   `localhost`, `127.0.0.1` or `[::1]` on the dashboard's own port, and
   browser requests to `/api/*` or `/v1/traces` must come from the

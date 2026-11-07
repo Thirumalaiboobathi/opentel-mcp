@@ -146,6 +146,54 @@ export interface InstrumentOptions {
   };
 
   /**
+   * ADR 029 (0.18.0), opt-in: tool definition integrity ("rug pull" detection). Every tool definition seen in
+   * `tools/list` (name, title, description, inputSchema, outputSchema, annotations) is hashed with
+   * {@link computeToolDefinitionHash}. Span events on the `tools/list` span report: `mcp.tool.integrity.changed`
+   * (differs from the first hash seen in this process), `.pin_mismatch` (differs from `pins[name]`; high severity),
+   * `.added` and `.removed` (tool set changed). Events are edge-triggered: once per distinct new state. The
+   * counter `mcp.tool.integrity_violations` (label: tool name only) counts changes and pin mismatches. Events carry
+   * the tool name and hashes, never definition text. Works with `schemaDrift` disabled. This detects changes; it
+   * does not block them, and the first hash seen is trusted unless pinned.
+   *
+   * `pins` maps a tool name to the expected `sha256:<64 hex>`; invalid entries are skipped with one `diag.warn`.
+   * Get the values from `server.getToolIntegrityHashes()` or, with `setupNodeSdk: true`, the snippet printed once
+   * to stderr.
+   */
+  toolIntegrity?: {
+    /** @default false */
+    enabled?: boolean;
+    pins?: Record<string, string>;
+  };
+
+  /**
+   * ADR 030 (0.18.0), opt-in: look for credential-shaped strings in the `text` items of tool results, successful
+   * and `isError` alike, using the same detectors that scrub error text. When something is found the span gets
+   * `mcp.tool.secret_leak.detected` (true), `.types` (a sorted list from a closed set: `url_credentials`, `jwt`,
+   * `http_auth_credential`, `aws_access_key_id`, `provider_api_key`, `secret_assignment`) and `.count`, plus
+   * `.scan_truncated` when the cap cut the scan short, and `mcp.tool.secret_leaks` counts the call (label: tool
+   * name only). The matched text, its position and its surroundings are never recorded. Span status is not
+   * changed: a leak is a signal, not an error. Pattern-based: it misses formats and can fire on look-alikes.
+   */
+  secretLeakDetection?: {
+    /** @default false */
+    enabled?: boolean;
+    /** Most characters (JavaScript string length) scanned per result; the rest is skipped, not rejected. @default 65536 */
+    maxScanBytes?: number;
+  };
+
+  /**
+   * ADR 032 (0.18.0), opt-in: tool names to audit. Exact names, plus `*` wildcards that match any run of
+   * characters (`"delete_*"`). A matching call gets the span attribute `mcp.tool.sensitive = true` and one span
+   * event `mcp.audit.sensitive_call` with `mcp.tool.outcome` (`success` | `silent_failure` | `error`),
+   * `mcp.tool.duration_ms` and, on failure, `mcp.failure.category`. Arguments and results are never recorded.
+   * Matching is case-sensitive on the tool name. Entries that are not non-empty strings of at most 256
+   * characters are skipped with one `diag.warn`. This is telemetry, not a tamper-evident audit log: sampled-out or
+   * undelivered spans are lost.
+   * @default []
+   */
+  sensitiveTools?: string[];
+
+  /**
    * ADR 027 (docs/adr/027-staleness-detection.md): staleness detection. A
    * tool reports how fresh its data is in
    * `result._meta[FRESHNESS_META_KEY]` (see {@link FreshnessMeta}), and every
@@ -168,6 +216,14 @@ export interface InstrumentOptions {
      * value (negative, non-finite) is ignored with a `diag.warn`.
      */
     tools?: Record<string, { maxAgeMs: number }>;
+    /**
+     * How far in the future (ms) a tool's `asOf` may be before the verdict is `unknown` (`future_as_of`). Within
+     * this window the age clamps to 0. Either way the producer's lead is recorded on the span as
+     * `mcp.tool.freshness.clock_skew_ms`. Must be a finite number >= 0; anything else is ignored with a
+     * `diag.warn`. ADR 027 amendment (0.18.0).
+     * @default 5000
+     */
+    clockSkewToleranceMs?: number;
   };
 
   /**
@@ -474,6 +530,11 @@ export function instrumentMcpServer<T extends DuckTypedServer | DuckTypedMcpServ
    */
   shutdown?: () => Promise<void>;
   getThrashSummary?: (options?: { topOffendersLimit?: number }) => ThrashSummary;
+  /**
+   * ADR 029 (0.18.0): the current `{ toolName: "sha256:..." }` map from the latest `tools/list` observations; `{}` when
+   * `toolIntegrity` is off or nothing has been listed yet. Use it to produce `toolIntegrity.pins`.
+   */
+  getToolIntegrityHashes?: () => Record<string, string>;
   getObservationState?: () => ObservationState;
 };
 
@@ -618,3 +679,12 @@ export type FreshnessMeta =
 
 /** `mcp.tool.freshness.verdict`. */
 export type FreshnessVerdict = 'fresh' | 'stale' | 'unknown';
+
+/**
+ * ADR 029 (0.18.0): `"sha256:" + <64 lowercase hex>` over the canonical JSON (keys sorted at every depth, no
+ * whitespace, UTF-8) of the definition's `name`, `title`, `description`, `inputSchema`, `outputSchema` and
+ * `annotations` (those present). The same definition gives the same hash on every platform. Use it to compute
+ * `toolIntegrity.pins` values. Returns `null` (never throws) for something that is not a hashable object
+ * (cyclic, BigInt, not an object).
+ */
+export function computeToolDefinitionHash(definition: unknown): string | null;

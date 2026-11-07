@@ -82,4 +82,20 @@ export interface SerializedSpan {
    * SerializedSpan version bump.
    */
   attributes: Record<string, string | number | boolean | Array<string | number | boolean>>;
+
+  /**
+   * Whitelisted security span events only (ADR 033; opentel-mcp core 0.18.0+): tool definition integrity events
+   * (on `tools/list` spans) and the sensitive tool audit event (on `tools/call` spans). Each keeps only its
+   * known attribute keys, with string/finite-number/boolean values; at most 32 per span. Absent when there are none
+   * (always, on older cores).
+   */
+  events?: SerializedSpanEvent[];
+}
+
+/** One retained security span event (see {@link SerializedSpan.events}). */
+export interface SerializedSpanEvent {
+  name: string;
+  /** Epoch milliseconds of the event, when the sender supplied it. */
+  timeMs?: number;
+  attributes: Record<string, string | number | boolean>;
 }

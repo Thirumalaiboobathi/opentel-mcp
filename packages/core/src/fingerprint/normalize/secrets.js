@@ -24,16 +24,31 @@ const SECRET_KEY_NAMES =
   'client[_-]?secret|secret[_-]?key|secret|password|passwd|pwd|private[_-]?key|aws[_-]?secret[_-]?access[_-]?key|' +
   'credentials?|signature|sig)';
 
-/** @type {readonly { pattern: RegExp, replacement: string }[]} */
+/**
+ * The closed set of secret types (ADR 030, v0.18.0): the only thing secret leak detection ever reports about a
+ * match. Adding one is a deliberate, reviewed change; the names are span attribute VALUES.
+ */
+export const SECRET_TYPES = Object.freeze([
+  'url_credentials',
+  'jwt',
+  'http_auth_credential',
+  'aws_access_key_id',
+  'provider_api_key',
+  'secret_assignment',
+]);
+
+/** @type {readonly { type: typeof SECRET_TYPES[number], pattern: RegExp, replacement: string }[]} */
 export const SECRET_STEPS = Object.freeze([
   // Credentials inside a URL: scheme://<user>:<password>@host -> scheme://<SECRET>@host.
   {
+    type: 'url_credentials',
     pattern: /\b([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/?#@"'<>:]+:[^\s/?#@"'<>]+@/g,
     replacement: `$1${SECRET_PLACEHOLDER}@`,
   },
 
   // JSON Web Token: three base64url segments, the first two JSON objects ("eyJ").
   {
+    type: 'jwt',
     pattern: /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{10,}/g,
     replacement: SECRET_PLACEHOLDER,
   },
@@ -41,12 +56,14 @@ export const SECRET_STEPS = Object.freeze([
   // HTTP auth schemes followed by a credential of at least 16 characters
   // ("Bearer token missing" has no such credential and is left alone).
   {
+    type: 'http_auth_credential',
     pattern: /\b(Bearer|Basic)\s+[A-Za-z0-9\-._~+/]{16,}=*/gi,
     replacement: `$1 ${SECRET_PLACEHOLDER}`,
   },
 
   // AWS access key ids.
   {
+    type: 'aws_access_key_id',
     pattern: /\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/g,
     replacement: SECRET_PLACEHOLDER,
   },
@@ -55,6 +72,7 @@ export const SECRET_STEPS = Object.freeze([
   // Stripe (sk_live_/rk_test_…), GitHub (ghp_/gho_/ghu_/ghs_/ghr_,
   // github_pat_), Slack (xoxa-/xoxb-/xoxp-/xoxr-/xoxs-), Google (AIza…).
   {
+    type: 'provider_api_key',
     pattern:
       /\b(?:sk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})/g,
     replacement: SECRET_PLACEHOLDER,
@@ -64,14 +82,17 @@ export const SECRET_STEPS = Object.freeze([
   // password=…, "client_secret": "…". `=` always counts; `:` only when the
   // value is quoted or contains a digit, so "token: expired" stays readable.
   {
+    type: 'secret_assignment',
     pattern: new RegExp(`\\b(${SECRET_KEY_NAMES})(=)(["']?)[^\\s&"',;)]+`, 'gi'),
     replacement: `$1$2$3${SECRET_PLACEHOLDER}`,
   },
   {
+    type: 'secret_assignment',
     pattern: new RegExp(`\\b(${SECRET_KEY_NAMES})(["']?\\s*:\\s*)(["'])[^"'\\n]+\\3`, 'gi'),
     replacement: `$1$2$3${SECRET_PLACEHOLDER}$3`,
   },
   {
+    type: 'secret_assignment',
     pattern: new RegExp(`\\b(${SECRET_KEY_NAMES})(\\s*:\\s*)(?=[^\\s,;]*\\d)[^\\s,;]{4,}`, 'gi'),
     replacement: `$1$2${SECRET_PLACEHOLDER}`,
   },
@@ -90,4 +111,31 @@ export function scrubSecrets(text) {
     result = result.replace(pattern, replacement);
   }
   return result;
+}
+
+/** Upper bound on matches counted by {@link detectSecretTypes}; keeps work and the reported count bounded. */
+export const MAX_DETECTED_MATCHES = 1000;
+
+/**
+ * Which secret types occur in `text`, and how many matches (summed over the detector steps, so overlapping steps
+ * can count the same text twice: a magnitude, not a distinct-secret count; capped at {@link MAX_DETECTED_MATCHES}).
+ *
+ * Uses the same patterns as {@link scrubSecrets}. The matched text, its position and its context are never
+ * returned or retained: only a type name leaves this function. `matchAll` clones each global regex, so the shared
+ * patterns' `lastIndex` is never touched. Never throws on a string.
+ *
+ * @param {string} text
+ * @returns {{ types: Set<string>, count: number }}
+ */
+export function detectSecretTypes(text) {
+  const types = new Set();
+  let count = 0;
+  for (const { type, pattern } of SECRET_STEPS) {
+    for (const _match of text.matchAll(pattern)) {
+      types.add(type);
+      count++;
+      if (count >= MAX_DETECTED_MATCHES) return { types, count };
+    }
+  }
+  return { types, count };
 }

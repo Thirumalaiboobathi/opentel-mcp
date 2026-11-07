@@ -25,6 +25,7 @@
  */
 
 import { SpanStatusCode } from '@opentelemetry/api';
+import { sanitizeSpanEvents } from './security-events.js';
 
 /** @typedef {import('@opentelemetry/sdk-trace').ReadableSpan} ReadableSpan */
 /** @typedef {import('./types.d.ts').SerializedSpan} SerializedSpan */
@@ -86,6 +87,10 @@ export function spanFieldsFromAttributes(attributes) {
  */
 export function serializeSpan(span) {
   const spanContext = span.spanContext();
+  // ADR 033: only whitelisted security events survive; empty -> no `events` field (older shape, byte for byte).
+  const events = sanitizeSpanEvents(
+    (span.events ?? []).map((e) => ({ name: e.name, attributes: e.attributes, timeMs: hrTimeToMs(e.time) })),
+  );
 
   return {
     id: spanContext.spanId,
@@ -95,5 +100,6 @@ export function serializeSpan(span) {
     durationMs: hrTimeToMs(span.duration),
     status: STATUS_CODE_NAMES[span.status?.code] ?? 'UNSET',
     ...spanFieldsFromAttributes(span.attributes ?? {}),
+    ...(events.length > 0 ? { events } : {}),
   };
 }

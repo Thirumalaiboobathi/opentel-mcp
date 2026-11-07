@@ -557,7 +557,7 @@ moves cases like these into language-neutral JSON at the repo root
 |---|---|---|
 | 0.2 | `mcp.failure.validation_paths` (ADR 009) for pydantic messages | the cheapest increase in signal |
 | 0.3 | unactionable errors (ADR 025) | span-only, small |
-| 0.4 | staleness (ADR 027) | span plus one counter, `_meta` contract |
+| 0.4 | staleness (ADR 027, plus the 0.18.0 clock-skew amendment) | span plus one counter, `_meta` contract |
 | 0.5 | thrash detection (ADR 006/012/018) | needs session state and tracker lifecycle |
 | 0.6 | schema drift (ADR 010) | needs `tools/list` wrapping and a store |
 | 0.7 | resources/prompts coverage (ADR 026) | `mcp.server.operation.duration`; on 2.x this partly overlaps with the SDK's spans |
@@ -1067,3 +1067,5 @@ global tracer provider that dev mode installs, so it does. In addition:
 
 None. All were resolved on 2026-10-25 (Maintainer decisions, rounds 1 and
 2).
+
+> **Update (core 0.18.0):** the v0.18 security signals (ADRs 029 to 032) are JS-only and are recorded under `contract.json` → `jsOnly`; see [ADR 034](034-security-signals-conformance.md).

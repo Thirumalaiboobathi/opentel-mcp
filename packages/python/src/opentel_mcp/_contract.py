@@ -1,4 +1,4 @@
-"""The telemetry contract with core 0.17.0 (ADR 028, Decision 4).
+"""The telemetry contract with core 0.18.0 (ADR 028, Decision 4; the 0.18 security signals are JS-only, ADR 034).
 
 Every name, value, unit, description and label set here is mirrored by
 ``conformance/contract.json`` (generated from the JS implementation) and asserted
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Final
 
-CONTRACT_VERSION: Final = "core 0.17.0"
+CONTRACT_VERSION: Final = "core 0.18.0"
 INSTRUMENTATION_SCOPE: Final = "opentel-mcp"
 
 # --- span names and attribute keys ---------------------------------------------
