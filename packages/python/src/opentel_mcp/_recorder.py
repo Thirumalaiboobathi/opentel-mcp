@@ -28,6 +28,7 @@ from ._compose import ATTR_CHANNEL, Fingerprint, compute_fingerprint
 from ._config import Options
 from ._metrics import MetricsRecorder
 from ._recording import RecordingState, record_thrown_exception, thrown_error_type
+from ._sensitive import mark_sensitive, record_sensitive_audit
 from ._wire import is_tool_error, to_wire
 
 logger = logging.getLogger("opentel_mcp")
@@ -127,13 +128,16 @@ def _is_foreign_tools_call_span(span: Span) -> bool:
 
 
 class _Active:
-    __slots__ = ("owned", "span", "token", "tool_name")
+    __slots__ = ("owned", "sensitive", "span", "token", "tool_name")
 
-    def __init__(self, span: Span, token: object | None, owned: bool, tool_name: str | None) -> None:
+    def __init__(
+        self, span: Span, token: object | None, owned: bool, tool_name: str | None, sensitive: bool = False
+    ) -> None:
         self.span = span
         self.token = token
         self.owned = owned
         self.tool_name = tool_name
+        self.sensitive = sensitive
 
 
 class ToolCallRecorder:
@@ -239,12 +243,20 @@ class ToolCallRecorder:
         else:
             span = current
 
-        active = _Active(span, token, owned, tool_name)
+        sensitive = False
+        try:
+            matcher = self.options.sensitive
+            sensitive = matcher is not None and tool_name is not None and matcher.matches(tool_name)
+        except Exception as exc:
+            self._failed("sensitive", exc)
+        active = _Active(span, token, owned, tool_name, sensitive)
         try:
             if owned:
                 self._set_initial_attributes(span, info, tool_name)
             elif span.is_recording():
                 self._set_enrich_attributes(span, info, tool_name)
+            if sensitive and span.is_recording():
+                mark_sensitive(span)  # known before the handler runs (ADR 032)
         except Exception as exc:
             self._failed("attributes", exc)
         self._metric(lambda m: m.record_call(tool_name))
@@ -290,6 +302,7 @@ class ToolCallRecorder:
             if span.is_recording():
                 span.set_status(StatusCode.OK)
             self._metric(lambda m: m.record_duration(tool, duration_ms, c.OUTCOME_SUCCESS))
+            self._audit(active, c.OUTCOME_SUCCESS, duration_ms)
             return
 
         wire = to_wire(result)
@@ -314,6 +327,7 @@ class ToolCallRecorder:
         self._metric(lambda m: m.record_silent_failure(tool, category))
         self._record_auth_failure(tool, category)
         self._metric(lambda m: m.record_duration(tool, duration_ms, c.OUTCOME_SILENT_FAILURE, category))
+        self._audit(active, c.OUTCOME_SILENT_FAILURE, duration_ms, category)
 
     def _on_thrown(self, active: _Active, exc: BaseException, start: float) -> None:
         span, tool = active.span, active.tool_name
@@ -336,6 +350,12 @@ class ToolCallRecorder:
         self._metric(lambda m: m.record_error(tool, error_type, category))
         self._record_auth_failure(tool, category)
         self._metric(lambda m: m.record_duration(tool, duration_ms, c.OUTCOME_ERROR, category))
+        self._audit(active, c.OUTCOME_ERROR, duration_ms, category)
+
+    def _audit(self, active: _Active, outcome: str, duration_ms: float, category: str = "") -> None:
+        """ADR 032: one ``mcp.audit.sensitive_call`` event, on every path, for a sensitive tool."""
+        if active.sensitive and active.tool_name is not None and active.span.is_recording():
+            record_sensitive_audit(active.span, active.tool_name, outcome, duration_ms, category)
 
     def _record_auth_failure(self, tool: str | None, category: str) -> None:
         """ADR 031: +1 per failed call (silent or thrown) classified ``auth``. Needs fingerprinting (no category otherwise)."""

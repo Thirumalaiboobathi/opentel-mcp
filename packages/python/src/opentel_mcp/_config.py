@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._recording import ErrorRecordingConfig, resolve_error_recording_config
+from ._sensitive import SensitiveToolMatcher, compile_sensitive_tools
 
 logger = logging.getLogger("opentel_mcp")
 
@@ -40,6 +41,7 @@ class Options:
     exporter_url: str | None
     flush_timeout_ms: int | None  # None => flush on exit disabled
     sdk_tracing: str
+    sensitive: SensitiveToolMatcher | None = None
 
 
 def _bool(name: str, value: Any, default: bool) -> bool:
@@ -93,6 +95,7 @@ def resolve_options(
     exporter_url: Any = None,
     flush_on_exit: Any = None,
     sdk_tracing: Any = "replace",
+    sensitive_tools: Any = None,
     **unknown: Any,
 ) -> Options:
     """Raises ``ValueError`` only for ``setup_sdk=True`` without ``service_name`` (startup, never per request)."""
@@ -141,4 +144,5 @@ def resolve_options(
         exporter_url=url,
         flush_timeout_ms=_flush_timeout(flush_on_exit, sdk),
         sdk_tracing=str(tracing),
+        sensitive=compile_sensitive_tools(sensitive_tools, _warn_once),
     )

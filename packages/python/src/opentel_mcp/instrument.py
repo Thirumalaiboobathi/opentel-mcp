@@ -51,6 +51,7 @@ def instrument_mcp_server(
     exporter_url: str | None = None,
     flush_on_exit: bool | dict[str, int] | None = None,
     sdk_tracing: Literal["replace", "enrich"] = "replace",
+    sensitive_tools: list[str] | None = None,
     **unknown: Any,
 ) -> ServerT:
     """Instrument an MCP server's ``tools/call`` handler with OpenTelemetry spans and metrics.
@@ -73,6 +74,10 @@ def instrument_mcp_server(
             the SDK then records thrown exceptions **raw** (no scrubbing, modes or caps), its ``error.type``
             is ``type(e).__qualname__`` or the JSON-RPC code, and it also spans bad-params and
             pre-initialize requests.
+        sensitive_tools: tool names to audit (ADR 032): exact names and ``*`` wildcards (any run of characters; no
+            other pattern syntax; case-sensitive). A matching call gets ``mcp.tool.sensitive = True`` and one
+            ``mcp.audit.sensitive_call`` span event (outcome, ``mcp.tool.duration_ms``, failure category). Never
+            arguments or results. Invalid entries warn once and are skipped. Default: nothing is audited.
 
     Never raises into the host, with one exception: ``setup_sdk=True`` without ``service_name`` raises
     ``ValueError`` here, at startup.
@@ -87,6 +92,7 @@ def instrument_mcp_server(
         exporter_url=exporter_url,
         flush_on_exit=flush_on_exit,
         sdk_tracing=sdk_tracing,
+        sensitive_tools=sensitive_tools,
         **unknown,
     )
     try:
