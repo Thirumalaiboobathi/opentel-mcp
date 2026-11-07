@@ -128,7 +128,12 @@ def test_stderr_gets_spans_and_metrics_and_stdout_stays_clean() -> None:
 
 def test_exporter_url_gets_otlp_json_with_hex_ids_flushed_on_normal_exit(sink: Any) -> None:
     _, url = sink
-    proc = spawn(EXPORTER_URL=url)
+    # Root cause of the old flake: the atexit flush runs in a daemon thread that is joined for at most flush_on_exit's
+    # cap (2 s by default). On a loaded machine the export to this in-process sink (another thread of a busy pytest
+    # process) can take longer than that, the interpreter exits, the daemon thread dies, and no span ever arrives.
+    # The cap is a deliberate product bound (covered by test_force_flush_bounds.py); what this test proves is
+    # delivery of OTLP JSON with hex ids on a normal exit, so it lifts the cap instead of racing it.
+    proc = spawn(EXPORTER_URL=url, FLUSH_TIMEOUT_MS="60000")
     proc.wait(timeout=60)
     err = proc.drained()[1]
     assert proc.returncode == 0, err

@@ -456,6 +456,17 @@ describe('staleness on real tools/call spans', () => {
 
   for (const shape of SHAPES) {
     describe(shape.name, () => {
+      // Root cause of a flake: these tests build `asOf: Date.now() - 240_000` and then assert the recorded age is
+      // >= 240_000, which assumes the wall clock never steps backwards between the test's read and the library's.
+      // On WSL2 / VMs the system clock is stepped by host time sync (observed: age 232244 < 240000). Freeze Date
+      // (only Date; real timers and hrtime stay real) so both reads see the same instant.
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
       async function run(result, options = {}) {
         const call = shape.setup(options, () => result);
         const returned = await call().catch((e) => e);
@@ -671,7 +682,7 @@ describe('never throws into the host on garbage freshness input (fuzz)', () => {
     // is one warning per server at most.
     const perServerMax = SHAPES.length * GARBAGE_FRESHNESS.length;
     expect(warn.mock.calls.filter((c) => String(c[0]).includes('freshness')).length).toBeLessThanOrEqual(perServerMax);
-  });
+  }, 30_000); // one fresh instrumented server per (shape x value) pair: legitimately slow on a saturated machine
 
   it('one instrumented server, many malformed responses for one tool: exactly one warn', async () => {
     const warn = vi.spyOn(diag, 'warn').mockImplementation(() => {});

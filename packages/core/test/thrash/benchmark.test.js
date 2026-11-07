@@ -87,61 +87,74 @@ describe('Agent Thrash Detection benchmark: throughput, memory, session isolatio
     const TOTAL_CALLS = SESSION_COUNT * CALLS_PER_SESSION;
 
     const detector = new ThrashDetector(resolveThrashConfig());
+    const input = (s, c) => ({
+      sessionId: `session-${s}`,
+      toolName: 'search',
+      fingerprint: 'fp-abc', // same fingerprint within a session: a real thrash loop
+      spanId: `span-${s}-${c}`,
+      traceId: `trace-${s}-${c}`,
+      tokensIn: 10,
+      tokensOut: 5,
+      costUsd: 0.01,
+    });
 
-    // Session isolation methodology: every simulated session below is
-    // given its own distinct, explicitly-passed sessionId
-    // (`session-${n}`) — never the generated per-connection fallback
-    // (there is no fallback here at all: this benchmark calls
-    // ThrashDetector.record() directly, bypassing instrumentMcpServer()
-    // and its resolveThrashSessionId() fallback logic entirely). Spying
-    // on record() below captures the literal sessionId ThrashDetector
-    // received on every call, so the isolation check measures what the
-    // subject-under-test actually saw, not just what this harness
-    // intended to send.
-    const recordSpy = vi.spyOn(ThrashDetector.prototype, 'record');
+    // Timing: root cause of the old flake. This loop used to run with vi.spyOn(record) installed, which retains the
+    // arguments of all 500,000 calls; the measured "throughput" was then dominated by GC of that retained garbage and
+    // by whatever else the machine was doing (6.9k calls/s under load vs 85k unloaded), against an absolute 10k/s floor.
+    // Now: (1) nothing is spied during the timed loop, and (2) the bound is relative to a calibration loop that builds
+    // the same inputs and does bounded-Map work in the same process, so machine load slows both sides together. The
+    // property (no per-call cost that grows with sessions or calls) still fails the bound if record() regresses.
+    const calibrate = () => {
+      const map = new Map();
+      const t0 = performance.now();
+      for (let s = 0; s < SESSION_COUNT; s++) {
+        for (let c = 0; c < CALLS_PER_SESSION; c++) {
+          const i = input(s, c);
+          map.set(i.sessionId, i);
+          if (map.size > 1000) map.delete(map.keys().next().value);
+        }
+      }
+      return performance.now() - t0;
+    };
+    const timedRun = () => {
+      const t0 = performance.now();
+      for (let s = 0; s < SESSION_COUNT; s++) {
+        for (let c = 0; c < CALLS_PER_SESSION; c++) detector.record(input(s, c));
+      }
+      return performance.now() - t0;
+    };
 
     if (global.gc) global.gc(); // best-effort; most `npm test` runs won't have --expose-gc
     const heapBefore = process.memoryUsage().heapUsed;
-    const start = performance.now();
-
-    for (let s = 0; s < SESSION_COUNT; s++) {
-      const sessionId = `session-${s}`;
-      for (let c = 0; c < CALLS_PER_SESSION; c++) {
-        detector.record({
-          sessionId,
-          toolName: 'search',
-          fingerprint: 'fp-abc', // same fingerprint within a session — a real thrash loop
-          spanId: `span-${s}-${c}`,
-          traceId: `trace-${s}-${c}`,
-          tokensIn: 10,
-          tokensOut: 5,
-          costUsd: 0.01,
-        });
-      }
-    }
-
-    const elapsedMs = performance.now() - start;
+    const calibrationMs = calibrate();
+    const elapsedMs = timedRun();
     if (global.gc) global.gc();
     const heapAfter = process.memoryUsage().heapUsed;
     const heapGrowthMB = (heapAfter - heapBefore) / (1024 * 1024);
     const callsPerSecond = TOTAL_CALLS / (elapsedMs / 1000);
+    const slowdownVsCalibration = elapsedMs / calibrationMs;
 
-    // --- Session isolation integrity check ---
-    const observedSessionIds = new Set(recordSpy.mock.calls.map(([input]) => input.sessionId));
+    // Session isolation methodology: every simulated session is given its own distinct, explicitly-passed sessionId
+    // (`session-${n}`), never the generated per-connection fallback (this calls ThrashDetector.record() directly,
+    // bypassing instrumentMcpServer() and resolveThrashSessionId()). The spy below captures the literal sessionId
+    // the detector received, so the check measures what the subject saw. It runs after, and outside, the timed loop.
+    const recordSpy = vi.spyOn(ThrashDetector.prototype, 'record');
+    const isolationDetector = new ThrashDetector(resolveThrashConfig());
+    for (let s = 0; s < SESSION_COUNT; s++) isolationDetector.record(input(s, 0));
+    const observedSessionIds = new Set(recordSpy.mock.calls.map(([i]) => i.sessionId));
     recordSpy.mockRestore();
 
     // eslint-disable-next-line no-console
     console.log(
       '--- Agent Thrash Detection benchmark ---\n' +
-        'Methodology: session isolation — each of the simulated sessions below is assigned its own distinct, ' +
-        'explicitly-passed sessionId (session-0..session-9999), passed directly to ThrashDetector.record(). ' +
-        'This benchmark never relies on the generated per-connection fallback session id (src/instrument.js\'s ' +
-        'resolveThrashSessionId()) — that fallback path is exercised separately in ' +
+        'Methodology: session isolation, each simulated session is assigned its own distinct, explicitly-passed ' +
+        'sessionId (session-0..session-9999), passed directly to ThrashDetector.record(); the generated ' +
+        "per-connection fallback (src/instrument.js's resolveThrashSessionId()) is exercised in " +
         'test/integration/thrash-detection.test.js, not here.\n' +
         `Simulated sessions: ${SESSION_COUNT}, calls/session: ${CALLS_PER_SESSION}, total calls: ${TOTAL_CALLS}\n` +
         `Distinct session keys observed by ThrashDetector.record(): ${observedSessionIds.size}\n` +
-        `Throughput: ${callsPerSecond.toFixed(0)} calls/sec (${elapsedMs.toFixed(0)}ms total)\n` +
-        `Heap growth: ${heapGrowthMB.toFixed(2)}MB (${global.gc ? 'GC forced before/after' : 'no --expose-gc — noisier, upper-bound estimate'})`,
+        `Throughput: ${callsPerSecond.toFixed(0)} calls/sec (${elapsedMs.toFixed(0)}ms total; calibration loop ${calibrationMs.toFixed(0)}ms, ${slowdownVsCalibration.toFixed(1)}x)\n` +
+        `Heap growth: ${heapGrowthMB.toFixed(2)}MB (${global.gc ? 'GC forced before/after' : 'no --expose-gc, noisier, upper-bound estimate'})`,
     );
 
     // Fail loudly, not just quietly report, if the harness didn't
@@ -152,7 +165,9 @@ describe('Agent Thrash Detection benchmark: throughput, memory, session isolatio
       SESSION_COUNT,
     );
 
-    expect(callsPerSecond).toBeGreaterThan(10_000);
+    // Measured 5.8-8.7x unloaded and under 8 busy cores. 30x leaves >3x margin and still catches a per-call
+    // cost that grows with sessions or calls (e.g. an O(maxTrackedKeys) scan per record()).
+    expect(slowdownVsCalibration).toBeLessThan(30);
 
     // No assertion on heapGrowthMB, deliberately. It's logged above (and
     // still worth reading when investigating a real regression), but
@@ -170,5 +185,5 @@ describe('Agent Thrash Detection benchmark: throughput, memory, session isolatio
     // bound" describe block (100,000 inserts at maxSize 1000, size stays
     // at 1000). That's the real assertion; this file only reports the
     // heap number for visibility.
-  });
+  }, 60_000); // 1.5M record-sized iterations (calibration + timed + isolation): legitimately slow on a saturated machine
 });

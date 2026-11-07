@@ -28,6 +28,7 @@ const FLUSH_MARKER = '[opentel-mcp metrics] mcp.tool.calls';
 const POSIX = process.platform !== 'win32';
 /** OTLPTraceExporter's default export timeout: how long shutdown would hang on a dead endpoint without the cap. */
 const UNCAPPED_EXPORT_TIMEOUT_MS = 10_000;
+const FIXTURE_HANG_GUARD_MS = 45_000;
 
 /**
  * @param {{ mode?: string, options?: object, env?: Record<string, string>, signal?: NodeJS.Signals }} spec
@@ -44,25 +45,34 @@ function runFixture({ mode = 'exit', options = {}, env = {}, signal } = {}) {
     child.stderr.on('data', (chunk) => (stderr += chunk.toString()));
     child.stdout.on('data', (chunk) => {
       if (signal && signalledAt === null && chunk.toString().includes('READY')) {
-        signalledAt = Date.now();
+        signalledAt = process.hrtime.bigint();
         child.kill(signal);
       }
     });
+    // Hang guard only, not a performance assertion: Node startup plus the OTel SDK import can take many seconds on a
+    // saturated machine (the old 15 s guard tripped there). Nothing below depends on how long the child takes to
+    // start, because the signal is sent on READY, not on a timer.
     const killer = setTimeout(() => {
       child.kill('SIGKILL');
       reject(new Error(`fixture did not exit in time; stderr:\n${stderr}`));
-    }, 15_000);
+    }, FIXTURE_HANG_GUARD_MS);
     child.on('exit', (code, exitSignal) => {
       clearTimeout(killer);
-      resolve({ code, signal: exitSignal, stderr, msFromSignal: signalledAt === null ? null : Date.now() - signalledAt });
+      const afterReady = stderr.includes('READY\n') ? stderr.slice(stderr.indexOf('READY\n') + 6) : stderr;
+      resolve({
+        code,
+        signal: exitSignal,
+        stderr: afterReady,
+        fullStderr: stderr,
+        msFromSignal: signalledAt === null ? null : Number((process.hrtime.bigint() - signalledAt) / 1_000_000n),
+      });
     });
   });
 }
 
-// Each case spawns a real Node process (and one waits 1.5 s on purpose),
-// so allow well beyond vitest's 5 s default when the whole suite runs in
-// parallel. runFixture() has its own 15 s kill switch.
-describe('flushOnExit in a real process (ADR 024)', { timeout: 20_000 }, () => {
+// Each case spawns a real Node process (and one waits 1.5 s on purpose), which legitimately takes far longer than
+// vitest's 5 s default when the whole suite runs in parallel. runFixture() has its own hang guard below this.
+describe('flushOnExit in a real process (ADR 024)', { timeout: FIXTURE_HANG_GUARD_MS + 15_000 }, () => {
   it('beforeExit: flushes, and the process keeps its own exit code', async () => {
     const result = await runFixture({ mode: 'exit', env: { FIXTURE_EXIT_CODE: '3' } });
     expect(result.stderr).toContain(FLUSH_MARKER);
@@ -118,26 +128,25 @@ describe('flushOnExit in a real process (ADR 024)', { timeout: 20_000 }, () => {
           signal: 'SIGTERM',
         });
         expect(result.signal).toBe('SIGTERM');
-        // Without the cap, shutdown waits out the OTLP exporter's own 10 s
-        // timeout. Half of that is still an unambiguous proof the cap
-        // applied, and leaves ~4 s of slack over the 1 s cap for process
-        // spawn/exit latency on a loaded CI runner (this test failed once
-        // at cap + 1.5 s under a full parallel suite).
-        expect(result.msFromSignal).toBeLessThan(UNCAPPED_EXPORT_TIMEOUT_MS / 2);
+        // Without the cap, shutdown waits out the OTLP exporter's own 10 s timeout (measured from the signal), so
+        // the uncapped process can only exit at >= 10 s. Anything under 8 s proves the 1 s cap applied; scheduler
+        // delay on a loaded machine can only push the capped exit later, and it has 7 s of slack before the bound.
+        // The clock is process.hrtime (monotonic), not Date.now.
+        expect(result.msFromSignal).toBeLessThan(UNCAPPED_EXPORT_TIMEOUT_MS * 0.8);
       } finally {
         for (const socket of sockets) socket.destroy();
         await new Promise((resolve) => blackhole.close(resolve));
       }
     },
-    20_000,
+    FIXTURE_HANG_GUARD_MS + 15_000,
   );
 
   it('explicit shutdown() twice, then exit: no double shutdown, no errors', async () => {
     const result = await runFixture({ mode: 'exit', env: { FIXTURE_EXPLICIT_SHUTDOWN: '1' } });
-    expect(result.stderr).toContain('EXPLICIT SHUTDOWN DONE');
+    expect(result.fullStderr).toContain('EXPLICIT SHUTDOWN DONE');
     // Flushed exactly once: the metric line appears once.
-    expect(result.stderr.split(FLUSH_MARKER).length - 1).toBe(1);
-    expect(result.stderr).not.toMatch(/shutdown may only be called once|already shutdown/i);
+    expect(result.fullStderr.split(FLUSH_MARKER).length - 1).toBe(1);
+    expect(result.fullStderr).not.toMatch(/shutdown may only be called once|already shutdown/i);
     expect(result.code).toBe(0);
   });
 });

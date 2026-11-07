@@ -44,4 +44,8 @@ if (mode === 'keepalive' || mode === 'host-handler') {
   setInterval(() => {}, 1000);
 }
 
+// READY goes to both streams. The parent only counts stderr written after READY: dev metrics also print every 5 s
+// from the periodic reader, so a slow (loaded) startup could otherwise put the marker on stderr before the
+// shutdown-time flush under test ever ran.
+process.stderr.write('READY\n');
 process.stdout.write('READY\n');

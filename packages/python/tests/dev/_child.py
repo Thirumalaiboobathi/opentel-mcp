@@ -1,7 +1,7 @@
 """Child process for the dev-mode tests: a tiny instrumented server driven through the SDK's in-memory transport.
 
 Environment: TOOL (default "silent"), EXPORTER_URL, READY_FILE + WAIT=1 (touch READY_FILE, then sleep until signalled),
-LIST_TOOLS=1 (also call tools/list), FORCE_FLUSH=1 (call opentel_mcp.force_flush() before returning).
+FLUSH_TIMEOUT_MS (flush_on_exit cap; default is the library's), LIST_TOOLS=1 (also call tools/list), FORCE_FLUSH=1 (call opentel_mcp.force_flush() before returning).
 """
 
 from __future__ import annotations
@@ -26,6 +26,9 @@ async def main() -> None:
             setup_sdk=True,
             service_name="dev-mode-test",
             exporter_url=url,
+            flush_on_exit={"timeout_ms": int(os.environ["FLUSH_TIMEOUT_MS"])}
+            if os.environ.get("FLUSH_TIMEOUT_MS")
+            else None,
             sdk_tracing=os.environ.get("SDK_TRACING", "replace"),  # type: ignore[arg-type]
         ),
         remove_sdk_middleware=os.environ.get("REMOVE_SDK_MIDDLEWARE") == "1",
