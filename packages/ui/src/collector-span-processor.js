@@ -13,7 +13,9 @@
  * unaware this processor exists and does not change what it emits by one
  * byte.
  *
- * Filters to `tools/call`-shaped spans only (see `TOOLS_CALL_METHOD` in
+ * Filters to `tools/call`-shaped spans (plus the opt-in resources/* and
+ * prompts/* operation spans, which only the Resources & prompts panel reads;
+ * see `span-method.js`) (see `TOOLS_CALL_METHOD` in
  * opentel-mcp core's `instrument.js`) -- `tools/list` spans (schema drift,
  * ADR 010) aren't part of this contract and would otherwise pollute the
  * buffer with entries `SerializedSpan`'s `toolName` field can't
@@ -21,7 +23,8 @@
  */
 
 import { SpanBuffer } from './span-buffer.js';
-import { serializeSpan } from './serialize-span.js';
+import { serializeSpan, toOperationSpan } from './serialize-span.js';
+import { isOperationSpanName } from './span-method.js';
 import { isSecurityListSpan } from './security-events.js';
 
 /** @typedef {import('@opentelemetry/sdk-trace').SpanProcessor} SpanProcessor */
@@ -81,7 +84,11 @@ export class CollectorSpanProcessor {
     if (span.name === 'tools/list') {
       const serialized = serializeSpan(span);
       if (isSecurityListSpan(serialized.name, serialized.events)) this.ingestSerializedSpan(serialized);
+      return;
     }
+    // Opt-in resources/* and prompts/* spans (core `coverage`): admitted for the Resources & prompts panel only;
+    // every tool-call-shaped surface filters them back out (span-method.js).
+    if (isOperationSpanName(span.name)) this.ingestSerializedSpan(toOperationSpan(serializeSpan(span)));
   }
 
   /**

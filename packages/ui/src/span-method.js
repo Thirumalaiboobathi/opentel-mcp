@@ -37,3 +37,38 @@ export function spanMethod(span) {
 export function isToolCallSpan(span) {
   return spanMethod(span) === TOOLS_CALL_METHOD;
 }
+
+/**
+ * The resource/prompt methods opentel-mcp core can trace (opt-in `coverage`,
+ * core 0.16.0+). Admitted to the buffer so the Resources & prompts panel
+ * works against a live server, but never counted as tool calls.
+ * web/data/operations.ts lists the same five methods.
+ */
+export const OPERATION_METHODS = Object.freeze([
+  'resources/read',
+  'resources/list',
+  'resources/templates/list',
+  'prompts/get',
+  'prompts/list',
+]);
+
+/**
+ * The only attributes kept on a resource/prompt span. Everything the panel
+ * needs (method, prompt name) and nothing else: core never sends URIs or
+ * prompt arguments, and this stops the dashboard storing them if some other
+ * sender does.
+ */
+export const OPERATION_ATTRIBUTE_KEYS = Object.freeze(['mcp.method.name', 'gen_ai.prompt.name']);
+
+/**
+ * Ingestion-time check on a raw span name (before any attribute decoding):
+ * `<method>` or `<method> <target>` for one of {@link OPERATION_METHODS}
+ * (core names prompts/get spans `prompts/get <promptName>`).
+ *
+ * @param {unknown} name
+ * @returns {boolean}
+ */
+export function isOperationSpanName(name) {
+  if (typeof name !== 'string') return false;
+  return OPERATION_METHODS.some((method) => name === method || name.startsWith(`${method} `));
+}

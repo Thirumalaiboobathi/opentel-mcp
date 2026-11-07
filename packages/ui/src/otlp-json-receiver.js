@@ -28,7 +28,8 @@
  * fighting a library that solves a different half of the problem.
  */
 
-import { STATUS_CODE_NAMES, spanFieldsFromAttributes } from './serialize-span.js';
+import { STATUS_CODE_NAMES, spanFieldsFromAttributes, toOperationSpan } from './serialize-span.js';
+import { isOperationSpanName } from './span-method.js';
 import { sanitizeSpanEvents, isSecurityListSpan, MAX_EVENTS_PER_SPAN } from './security-events.js';
 
 /**
@@ -111,13 +112,14 @@ export function parseOtlpJsonTraceRequest(body) {
         const isToolCall = span.name.startsWith('tools/call');
         // ADR 033: tools/list spans are admitted only if they carry a whitelisted security event.
         const events = isToolCall || span.name === 'tools/list' ? decodeSecurityEvents(span.events) : [];
-        if (!isToolCall && !isSecurityListSpan(span.name, events)) continue;
+        const isOperation = !isToolCall && isOperationSpanName(span.name);
+        if (!isToolCall && !isOperation && !isSecurityListSpan(span.name, events)) continue;
 
         const attributes = decodeAttributes(span.attributes);
         const startTimeMs = unixNanoToMs(span.startTimeUnixNano ?? '0');
         const endTimeMs = unixNanoToMs(span.endTimeUnixNano ?? span.startTimeUnixNano ?? '0');
 
-        spans.push({
+        const decoded = {
           id: span.spanId,
           traceId: span.traceId,
           name: span.name,
@@ -126,7 +128,9 @@ export function parseOtlpJsonTraceRequest(body) {
           status: STATUS_CODE_NAMES[span.status?.code ?? 0] ?? 'UNSET',
           ...spanFieldsFromAttributes(attributes),
           ...(events.length > 0 ? { events } : {}),
-        });
+        };
+        // Resource/prompt spans keep only the allowlisted fields (see toOperationSpan).
+        spans.push(isOperation ? toOperationSpan(decoded) : decoded);
       }
     }
   }
