@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ._contract import MAX_DETECTED_MATCHES
 from ._jsre import compile_js, from_u16, js_replacement_to_python, to_u16
 
 SECRET_PLACEHOLDER = "<SECRET>"
@@ -33,6 +34,18 @@ SECRET_STEP_SOURCES: tuple[tuple[str, str, str], ...] = (
     (rf"\b({_SECRET_KEY_NAMES})(\s*:\s*)(?=[^\s,;]*\d)[^\s,;]{{4,}}", "gi", f"$1$2{SECRET_PLACEHOLDER}"),
 )
 
+#: The detector type of each step above, in order (``conformance/patterns.json`` -> ``secretSteps[].type``, ADR 030).
+SECRET_STEP_TYPES: tuple[str, ...] = (
+    "url_credentials",
+    "jwt",
+    "http_auth_credential",
+    "aws_access_key_id",
+    "provider_api_key",
+    "secret_assignment",
+    "secret_assignment",
+    "secret_assignment",
+)
+
 SECRET_STEPS = tuple(
     (compile_js(src, flags), js_replacement_to_python(rep)) for src, flags, rep in SECRET_STEP_SOURCES
 )
@@ -48,3 +61,26 @@ def scrub_secrets_u16(text: str) -> str:
 def scrub_secrets(text: str) -> str:
     """Replace recognizable credentials with ``<SECRET>``; everything else is left exactly as it was."""
     return from_u16(scrub_secrets_u16(to_u16(text)))
+
+
+def detect_secret_types_u16(text: str) -> tuple[set[str], int]:
+    """Which secret types occur in ``text`` (already in the UTF-16 representation) and how many matches (ADR 030).
+
+    Port of ``detectSecretTypes``: the same patterns as :func:`scrub_secrets`, counted per step (overlapping steps can
+    count the same text twice: a magnitude, not a distinct-secret count), capped at ``MAX_DETECTED_MATCHES``. The
+    matched substring, its position and its context are never kept: only a type name leaves this function.
+    """
+    types: set[str] = set()
+    count = 0
+    for (pattern, _replacement), kind in zip(SECRET_STEPS, SECRET_STEP_TYPES, strict=True):
+        for _match in pattern.finditer(text):
+            types.add(kind)
+            count += 1
+            if count >= MAX_DETECTED_MATCHES:
+                return types, count
+    return types, count
+
+
+def detect_secret_types(text: str) -> tuple[set[str], int]:
+    """:func:`detect_secret_types_u16` on an ordinary Python string."""
+    return detect_secret_types_u16(to_u16(text))

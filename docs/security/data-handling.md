@@ -1,7 +1,7 @@
 # Data handling
 
 What each package records, where it goes, and how to record less. Everything here was checked against the code on
-2026-11-07 (core 0.18.0, ui 0.4.0, python 0.1.0); file paths are given so you can re-check.
+2026-11-07 (core 0.18.1, ui 0.4.1, python 0.2.0); file paths are given so you can re-check.
 
 ## Summary
 
@@ -47,7 +47,7 @@ What the v0.18.0 features additionally **never** record, whatever you configure:
 All of these are derived signals: booleans, counts, enums, hashes. None adds a metric label key (the three new
 counters use `gen_ai.tool.name`, already on the allowlist).
 
-## `opentel-mcp` (PyPI, `packages/python`, v0.1.0)
+## `opentel-mcp` (PyPI, `packages/python`, v0.2.0)
 
 Records: span (or enrichment of the SDK's `tools/call` span on `mcp` 2.x) with the same names as above
 (`mcp.method.name`, `gen_ai.tool.name`, `jsonrpc.request.id`, `error.type`, `mcp.tool.argument_count`,
@@ -57,8 +57,22 @@ Records: span (or enrichment of the SDK's `tools/call` span on `mcp` 2.x) with t
 core ([`_recording.py`](../../packages/python/src/opentel_mcp/_recording.py),
 [`_secrets.py`](../../packages/python/src/opentel_mcp/_secrets.py)). Never recorded: argument values, result content
 (canary test: [`test_privacy_and_safety.py`](../../packages/python/tests/instrumentation/test_privacy_and_safety.py)).
-Features of the npm package such as staleness, thrash, cost and schema-drift detection: not verified for Python in this
-review; see [ADR 028](../adr/028-python-port.md) for the port's scope.
+Since 0.2.0 it also has the v0.18 security signals, with the same names, caps and "never recorded" guarantees as the
+section above (options in `snake_case`): `tool_integrity` ([`_integrity.py`](../../packages/python/src/opentel_mcp/_integrity.py)),
+`secret_leak_detection` ([`_leak.py`](../../packages/python/src/opentel_mcp/_leak.py)), `sensitive_tools`
+([`_sensitive.py`](../../packages/python/src/opentel_mcp/_sensitive.py)) and the always-on auth failure counter. Their
+canary tests assert that no argument, result text, matched secret, description or schema text reaches a span, event,
+metric or log ([`test_secret_leak.py`](../../packages/python/tests/instrumentation/test_secret_leak.py),
+[`test_tool_integrity.py`](../../packages/python/tests/instrumentation/test_tool_integrity.py),
+[`test_sensitive_tools.py`](../../packages/python/tests/instrumentation/test_sensitive_tools.py),
+[`test_auth_failures.py`](../../packages/python/tests/instrumentation/test_auth_failures.py)). The secret-leak budget
+`max_scan_bytes` is counted in UTF-16 code units, like JS, so both languages truncate the same result at the same
+place. In dev mode the integrity `pins` snippet (tool names and hashes) is printed once to stderr, never stdout.
+
+Not implemented in the Python package at all (deferred, [ADR 028](../adr/028-python-port.md)): staleness and clock
+skew, thrash detection, schema drift, cost attribution, unactionable-error detection and resources/prompts coverage.
+They record nothing there: a source search of `packages/python/src` on 2026-11-07 finds no staleness, thrash,
+schema-drift, cost or unactionable-error code.
 
 ## `opentel-mcp-ui` (dashboard)
 

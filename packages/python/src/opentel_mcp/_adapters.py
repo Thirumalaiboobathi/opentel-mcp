@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from ._config import Options
+from ._listing import ListInfo, ToolsListRecorder
 from ._recorder import CAUSE, CallInfo, CauseHolder, ToolCallRecorder
 
 logger = logging.getLogger("opentel_mcp")
@@ -62,19 +63,19 @@ def _argument_count(arguments: Any) -> int:
 
 
 class _HandlerDict(dict):  # type: ignore[type-arg]
-    """``Server.request_handlers`` that wraps a ``CallToolRequest`` handler whenever one is inserted."""
+    """``Server.request_handlers`` that wraps the handlers named in ``wrappers`` whenever one is inserted."""
 
-    def __init__(self, source: Mapping[Any, Any], key: Any, wrap: Callable[[Any], Any]) -> None:
+    def __init__(self, source: Mapping[Any, Any], wrappers: Mapping[Any, Callable[[Any], Any]]) -> None:
         super().__init__()
-        self._key = key
-        self._wrap = wrap
+        self._wrappers = dict(wrappers)
         for k, v in source.items():
             self[k] = v
 
     def _maybe_wrap(self, k: Any, v: Any) -> Any:
-        if k is self._key and callable(v) and not _is_wrapped(v):
+        wrap = self._wrappers.get(k)
+        if wrap is not None and callable(v) and not _is_wrapped(v):
             try:
-                return self._wrap(v)
+                return wrap(v)
             except Exception:
                 return v
         return v
@@ -92,7 +93,7 @@ class _HandlerDict(dict):  # type: ignore[type-arg]
         return self[k]
 
 
-def install_v1(lowlevel: Any, recorder: ToolCallRecorder) -> bool:
+def install_v1(lowlevel: Any, recorder: ToolCallRecorder, listing: ToolsListRecorder | None = None) -> bool:
     """Wrap the low-level 1.x server's ``CallToolRequest`` handler. Returns ``False`` if the SDK shape is unknown."""
     try:
         from mcp import types
@@ -110,8 +111,29 @@ def install_v1(lowlevel: Any, recorder: ToolCallRecorder) -> bool:
 
         return _mark(instrumented)  # type: ignore[no-any-return]
 
-    lowlevel.request_handlers = _HandlerDict(handlers, key, wrap)
+    wrappers: dict[Any, Callable[[Any], Any]] = {key: wrap}
+    list_key = getattr(types, "ListToolsRequest", None)
+    if listing is not None and list_key is not None:
+
+        def wrap_list(handler: Callable[[Any], Awaitable[Any]]) -> Callable[[Any], Awaitable[Any]]:
+            async def instrumented_list(req: Any) -> Any:
+                return await listing.run(lambda: handler(req), _list_info_v1(req, lowlevel))
+
+            return _mark(instrumented_list)  # type: ignore[no-any-return]
+
+        wrappers[list_key] = wrap_list
+
+    lowlevel.request_handlers = _HandlerDict(handlers, wrappers)
     return True
+
+
+def _list_info_v1(req: Any, lowlevel: Any) -> ListInfo:
+    info = ListInfo()
+    with contextlib.suppress(Exception):
+        info.cursor = getattr(getattr(req, "params", None), "cursor", None)
+    with contextlib.suppress(Exception):
+        info.request_id = lowlevel.request_context.request_id
+    return info
 
 
 def _call_info_v1(req: Any, lowlevel: Any) -> CallInfo:
@@ -317,3 +339,35 @@ def install_cause_capture(mcp_server: Any, recorder: ToolCallRecorder) -> bool:
             type(exc).__name__,
         )
         return False
+
+
+def install_v2_list_handler(lowlevel: Any, listing: ToolsListRecorder, recorder: ToolCallRecorder) -> bool:
+    """Re-register the ``tools/list`` entry with a wrapper that feeds the integrity tracker (ADR 029)."""
+    getter = getattr(lowlevel, "get_request_handler", None)
+    adder = getattr(lowlevel, "add_request_handler", None)
+    if not callable(getter) or not callable(adder):
+        return False
+    entry = getter("tools/list")
+    if entry is None:
+        recorder.warn_once(
+            "no-list-handler",
+            "opentel-mcp: tool_integrity is enabled but no tools/list handler is registered on this server yet, so "
+            "tool definitions are not observed. Register your tools/list handler (on_list_tools=...) before calling "
+            "instrument_mcp_server().",
+        )
+        return False
+    handler = entry.handler
+    if _is_wrapped(handler):
+        return True
+
+    async def instrumented_list(ctx: Any, params: Any) -> Any:
+        info = ListInfo()
+        with contextlib.suppress(Exception):
+            info.request_id = getattr(ctx, "request_id", None)
+            info.cursor = getattr(params, "cursor", None)
+            if info.cursor is None and isinstance(params, Mapping):
+                info.cursor = params.get("cursor")
+        return await listing.run(lambda: handler(ctx, params), info)
+
+    adder("tools/list", entry.params_type, _mark(instrumented_list))
+    return True

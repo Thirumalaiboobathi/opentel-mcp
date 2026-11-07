@@ -24,7 +24,7 @@ export const MAX_SENSITIVE_PATTERNS = 1000;
 /** Longer entries are skipped (with one warning). */
 export const MAX_SENSITIVE_PATTERN_LENGTH = 256;
 /** Tool names longer than this never match a wildcard pattern (bounds work on hostile names). */
-const MAX_MATCHED_NAME_LENGTH = 1024;
+export const MAX_MATCHED_NAME_LENGTH = 1024;
 
 /**
  * @typedef {object} SensitiveToolMatcher

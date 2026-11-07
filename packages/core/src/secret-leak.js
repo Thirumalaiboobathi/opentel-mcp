@@ -24,11 +24,11 @@ export const DEFAULT_MAX_SCAN_BYTES = 65_536;
  * only make each window quadratic, not the whole result: the URL-credential, JWT and provider-key patterns are
  * superlinear on adversarial text (measured: ~0.7-2 s on 64 KiB scanned in one piece).
  */
-const CHUNK_SIZE = 4096;
+export const CHUNK_SIZE = 4096;
 /** Each window extends this far into the next one, so a secret straddling a boundary is still seen. */
-const CHUNK_OVERLAP = 256;
+export const CHUNK_OVERLAP = 256;
 /** Content items looked at per result, however many the tool returned. */
-const MAX_CONTENT_ITEMS = 10_000;
+export const MAX_CONTENT_ITEMS = 10_000;
 
 /**
  * @typedef {object} SecretLeakConfig

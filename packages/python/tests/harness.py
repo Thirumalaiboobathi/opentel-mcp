@@ -15,7 +15,21 @@ MCP_VERSION = importlib.metadata.version("mcp")
 SILENT_TEXT = "invalid input: missing field 'email' 12345"
 RAISE_MESSAGE = "boom 42 token=abc123"
 CANARY = "CANARY-7f3a91c2-must-never-be-captured"
-TOOL_NAMES = ("ok", "silent", "raises", "echo", "span_name", "leak", "leak_err")
+AUTH_TEXT = "Access denied for this resource"
+AUTH_RAISE_MESSAGE = "401 Unauthorized"
+TOOL_NAMES = (
+    "ok",
+    "silent",
+    "raises",
+    "echo",
+    "span_name",
+    "leak",
+    "leak_err",
+    "auth_silent",
+    "auth_raises",
+    "emit",
+    "emit_err",
+)
 INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"secret": {"type": "string"}, "a": {"type": "integer"}},
@@ -84,6 +98,26 @@ def _build_v1(flavour: str, instrument: Any) -> tuple[Any, Any]:
 
             raise ToolError(f"invalid {CANARY}")
 
+        @server.tool()
+        def auth_silent() -> Any:
+            from mcp.server.fastmcp.exceptions import ToolError
+
+            raise ToolError(AUTH_TEXT)
+
+        @server.tool()
+        def emit(text: str = "") -> str:
+            return text
+
+        @server.tool()
+        def emit_err(text: str = "") -> Any:
+            from mcp.server.fastmcp.exceptions import ToolError
+
+            raise ToolError(text)
+
+        @server.tool()
+        def auth_raises() -> str:
+            raise RuntimeError(AUTH_RAISE_MESSAGE)
+
         instrument(server)
         return server, server._mcp_server
 
@@ -105,6 +139,19 @@ def _build_v1(flavour: str, instrument: Any) -> tuple[Any, Any]:
             )
         if name == "raises":
             raise RuntimeError(RAISE_MESSAGE)
+        if name == "auth_silent":
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=AUTH_TEXT)], isError=True
+            )
+        if name == "emit":
+            return [types.TextContent(type="text", text=str((arguments or {}).get("text", "")))]
+        if name == "emit_err":
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str((arguments or {}).get("text", "")))],
+                isError=True,
+            )
+        if name == "auth_raises":
+            raise RuntimeError(AUTH_RAISE_MESSAGE)
         if name == "leak_err":
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=f"invalid {CANARY}")], isError=True
@@ -169,6 +216,24 @@ def _build_v2(flavour: str, instrument: Any, *, remove_sdk_middleware: bool = Fa
                 content=[types.TextContent(type="text", text=f"invalid {CANARY}")], is_error=True
             )
 
+        @server.tool()
+        def auth_silent() -> Any:
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=AUTH_TEXT)], is_error=True
+            )
+
+        @server.tool()
+        def emit(text: str = "") -> str:
+            return text
+
+        @server.tool()
+        def emit_err(text: str = "") -> Any:
+            return types.CallToolResult(content=[types.TextContent(type="text", text=text)], is_error=True)
+
+        @server.tool()
+        def auth_raises() -> str:
+            raise RuntimeError(AUTH_RAISE_MESSAGE)
+
         lowlevel = server._lowlevel_server
         if remove_sdk_middleware:
             lowlevel.middleware[:] = [
@@ -192,6 +257,21 @@ def _build_v2(flavour: str, instrument: Any, *, remove_sdk_middleware: bool = Fa
             )
         if name == "raises":
             raise RuntimeError(RAISE_MESSAGE)
+        if name == "auth_silent":
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=AUTH_TEXT)], is_error=True
+            )
+        if name == "emit":
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str((params.arguments or {}).get("text", "")))]
+            )
+        if name == "emit_err":
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str((params.arguments or {}).get("text", "")))],
+                is_error=True,
+            )
+        if name == "auth_raises":
+            raise RuntimeError(AUTH_RAISE_MESSAGE)
         if name == "leak_err":
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=f"invalid {CANARY}")], is_error=True

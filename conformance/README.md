@@ -18,6 +18,12 @@ conformance/
     channel.json           result / {code, message} -> failure channel
     classify.json          stack-less thrown record (name/code/status/message) -> category, fingerprint, channel
     error-recording.json   (mode, error) -> exception event, status message, error.type
+    tool-hash.json         tool definition JSON text -> exact "sha256:<64 hex>" (or null), incl. UTF-16 key order, numbers
+    secret-types.json      text -> secret types and match count (detectSecretTypes)
+    secret-scan.json       tool result + maxScanBytes -> types, count, truncated (UTF-16 code-unit budget, windows)
+    auth.json              failed call -> does mcp.tool.auth_failures increment (category == "auth")
+    sensitive-tools.json   sensitiveTools patterns + tool names -> match / no match, compiled size
+    integrity-tracker.json sequences of tools/list observations + pins -> edge-triggered findings, violations
     thrown.py.json         Python only: synthetic frames -> stack signature, fingerprint (hand-written)
   gen_thrown_py.py         writes cases/thrown.py.json
 ```
@@ -38,6 +44,14 @@ escapes, which both `JSON.parse` and `json.loads` preserve.
 |---|---|
 | JS | `packages/core/test/conformance.test.js` runs every `js` case against core; `conformance.contract.test.js` asserts `contract.json` equals what core exports and registers |
 | Python | `packages/python/tests/conformance/` runs every `py` case; `tests/test_contract.py` mirrors `contract.json`; `test_regex_source_parity.py` compares the Python regex tables to `patterns.json` |
+
+## Contract version
+
+`contract.json` carries `contractVersion` (an integer, constant `CONTRACT_VERSION` in
+`packages/core/scripts/gen-conformance.mjs`). Both test suites assert it against their own constant. Bump it **by
+hand, only when the contract changes** (a name, label key, cap, option or fixture semantics). `coreVersion` is
+informational: a core patch release regenerates it but never obliges Python to change. Python's constant is
+`opentel_mcp._contract.CONTRACT_VERSION`; bump both in the same PR.
 
 ## Regenerating
 

@@ -32,7 +32,7 @@ If a goal is missed, a polite follow-up on the advisory is welcome.
 
 A confirmed issue is fixed in a patch release of the affected package(s) and announced with a published GitHub Security
 Advisory (with a CVE where applicable), crediting you unless you'd rather not be named. Release notes and the package
-`CHANGELOG.md` link to the advisory. Releases follow [`docs/security/releasing.md`](docs/security/releasing.md). Provenance and SBOMs apply only to releases published through the release workflow, starting with `opentel-mcp` 0.18.1 and `opentel-mcp-ui` 0.4.1; earlier versions (including 0.18.0 and 0.4.0) were published manually and are not signed or attested.
+`CHANGELOG.md` link to the advisory. Releases follow [`docs/security/releasing.md`](docs/security/releasing.md). Provenance and SBOMs apply only to releases published through the release workflow, starting with `opentel-mcp` 0.18.1, `opentel-mcp-ui` 0.4.1 and PyPI `opentel-mcp` 0.2.0; earlier versions (including 0.18.0, 0.4.0 and PyPI 0.1.0) were published manually and are not signed or attested.
 
 ## Supported versions
 
@@ -43,7 +43,7 @@ security fixes; older minors do not.** Upgrade to the latest minor to receive a 
 | --- | --- |
 | `opentel-mcp` (npm) | 0.18.x |
 | `opentel-mcp-ui` (npm) | 0.4.x |
-| `opentel-mcp` (PyPI) | 0.1.x |
+| `opentel-mcp` (PyPI) | 0.2.x |
 
 ## Scope
 

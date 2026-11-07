@@ -10,6 +10,8 @@ from opentelemetry import trace
 
 from . import _adapters as adapters
 from ._config import resolve_options
+from ._integrity import ToolIntegrityObserver
+from ._listing import ToolsListRecorder
 from ._metrics import MetricsRecorder
 from ._recorder import ToolCallRecorder
 from ._recording import ErrorRecordingConfig
@@ -51,6 +53,9 @@ def instrument_mcp_server(
     exporter_url: str | None = None,
     flush_on_exit: bool | dict[str, int] | None = None,
     sdk_tracing: Literal["replace", "enrich"] = "replace",
+    sensitive_tools: list[str] | None = None,
+    secret_leak_detection: dict[str, Any] | None = None,
+    tool_integrity: dict[str, Any] | None = None,
     **unknown: Any,
 ) -> ServerT:
     """Instrument an MCP server's ``tools/call`` handler with OpenTelemetry spans and metrics.
@@ -73,6 +78,23 @@ def instrument_mcp_server(
             the SDK then records thrown exceptions **raw** (no scrubbing, modes or caps), its ``error.type``
             is ``type(e).__qualname__`` or the JSON-RPC code, and it also spans bad-params and
             pre-initialize requests.
+        sensitive_tools: tool names to audit (ADR 032): exact names and ``*`` wildcards (any run of characters; no
+            other pattern syntax; case-sensitive). A matching call gets ``mcp.tool.sensitive = True`` and one
+            ``mcp.audit.sensitive_call`` span event (outcome, ``mcp.tool.duration_ms``, failure category). Never
+            arguments or results. Invalid entries warn once and are skipped. Default: nothing is audited.
+        secret_leak_detection: ``{"enabled": bool, "max_scan_bytes": int}`` (ADR 030; opt-in, default off). Scans the
+            ``text`` content items of successful and ``isError`` results for credential-shaped strings and records
+            only ``mcp.tool.secret_leak.detected`` / ``.types`` / ``.count`` / ``.scan_truncated`` on the span and
+            the ``mcp.tool.secret_leaks`` counter. ``max_scan_bytes`` (default 65536) is counted in UTF-16 code
+            units, exactly like the JS package, not bytes. The matched text is never recorded. A signal, not a
+            guarantee: pattern-based, and it never changes span status.
+        tool_integrity: ``{"enabled": bool, "pins": {tool_name: "sha256:<64 hex>"}}`` (ADR 029; opt-in, default off).
+            Hashes every tool definition (name, title, description, input/output schema, annotations) from each
+            ``tools/list`` response and emits edge-triggered ``mcp.tool.integrity.changed`` / ``.pin_mismatch`` /
+            ``.added`` / ``.removed`` events on the ``tools/list`` span plus the ``mcp.tool.integrity_violations``
+            counter. Hashes and tool names only, never description or schema text. Detection, not prevention. Get the
+            current hashes from ``server.get_tool_integrity_hashes()`` (dev mode with ``setup_sdk=True`` also prints a
+            ``pins`` snippet once to stderr), or hash one definition with :func:`compute_tool_definition_hash`.
 
     Never raises into the host, with one exception: ``setup_sdk=True`` without ``service_name`` raises
     ``ValueError`` here, at startup.
@@ -87,6 +109,9 @@ def instrument_mcp_server(
         exporter_url=exporter_url,
         flush_on_exit=flush_on_exit,
         sdk_tracing=sdk_tracing,
+        sensitive_tools=sensitive_tools,
+        secret_leak_detection=secret_leak_detection,
+        tool_integrity=tool_integrity,
         **unknown,
     )
     try:
@@ -129,14 +154,29 @@ def _instrument(server: Any, options: Any) -> None:
     metrics_recorder = MetricsRecorder() if options.enable_metrics else None
     recorder = ToolCallRecorder(options, tracer, metrics_recorder, "own")
 
+    listing: ToolsListRecorder | None = None
+    if not options.tool_integrity.enabled:
+        _attach_integrity_getter(high if high is not None else lowlevel, lowlevel, None)
+    else:
+        record_violation = (
+            metrics_recorder.record_integrity_violation if metrics_recorder is not None else None
+        )
+        observer = ToolIntegrityObserver(
+            options.tool_integrity, record_violation, print_pins=options.setup_sdk
+        )
+        listing = ToolsListRecorder(tracer, observer, options.error_recording, recorder.state)
+        _attach_integrity_getter(high if high is not None else lowlevel, lowlevel, observer)
+
     if kind == "v1":
-        installed = adapters.install_v1(lowlevel, recorder)
+        installed = adapters.install_v1(lowlevel, recorder, listing)
     else:
         installed = adapters.install_v2_handler(lowlevel, recorder)
         if installed:
             recorder.span_mode = adapters.decide_sdk_tracing(lowlevel, options, recorder)
             if high is not None:
                 adapters.install_cause_capture(high, recorder)
+            if listing is not None:
+                adapters.install_v2_list_handler(lowlevel, listing, recorder)
 
     if installed:
         adapters.mark_instrumented(server)
@@ -154,3 +194,13 @@ def _attach_shutdown(obj: Any, dev: Any) -> None:
             obj.shutdown = dev.shutdown
     except Exception:
         pass
+
+
+def _attach_integrity_getter(outer: Any, lowlevel: Any, observer: ToolIntegrityObserver | None) -> None:
+    """``server.get_tool_integrity_hashes()`` -> ``{tool name: "sha256:..."}`` from the last observation (``{}`` before any)."""
+    for obj in (outer, lowlevel):
+        try:
+            if not hasattr(obj, "get_tool_integrity_hashes"):
+                obj.get_tool_integrity_hashes = observer.tracker.get_hashes if observer is not None else dict
+        except Exception:
+            pass

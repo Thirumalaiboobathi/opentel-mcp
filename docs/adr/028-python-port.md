@@ -1,6 +1,6 @@
 # ADR 028: Python port (opentel-mcp for Python, v0.1.0)
 
-**Status:** Accepted (2026-10-25)
+**Status:** Accepted (2026-10-25). Amended for Python 0.2.0 (see the last section).
 
 ## Maintainer decisions (2026-10-25)
 
@@ -1069,3 +1069,53 @@ None. All were resolved on 2026-10-25 (Maintainer decisions, rounds 1 and
 2).
 
 > **Update (core 0.18.0):** the v0.18 security signals (ADRs 029 to 032) are JS-only and are recorded under `contract.json` → `jsOnly`; see [ADR 034](034-security-signals-conformance.md).
+
+## Amendment: Python 0.2.0 (security observability)
+
+0.2.0 ports the v0.18 security signals from core ([ADRs 029 to 032](029-tool-definition-integrity.md); the dashboard
+side is [ADR 033](033-dashboard-security-panel.md)) instead of the item the deferral table above put first
+(`validation_paths`). The table's version numbers were only an indication of order; they are superseded by the list
+below.
+
+### What 0.2.0 adds
+
+| Feature | Option / API | Notes |
+|---|---|---|
+| Tool definition integrity (ADR 029) | `tool_integrity={"enabled", "pins"}`, `compute_tool_definition_hash()`, `server.get_tool_integrity_hashes()`, dev-mode `pins` snippet on stderr | hashes are byte-identical with core (shared vectors) |
+| Secret leak detection (ADR 030) | `secret_leak_detection={"enabled", "max_scan_bytes"}` | budget in UTF-16 code units, like JS |
+| Auth failure counter (ADR 031) | always on | needs `fingerprinting=True`, as in JS |
+| Sensitive tool auditing (ADR 032) | `sensitive_tools=[...]` | exact names and `*` only, linear matching |
+| Shared conformance | contract version 2, six new fixture files (ADR 034 amendment) | `jsOnly` now lists clock skew only |
+
+Python option names are the JS names in `snake_case` (`sensitive_tools`, `secret_leak_detection`, `tool_integrity`;
+`max_scan_bytes`). Metrics, attributes, events and caps have the identical names and values; no metric label key was
+added.
+
+### Decisions and deviations
+
+1. **`tools/list` observation.** Integrity needs the `tools/list` response. mcp 2.x already spans `tools/list`
+   (the SDK's middleware span), so the handler is wrapped (re-registered, like `tools/call`) and the events go on
+   that span. mcp 1.x has no spans at all, and 2.x can have its middleware removed; in those cases opentel-mcp starts a
+   minimal `tools/list` SERVER span (method name, request id, status) to hold the events. Only when `tool_integrity`
+   is enabled: with it off nothing is wrapped, so the existing contract is unchanged.
+2. **Hashing a Python `Tool` model.** The hash is of the *wire form*: a model's `None` for `title`, `description`,
+   `output_schema` and `annotations` means "not provided" (omitted on the wire, `undefined` in JS) and is left out,
+   while a mapping's explicit `None` is kept as `null`, exactly as JS treats `undefined` vs `null`. Nested `None`
+   values inside a schema are kept.
+3. **JS quirks reproduced on purpose** (each pinned by a shared fixture): keys sort by UTF-16 code unit (an astral
+   key sorts before U+E000..U+FFFF), numbers format as ECMAScript does (`1` = `1.0`, `-0` = `0`, `1e+21`, integers
+   beyond 2^53 rounded to a double, non-finite -> `null`), strings escape as `JSON.stringify` does, an array is
+   "an object with none of the hashed fields" (hashes like `{}`), nesting deeper than 256 yields no hash.
+4. **Secret scan unit.** `max_scan_bytes` counts UTF-16 code units, not bytes or code points; windows of 4096 units
+   overlapping by 256, at most 10,000 content items and 1000 counted matches, all from the shared contract. Python's
+   `re` backtracks like JS's, so the windowing is what bounds pathological input; a test pins the timings.
+5. **Event order determinism.** The tracker keeps insertion-ordered containers where JS uses `Set`/`Map`, so
+   `removed` events come in listing order regardless of hash randomization.
+6. **Option errors.** Python accepts a `list` or `tuple` for `sensitive_tools` and a `dict` (any `Mapping`) for the two
+   dict options; everything else warns once without echoing the value, as in JS.
+
+### Still deferred (unchanged scope of "not in Python yet")
+
+Staleness detection and its 0.18 clock-skew amendment (the only `jsOnly` signal left), thrash detection, schema drift,
+cost attribution and pricing, resources and prompts coverage, unactionable-error detection, and
+`mcp.failure.validation_paths`. Python 0.2.0 records none of them.

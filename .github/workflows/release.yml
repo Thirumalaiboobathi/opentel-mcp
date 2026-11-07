@@ -332,9 +332,15 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
-      - name: Install dependencies (uv.lock)
+      # The mcp SDK is deliberately not in uv.lock (the library does not choose the host's SDK), so, like the python CI
+      # job, install the SDK under test explicitly; without it the suite cannot even be collected. The CI matrix covers
+      # the other SDK line and Python versions; this job runs the newest 2.x on the build interpreter.
+      - name: Install dependencies (uv.lock) and the mcp SDK under test
         if: steps.meta.outputs.publish == 'true'
-        run: uv sync --locked --group test
+        run: |
+          uv sync --locked --group test
+          uv pip install --python .venv "mcp>=2,<3"
+          uv run --no-sync python -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
 
       # Full Python suite, matching the python CI job (the e2e test skips itself without the Node dashboard build).
       - name: Lint, type check, test

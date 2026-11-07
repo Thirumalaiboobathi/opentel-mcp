@@ -60,7 +60,7 @@ async def test_success_path(variant: tuple[str, str, bool], telemetry: Telemetry
     if span.instrumentation_scope.name == "opentel-mcp":  # ours (not the SDK's span, which "enrich" keeps)
         from opentel_mcp import __version__
 
-        assert span.instrumentation_scope.version == __version__ == "0.1.0"
+        assert span.instrumentation_scope.version == __version__
     assert a["mcp.method.name"] == "tools/call"
     assert a["gen_ai.operation.name"] == "execute_tool"
     assert a["gen_ai.tool.name"] == "ok"

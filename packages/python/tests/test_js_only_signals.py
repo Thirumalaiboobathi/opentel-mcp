@@ -1,4 +1,4 @@
-"""ADR 034: the v0.18 core signals are recorded in the contract as JS-only; the Python port must not claim them."""
+"""ADR 034 (amended): what stays JS-only after contract version 2 -- clock skew only. Python must not claim it."""
 
 from __future__ import annotations
 
@@ -17,24 +17,16 @@ def js_only() -> Any:
     return json.loads((ROOT / "conformance" / "contract.json").read_text(encoding="utf-8"))["jsOnly"]
 
 
-def _names(js_only: Any) -> list[str]:
-    return [
-        *js_only["spanAttributes"],
-        *(e["name"] for e in js_only["spanEvents"]),
-        *(m["name"] for m in js_only["metrics"]),
-    ]
-
-
-def test_contract_lists_the_js_only_signals(js_only: Any) -> None:
+def test_contract_lists_only_clock_skew_as_js_only(js_only: Any) -> None:
     assert js_only["since"] == "core 0.18.0"
-    assert "mcp.tool.integrity.pin_mismatch" in _names(js_only)
-    assert "mcp.tool.secret_leaks" in _names(js_only)
-    assert "mcp.tool.auth_failures" in _names(js_only)
-    assert "mcp.tool.freshness.clock_skew_ms" in _names(js_only)
+    assert js_only["spanAttributes"] == ["mcp.tool.freshness.clock_skew_ms"]
+    assert js_only["options"] == ["staleness.clockSkewToleranceMs"]
+    assert set(js_only) == {"since", "spanAttributes", "options"}
 
 
 def test_python_does_not_emit_any_js_only_signal(js_only: Any) -> None:
-    """A future partial port must move the entry into the contract proper, not quietly start emitting it."""
+    """Staleness is not ported: a future partial port must move the entry into the contract, not quietly emit it."""
     source = "\n".join(p.read_text(encoding="utf-8") for p in SRC.rglob("*.py"))
-    leaked = [name for name in _names(js_only) if name in source]
+    leaked = [name for name in js_only["spanAttributes"] if name in source]
     assert leaked == []
+    assert "clockSkewToleranceMs" not in source and "clock_skew_tolerance" not in source

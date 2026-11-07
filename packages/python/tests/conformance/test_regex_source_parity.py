@@ -24,6 +24,10 @@ def test_secret_steps_match_core() -> None:
     patterns: Any = load_conformance("patterns.json")
     assert patterns["secretPlaceholder"] == _secrets.SECRET_PLACEHOLDER
     _steps(patterns["secretSteps"], _secrets.SECRET_STEP_SOURCES)
+    assert [s["type"] for s in patterns["secretSteps"]] == list(_secrets.SECRET_STEP_TYPES)
+    assert set(_secrets.SECRET_STEP_TYPES) == set(
+        load_conformance("contract.json")["security"]["secretTypes"]
+    )
 
 
 def test_normalize_steps_match_core() -> None:
