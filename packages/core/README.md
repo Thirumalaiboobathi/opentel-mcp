@@ -3109,6 +3109,13 @@ pragmatic choice rather than a spec-pure one.
   and client-side instrumentation, so a single trace can span the client
   call and the server's tool execution
 
+## Security and privacy
+
+Designed to record only derived signals (counts, lengths, hashes), never tool arguments or result content, and to send
+nothing to the maintainer. Thrown-error text is credential-scrubbed by default and can be reduced further with `errorRecording` (`normalized`, `none`, or a `redactor`).
+See the [security documentation](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/docs/security/README.md) (threat model, data handling, release verification) and
+the [security policy](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/SECURITY.md) for how to report a vulnerability.
+
 ## Contributing
 
 See CONTRIBUTING.md and docs/adr/ for architecture decisions.

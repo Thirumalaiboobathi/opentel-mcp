@@ -93,23 +93,40 @@ updates:
       prefix: "chore(deps)"
       prefix-development: "chore(deps-dev)"
 
+  # --- Python (packages/python: pyproject.toml + uv.lock, managed with uv) ---
+  #
+  # The `uv` ecosystem updates uv.lock together with pyproject.toml. Minor/patch bumps are grouped into one weekly PR;
+  # majors open individually so they get read. `mcp` is deliberately not a dependency of the package (see
+  # pyproject.toml), so it is not touched here.
+  - package-ecosystem: "uv"
+    directory: "/packages/python"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+
   # --- GitHub Actions ---
   #
-  # Keeps the two pinned action versions (actions/checkout,
-  # actions/setup-node — see .github/workflows/ci.yml and release.yml)
-  # current. `directory: "/"` here isn't a workspace-related decision
-  # (unlike the npm entry above) — for this ecosystem it's simply what
-  # Dependabot scans .github/workflows/*.yml relative to, regardless of
-  # repo layout.
+  # Keeps the SHA-pinned actions in .github/workflows/*.yml current. Dependabot updates both the full commit SHA and
+  # the trailing "# vX.Y.Z" comment. `directory: "/"` is simply what this ecosystem scans (.github/workflows/).
+  # All action bumps are grouped into one weekly PR; review the diff of each action before merging.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
-    # Only two distinct actions are pinned today; the default of 5 is
-    # already more than this ecosystem will ever need here, kept
-    # explicit rather than implicit for the same reason the npm entry
-    # above states its number rather than relying on the default.
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     commit-message:
       prefix: "chore(ci)"

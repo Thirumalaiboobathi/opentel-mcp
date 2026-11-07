@@ -179,6 +179,13 @@ topology and want a confident answer instead.
   served with a strict Content-Security-Policy that allows only its own
   inline script and stylesheet, by hash.
 
+## Security and privacy
+
+Designed to record only derived signals (counts, lengths, hashes), never tool arguments or result content, and to send
+nothing to the maintainer. The dashboard listens on `127.0.0.1` only and keeps spans in memory.
+See the [security documentation](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/docs/security/README.md) (threat model, data handling, release verification) and
+the [security policy](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/SECURITY.md) for how to report a vulnerability.
+
 ## Version compatibility
 
 `opentel-mcp-ui` has zero compile-time coupling to `opentel-mcp` core's

@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: CI only reads the repository. No job needs a token with write scope.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -15,10 +19,12 @@ jobs:
         node-version: [20, 22]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -43,10 +49,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Use Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -66,10 +74,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Use Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -110,7 +120,7 @@ jobs:
           npm pack --workspace=packages/core --pack-destination "$pack_dir"
           cd "$consumer_dir"
           npm init -y >/dev/null
-          npm install "$pack_dir"/opentel-mcp-*.tgz
+          npm install "$pack_dir"/opentel-mcp-*.tgz # zizmor: ignore[adhoc-packages] intentional: installs the packed tarball to audit what consumers get
           npm audit --omit=dev --audit-level=high
 
       - name: Audit packages/ui's actual published dependency tree
@@ -121,7 +131,7 @@ jobs:
           npm pack --workspace=packages/ui --pack-destination "$pack_dir"
           cd "$consumer_dir"
           npm init -y >/dev/null
-          npm install "$pack_dir"/opentel-mcp-ui-*.tgz
+          npm install "$pack_dir"/opentel-mcp-ui-*.tgz # zizmor: ignore[adhoc-packages] intentional: installs the packed tarball to audit what consumers get
           npm audit --omit=dev --audit-level=high
 
   # --- Python port (ADR 028, docs/adr/028-python-port.md) -----------------------------------------
@@ -155,10 +165,12 @@ jobs:
         working-directory: packages/python
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           python-version: ${{ matrix.python }}
 
@@ -166,7 +178,7 @@ jobs:
       # when the monorepo's node_modules are absent).
       - name: Use Node.js 22 (end-to-end test with the real dashboard)
         if: startsWith(matrix.os, 'ubuntu')
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -186,10 +198,12 @@ jobs:
       # "does not match the project environment" warning. The project's .venv is used either way.
       - name: Install dependencies (uv.lock) and the mcp SDK under test
         shell: bash
+        env:
+          MCP_SPEC: ${{ matrix.mcp }}
         run: |
           unset VIRTUAL_ENV
           uv sync --locked --group test
-          uv pip install --python .venv "${{ matrix.mcp }}"
+          uv pip install --python .venv "$MCP_SPEC"
           uv run --no-sync python -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
 
       - name: Lint
@@ -227,10 +241,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Use Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -246,7 +262,7 @@ jobs:
         working-directory: packages/core
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           python-version: "3.12"
 

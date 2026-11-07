@@ -1,0 +1,22 @@
+# Security FAQ for vendor questionnaires
+
+Short answers, each linked to evidence. Status as of 2026-11-07 (core 0.17.0, ui 0.3.0, python 0.1.0). These are the
+maintainer's statements of design and current practice, not contractual commitments or certifications. Items marked
+**to be confirmed** need the maintainer's confirmation before you rely on them.
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| Does it send data to the maintainer or any third party? | No. The packages contain no telemetry/phone-home. Spans and metrics go only to the OpenTelemetry exporters you configure (and, in optional dev mode, to a local dashboard URL). | [Threat #10](threat-model.md), [data-handling](data-handling.md) |
+| Does it collect PII? | It is designed not to read tool arguments or result content, and records only derived signals. Free text can enter telemetry only via thrown-error messages/stacks; credentials are scrubbed by pattern, other text (including personal data in an error message) is not, unless you use `normalized`, `none` or a `redactor`. | [Error recording modes](data-handling.md#error-recording-modes), [limits](data-handling.md#secret-scrubbing-coverage-and-limits) |
+| Does it store data? | The libraries don't persist anything themselves. The dashboard keeps up to 1000 spans in memory and writes nothing to disk. Your exporter/backend stores what you send. | [data-handling](data-handling.md#opentel-mcp-ui-dashboard) |
+| Encryption in transit? | Determined by your exporter configuration (for example an `https://` OTLP endpoint). The dashboard uses plain HTTP on loopback only. | [Out of scope](threat-model.md#out-of-scope) |
+| How are releases signed and verified? | From the first release made by [`release.yml`](../../.github/workflows/release.yml): npm provenance and PyPI PEP 740 attestations via trusted publishing, plus GitHub attestations. Earlier versions (npm 0.17.0 / ui 0.3.0 / PyPI 0.1.0) were published manually and have none. Applies once the maintainer has completed the one-time setup. | [releasing.md](releasing.md#verifying-a-release-for-consumers) |
+| Is there an SBOM? | Yes, from that same first workflow release: CycloneDX JSON per package, attached to the GitHub release and attested. | [releasing.md#sboms](releasing.md#sboms) |
+| How are vulnerabilities reported and handled? | Privately via GitHub private vulnerability reporting; goals for response times are in the policy. Fixes ship as patch releases with a GitHub Security Advisory. | [SECURITY.md](../../SECURITY.md) |
+| Which versions get security fixes? | The latest minor of each package (core 0.17.x, ui 0.3.x; PyPI 0.1.x). Pre-1.0. | [SECURITY.md](../../SECURITY.md#supported-versions) |
+| Dependencies and how are they monitored? | Core runtime: `@opentelemetry/exporter-trace-otlp-http`, `resources`, `sdk-metrics`, `sdk-trace-node`; ui: none (peer: `opentel-mcp`, `@opentelemetry/api`); Python: `opentelemetry-api`. Lockfiles committed; CI runs `npm audit` against the packed production trees; Dependabot weekly (npm, uv, Actions); CodeQL; OpenSSF Scorecard. | [package.json (core)](../../packages/core/package.json), [package.json (ui)](../../packages/ui/package.json), [pyproject.toml](../../packages/python/pyproject.toml), [dependabot.yml](../../.github/dependabot.yml), [ci.yml](../../.github/workflows/ci.yml) |
+| License? | MIT. | [LICENSE (core)](../../packages/core/LICENSE), [LICENSE (ui)](../../packages/ui/LICENSE), [LICENSE (python)](../../packages/python/LICENSE) |
+| Has there been an independent security audit or penetration test? | No. The model in this folder is maintainer-written. | [threat-model.md](threat-model.md) |
+| Is the code reviewed / are there automated security tests? | Canary tests, secret-scrubbing tests and dashboard security tests run in CI; code is analysed by CodeQL. It's a single-maintainer project. | [Threat table](threat-model.md#threats) |
+| Maintainer account security (2FA)? | **To be confirmed by the maintainer:** 2FA enabled on the GitHub, npm and PyPI accounts; release credentials replaced by trusted publishing; `release` environment with required reviewer. | [releasing.md setup](releasing.md#one-time-setup) |
+| Does it run code at install time? | Neither npm package declares install scripts (`install`/`postinstall`) in its `package.json` (checked); `prepack`/`postpack`/`prepublishOnly` run only on the maintainer's machine or CI when packing. | [core package.json](../../packages/core/package.json), [ui package.json](../../packages/ui/package.json) |
