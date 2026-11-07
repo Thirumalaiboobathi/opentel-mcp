@@ -94,6 +94,97 @@
       ]
     }
   ],
+  "jsOnly": {
+    "since": "core 0.18.0",
+    "spanAttributes": [
+      "mcp.tool.freshness.clock_skew_ms",
+      "mcp.tool.sensitive",
+      "mcp.tool.secret_leak.detected",
+      "mcp.tool.secret_leak.types",
+      "mcp.tool.secret_leak.count",
+      "mcp.tool.secret_leak.scan_truncated"
+    ],
+    "spanEvents": [
+      {
+        "name": "mcp.audit.sensitive_call",
+        "attributes": [
+          "gen_ai.tool.name",
+          "mcp.tool.outcome",
+          "mcp.tool.duration_ms",
+          "mcp.failure.category"
+        ]
+      },
+      {
+        "name": "mcp.tool.integrity.changed",
+        "attributes": [
+          "gen_ai.tool.name",
+          "mcp.tool.integrity.old_hash",
+          "mcp.tool.integrity.new_hash"
+        ]
+      },
+      {
+        "name": "mcp.tool.integrity.pin_mismatch",
+        "attributes": [
+          "gen_ai.tool.name",
+          "mcp.tool.integrity.expected_hash",
+          "mcp.tool.integrity.actual_hash",
+          "mcp.tool.integrity.severity"
+        ]
+      },
+      {
+        "name": "mcp.tool.integrity.added",
+        "attributes": [
+          "gen_ai.tool.name",
+          "mcp.tool.integrity.new_hash"
+        ]
+      },
+      {
+        "name": "mcp.tool.integrity.removed",
+        "attributes": [
+          "gen_ai.tool.name",
+          "mcp.tool.integrity.old_hash"
+        ]
+      }
+    ],
+    "metrics": [
+      {
+        "name": "mcp.tool.auth_failures",
+        "kind": "counter",
+        "unit": "",
+        "description": "Number of failed MCP tool calls (isError result or thrown) classified as authentication/authorization failures (ADR 031).",
+        "labelKeys": [
+          "gen_ai.tool.name"
+        ],
+        "optionalLabelKeys": []
+      },
+      {
+        "name": "mcp.tool.secret_leaks",
+        "kind": "counter",
+        "unit": "",
+        "description": "Number of MCP tool results whose text looked like it contained a credential (ADR 030). A signal, not an error; opt-in.",
+        "labelKeys": [
+          "gen_ai.tool.name"
+        ],
+        "optionalLabelKeys": []
+      },
+      {
+        "name": "mcp.tool.integrity_violations",
+        "kind": "counter",
+        "unit": "",
+        "description": "Number of tools whose definition changed since first seen or no longer matches a configured pin (ADR 029). Detection only.",
+        "labelKeys": [
+          "gen_ai.tool.name"
+        ],
+        "optionalLabelKeys": []
+      }
+    ],
+    "options": [
+      "sensitiveTools",
+      "secretLeakDetection",
+      "toolIntegrity",
+      "staleness.clockSkewToleranceMs"
+    ]
+  },
   "allowlists": {
     "metricSafeAttributes": [
       "gen_ai.tool.name",

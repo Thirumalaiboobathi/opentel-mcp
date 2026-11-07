@@ -63,3 +63,8 @@ both. Never edit an `expect` by hand: if core is wrong, fix core. Python-only st
 * Thrown-error fingerprints and stack signatures can never equal JS ones (a Python traceback is not a V8
   stack); they are covered by `thrown.py.json` instead.
 * `error-recording.json` cases whose JS error has no `name` are `js`-only (a Python exception always has one).
+* The core 0.18.0 security signals (clock skew, tool definition integrity, secret leak detection, auth failure
+  counter, sensitive tool auditing; ADRs 027 amendment, 029 to 032) are **JS-only**. They are listed under
+  `contract.json` → `jsOnly` (ADR 034), not in `metrics` or `span.attributes`, and
+  `packages/python/tests/test_js_only_signals.py` fails if the Python package starts emitting any of them without
+  moving the entry into the contract proper.

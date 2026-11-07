@@ -30,6 +30,9 @@ import { normalizeMessage, MAX_INPUT_LENGTH } from '../src/fingerprint/normalize
 import { computeFingerprint, MAX_ERROR_CLASS_LENGTH } from '../src/fingerprint/compose.js';
 import { classifyFailureChannel } from '../src/fingerprint/classify/channel.js';
 import { setupMeter } from '../src/metrics.js';
+import * as stalenessMod from '../src/staleness.js';
+import * as integrityAttrs from '../src/tool-integrity/attributes.js';
+import { createToolIntegrityEmitter } from '../src/tool-integrity/emitter.js';
 import { MAX_FULL_EXCEPTION_MESSAGE_LENGTH, MAX_FULL_EXCEPTION_STACK_LENGTH } from '../src/instrument.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -111,6 +114,8 @@ class TestMetricReader extends MetricReader {
 }
 
 const CORE_METRIC_NAMES = ['mcp.tool.calls', 'mcp.tool.errors', 'mcp.tool.silent_failures', 'mcp.tool.duration'];
+/** v0.18.0 counters the Python port does not implement (ADR 034): listed under `jsOnly`, not in `metrics`. */
+const JS_ONLY_METRIC_NAMES = ['mcp.tool.auth_failures', 'mcp.tool.secret_leaks', 'mcp.tool.integrity_violations'];
 
 export async function buildContract() {
   const reader = new TestMetricReader();
@@ -127,6 +132,10 @@ export async function buildContract() {
     rec.recordSilentFailure('t');
     rec.recordDuration('t', 1, 'silent_failure', 'internal');
     rec.recordDuration('t', 1, 'success');
+    // v0.18.0 JS-only counters (ADR 034): register them through the same code paths core uses.
+    rec.recordAuthFailure('t');
+    rec.recordSecretLeak('t');
+    createToolIntegrityEmitter('0.0.0', true).emit({ findings: [], violationTools: ['t'], firstSnapshot: null });
     const { resourceMetrics } = await reader.collect();
     found = resourceMetrics.scopeMetrics;
   } finally {
@@ -141,6 +150,15 @@ export async function buildContract() {
   const metricList = CORE_METRIC_NAMES.map((name) => {
     const m = all.find((x) => x.descriptor.name === name);
     if (!m) throw new Error('metric not registered: ' + name);
+    return metricSpec(name, m);
+  });
+  const jsOnlyMetrics = JS_ONLY_METRIC_NAMES.map((name) => {
+    const m = all.find((x) => x.descriptor.name === name);
+    if (!m) throw new Error('metric not registered: ' + name);
+    return metricSpec(name, m);
+  });
+
+  function metricSpec(name, m) {
     const keySets = m.dataPoints.map((dp) => Object.keys(dp.attributes).sort());
     const required = keySets.reduce((acc, ks) => acc.filter((k) => ks.includes(k)));
     const union = [...new Set(keySets.flat())].sort();
@@ -152,7 +170,7 @@ export async function buildContract() {
       labelKeys: required,
       optionalLabelKeys: union.filter((k) => !required.includes(k)),
     };
-  });
+  }
 
   return {
     schema: 1,
@@ -187,6 +205,45 @@ export async function buildContract() {
       deferredInPython: [fpAttrs.ATTRIBUTE_KEYS.VALIDATION_PATHS],
     },
     metrics: metricList,
+    /**
+     * Signals added in core 0.18.0 that the Python port does not implement (ADR 034). They are deliberately not
+     * in `metrics` / `span.attributes`, which the Python suite asserts equal to its own constants. A future port of
+     * one moves its entry into the contract proper in the same change.
+     */
+    jsOnly: {
+      since: 'core 0.18.0',
+      spanAttributes: [
+        stalenessMod.ATTR_MCP_TOOL_FRESHNESS_CLOCK_SKEW_MS,
+        attrs.ATTR_MCP_TOOL_SENSITIVE,
+        attrs.ATTR_MCP_TOOL_SECRET_LEAK_DETECTED,
+        attrs.ATTR_MCP_TOOL_SECRET_LEAK_TYPES,
+        attrs.ATTR_MCP_TOOL_SECRET_LEAK_COUNT,
+        attrs.ATTR_MCP_TOOL_SECRET_LEAK_SCAN_TRUNCATED,
+      ],
+      spanEvents: [
+        {
+          name: attrs.SPAN_EVENT_NAME_AUDIT_SENSITIVE_CALL,
+          attributes: [attrs.ATTR_GEN_AI_TOOL_NAME, attrs.ATTR_MCP_TOOL_OUTCOME, attrs.ATTR_MCP_TOOL_DURATION_MS, fpAttrs.ATTRIBUTE_KEYS.CATEGORY],
+        },
+        {
+          name: integrityAttrs.SPAN_EVENT_INTEGRITY_CHANGED,
+          attributes: [attrs.ATTR_GEN_AI_TOOL_NAME, integrityAttrs.ATTR_INTEGRITY_OLD_HASH, integrityAttrs.ATTR_INTEGRITY_NEW_HASH],
+        },
+        {
+          name: integrityAttrs.SPAN_EVENT_INTEGRITY_PIN_MISMATCH,
+          attributes: [
+            attrs.ATTR_GEN_AI_TOOL_NAME,
+            integrityAttrs.ATTR_INTEGRITY_EXPECTED_HASH,
+            integrityAttrs.ATTR_INTEGRITY_ACTUAL_HASH,
+            integrityAttrs.ATTR_INTEGRITY_SEVERITY,
+          ],
+        },
+        { name: integrityAttrs.SPAN_EVENT_INTEGRITY_ADDED, attributes: [attrs.ATTR_GEN_AI_TOOL_NAME, integrityAttrs.ATTR_INTEGRITY_NEW_HASH] },
+        { name: integrityAttrs.SPAN_EVENT_INTEGRITY_REMOVED, attributes: [attrs.ATTR_GEN_AI_TOOL_NAME, integrityAttrs.ATTR_INTEGRITY_OLD_HASH] },
+      ],
+      metrics: jsOnlyMetrics,
+      options: ['sensitiveTools', 'secretLeakDetection', 'toolIntegrity', 'staleness.clockSkewToleranceMs'],
+    },
     allowlists: {
       metricSafeAttributes: [...attrs.METRIC_SAFE_ATTRIBUTES],
       fingerprintMetricSafeAttributes: [...fpAttrs.METRIC_SAFE_ATTRIBUTES],
