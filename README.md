@@ -22,7 +22,9 @@ Runnable usage examples live under [`examples/`](examples/), and design docs
 
 The instrumentation is designed to record only derived signals, never tool arguments or result content, and sends
 nothing to the maintainer. Releases published by the [release workflow](.github/workflows/release.yml) carry npm
-provenance / PyPI attestations and a CycloneDX SBOM (check with `npm audit signatures`).
+provenance / PyPI attestations and a CycloneDX SBOM (check with `npm audit signatures`). That starts with
+`opentel-mcp` 0.18.1 and `opentel-mcp-ui` 0.4.1; earlier versions, including 0.18.0 and 0.4.0, were published manually
+and have no provenance.
 
 - [Security documentation](docs/security/README.md): [threat model](docs/security/threat-model.md),
   [data handling](docs/security/data-handling.md), [vendor FAQ](docs/security/security-faq.md),

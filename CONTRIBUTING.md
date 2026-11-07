@@ -73,17 +73,16 @@ Run these in order — each step assumes the previous one passed:
    changes. The two have independent version numbers and, per ADR 022,
    independent release cadences: a release touching only one does not
    require bumping the other.
-5. `git push --tags`
-6. `npm publish --workspace=packages/core` and/or
-   `npm publish --workspace=packages/ui` — publishing is manual, run from
-   your machine, for whichever package(s) step 4 bumped. Each package's
-   `prepublishOnly` re-runs its `verify:tarball` (and, for `packages/ui`,
-   its build), so a publish still fails closed on a broken tarball.
+5. Merge, then push the tag the release workflow listens for
+   (`core-vX.Y.Z` and/or `ui-vX.Y.Z`, matching the version in `package.json`)
+   and approve the `release` environment in Actions. The workflow rebuilds,
+   re-runs `verify:tarball`, and publishes with npm provenance and an SBOM
+   (`docs/security/releasing.md`). Do not also run `npm publish` by hand.
 
-There is no tag-triggered publish workflow: a manual `npm publish` can't
-carry [npm provenance](https://docs.npmjs.com/generating-provenance-statements)
-(npm only generates it inside a CI provider's OIDC context), which is the
-accepted trade-off for publishing by hand.
+Prefer the tag-triggered release workflow (`docs/security/releasing.md`): a manual
+`npm publish` can't carry [npm provenance](https://docs.npmjs.com/generating-provenance-statements)
+(npm only generates it inside a CI provider's OIDC context). `opentel-mcp` 0.18.0 and
+`opentel-mcp-ui` 0.4.0 were published by hand and have none.
 
 ## Releasing the Python package
 

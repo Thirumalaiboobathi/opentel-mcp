@@ -24,8 +24,11 @@ versions, since trusted-publishing requirements change over time.
   `attestations: true`.
 - **Tags:** `core-vX.Y.Z`, `ui-vX.Y.Z`, `python-vX.Y.Z`. The tag must be the prefix plus the version in
   `package.json` / `pyproject.toml` (for example `core-v` + `0.17.1`), otherwise the build fails. The old `v0.17.0` tag (npm `opentel-mcp` 0.17.0) and
-  `python-v0.1.0` remain as history; `v*` tags no longer trigger anything. (The 0.17.0 / 0.3.0 / 0.1.0 releases were
-  published manually and have **no provenance**.)
+  `python-v0.1.0` remain as history; `v*` tags no longer trigger anything.
+- **Which versions have provenance:** only releases published through this workflow, starting with `opentel-mcp`
+  0.18.1 and `opentel-mcp-ui` 0.4.1. `opentel-mcp` 0.17.0 and 0.18.0, `opentel-mcp-ui` 0.3.0 and 0.4.0, and PyPI
+  `opentel-mcp` 0.1.0 were published manually and are **not signed or attested**: they have no npm provenance, no
+  PEP 740 attestation, no GitHub attestation and no attached SBOM.
 
 ## One-time setup
 
@@ -113,8 +116,9 @@ npm audit signatures           # verifies registry signatures and provenance att
 ```
 
 The npm package page shows a "Provenance" section linking to the exact workflow run and commit for versions published
-by this workflow. Versions published before this workflow existed (≤ `opentel-mcp` 0.17.0, `opentel-mcp-ui` 0.3.0) have
-no provenance.
+by this workflow. Versions published before this workflow existed (≤ `opentel-mcp` 0.18.0, ≤ `opentel-mcp-ui` 0.4.0) have no
+provenance, so `npm audit signatures` reports registry signatures but no attestations for them; that is expected.
+The first versions with provenance are `opentel-mcp` 0.18.1 and `opentel-mcp-ui` 0.4.1.
 
 **PyPI attestations (PEP 740)** — per <https://docs.pypi.org/attestations/consuming-attestations/>:
 
@@ -150,7 +154,10 @@ because the library declares ranges (`opentelemetry-api>=1.28`).
 
 ## Emergency manual publish (fallback)
 
-Use only if the workflow is unavailable and a fix must ship.
+Use only if the workflow is unavailable and a fix must ship. A manual `npm publish` **produces no provenance** (npm
+only generates it inside a CI provider's OIDC context); it is how `opentel-mcp` 0.18.0 and `opentel-mcp-ui` 0.4.0
+shipped. Follow every manual publish with a workflow release (a new patch version tagged `core-v…` / `ui-v…`) so the
+latest version is attested again.
 
 ```sh
 git switch --detach <tag-or-commit>
