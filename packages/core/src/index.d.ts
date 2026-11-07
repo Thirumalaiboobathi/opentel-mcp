@@ -146,6 +146,18 @@ export interface InstrumentOptions {
   };
 
   /**
+   * ADR 032 (0.18.0), opt-in: tool names to audit. Exact names, plus `*` wildcards that match any run of
+   * characters (`"delete_*"`). A matching call gets the span attribute `mcp.tool.sensitive = true` and one span
+   * event `mcp.audit.sensitive_call` with `mcp.tool.outcome` (`success` | `silent_failure` | `error`),
+   * `mcp.tool.duration_ms` and, on failure, `mcp.failure.category`. Arguments and results are never recorded.
+   * Matching is case-sensitive on the tool name. Entries that are not non-empty strings of at most 256
+   * characters are skipped with one `diag.warn`. This is telemetry, not a tamper-evident audit log: sampled-out or
+   * undelivered spans are lost.
+   * @default []
+   */
+  sensitiveTools?: string[];
+
+  /**
    * ADR 027 (docs/adr/027-staleness-detection.md): staleness detection. A
    * tool reports how fresh its data is in
    * `result._meta[FRESHNESS_META_KEY]` (see {@link FreshnessMeta}), and every

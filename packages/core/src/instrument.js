@@ -35,6 +35,7 @@ import { InstanceRegistry } from './registry/instance-registry.js';
 import { registerFlushOnExit } from './flush-on-exit.js';
 import { applyUnactionableAttributes } from './unactionable.js';
 import { applyStaleness, createStalenessState } from './staleness.js';
+import { markSensitive, recordSensitiveAudit } from './sensitive-tools.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_PROMPT_NAME,
@@ -590,6 +591,9 @@ export function instrumentMcpServer(input, options) {
   const schemaDriftEmitter =
     resolved.schemaDrift.enabled && resolved.enableMetrics ? createSchemaDriftEmitter(PACKAGE_VERSION) : null;
 
+  // v0.18.0 (ADRs 030, 032): resolved once; all off unless configured.
+  const securityOptions = { sensitive: resolved.sensitiveTools };
+
   const originalSetRequestHandler = server.setRequestHandler.bind(server);
   // ADR 015 Phase 2: the two SDKs dispatch spec methods differently (ADR
   // 015 Finding 1) — v1's setRequestHandler takes a schema OBJECT as its
@@ -626,6 +630,7 @@ export function instrumentMcpServer(input, options) {
           resolved.unactionableErrors,
           resolved.staleness,
           stalenessState,
+          securityOptions,
         );
       } else if (schema === v1.ListToolsRequestSchema && schemaDriftDetector) {
         handler = wrapToolsListHandler(
@@ -688,6 +693,7 @@ export function instrumentMcpServer(input, options) {
           resolved.unactionableErrors,
           resolved.staleness,
           stalenessState,
+          securityOptions,
         );
       } else if (maybeHandler === undefined && method === TOOLS_LIST_METHOD && schemaDriftDetector) {
         handlerOrSchemas = wrapToolsListHandler(
@@ -1996,6 +2002,8 @@ function recordThrownException(span, err, errorRecordingConfig, errorRecordingSt
  *   to recordThrownException()/applyRedactor() — see redactor.js's own docblock for what "once" means here.
  * @param {import('./staleness.js').StalenessConfig} stalenessConfig - ADR 027: resolved `staleness` option.
  * @param {{ warnedTools: Set<string> }} stalenessState - ADR 027: once-per-tool malformed-freshness warnings.
+ * @param {{ sensitive: import('./sensitive-tools.js').SensitiveToolMatcher | null }} securityOptions - v0.18.0
+ *   security observability (ADRs 030, 032): resolved, opt-in features; every member is null/off by default.
  */
 function wrapToolCallHandler(
   handler,
@@ -2018,6 +2026,7 @@ function wrapToolCallHandler(
   unactionableErrorsConfig,
   stalenessConfig,
   stalenessState,
+  securityOptions,
 ) {
   return (request, extra) => {
     const toolName = request?.params?.name;
@@ -2064,6 +2073,8 @@ function wrapToolCallHandler(
       span.setAttribute(ATTR_GEN_AI_OPERATION_NAME, GEN_AI_OPERATION_NAME_EXECUTE_TOOL);
       span.setAttribute(ATTR_GEN_AI_TOOL_NAME, toolName);
       span.setAttribute(ATTR_MCP_TOOL_ARGUMENT_COUNT, argumentCount);
+      const isSensitive = securityOptions.sensitive !== null && securityOptions.sensitive.matches(toolName);
+      if (isSensitive) markSensitive(span);
       if (requestId !== undefined && requestId !== null) {
         span.setAttribute(ATTR_JSONRPC_REQUEST_ID, String(requestId));
       }
@@ -2151,6 +2162,9 @@ function wrapToolCallHandler(
             MCP_TOOL_OUTCOME_SILENT_FAILURE,
             failureCategory,
           );
+          if (isSensitive) {
+            recordSensitiveAudit(span, toolName, MCP_TOOL_OUTCOME_SILENT_FAILURE, performance.now() - startTime, failureCategory);
+          }
         } else {
           span.setStatus({ code: SpanStatusCode.OK });
           // ADR 027: freshness verdict from the tool's own _meta. Success
@@ -2161,6 +2175,7 @@ function wrapToolCallHandler(
             applyThrashSuccessClear(thrashConfig, thrashDetector, thrashSessionId, toolName);
           }
           metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_SUCCESS);
+          if (isSensitive) recordSensitiveAudit(span, toolName, MCP_TOOL_OUTCOME_SUCCESS, performance.now() - startTime);
         }
         return result;
       } catch (err) {
@@ -2224,6 +2239,7 @@ function wrapToolCallHandler(
         metricsRecorder?.recordError(toolName, errorType, failureCategory);
         if (failureCategory === AUTH_FAILURE_CATEGORY) metricsRecorder?.recordAuthFailure(toolName);
         metricsRecorder?.recordDuration(toolName, performance.now() - startTime, MCP_TOOL_OUTCOME_ERROR, failureCategory);
+        if (isSensitive) recordSensitiveAudit(span, toolName, MCP_TOOL_OUTCOME_ERROR, performance.now() - startTime, failureCategory);
         throw err;
       } finally {
         span.end();

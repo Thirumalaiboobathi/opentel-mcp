@@ -307,5 +307,12 @@ export const METRIC_SAFE_ATTRIBUTES = Object.freeze([
   ATTR_MCP_TOOL_MODEL,
 ]);
 
+/** ADR 032 (v0.18.0): boolean span attribute, `true` on a call to a tool listed in `sensitiveTools`. Span-only. */
+export const ATTR_MCP_TOOL_SENSITIVE = 'mcp.tool.sensitive';
+/** ADR 032: span event added when a sensitive tool call ends. Carries outcome and duration, never arguments. */
+export const SPAN_EVENT_NAME_AUDIT_SENSITIVE_CALL = 'mcp.audit.sensitive_call';
+/** ADR 032: duration of the call, in milliseconds, on the audit event. */
+export const ATTR_MCP_TOOL_DURATION_MS = 'mcp.tool.duration_ms';
+
 /** Resource attribute (setupNodeSdk: true only) naming DEFAULT_PRICING's lastVerified date. See ADR 016 point 3. */
 export const ATTR_MCP_PRICING_DEFAULT_TABLE_LAST_VERIFIED = 'mcp.pricing.default_table_last_verified';
