@@ -192,3 +192,21 @@ def test_force_flush_sends_spans_without_waiting_for_exit(sink: Any, tmp_path: p
         proc.kill()
         proc.wait(timeout=30)
         proc.drained()
+
+
+def test_dev_mode_prints_the_pins_snippet_once_to_stderr_never_stdout() -> None:
+    proc = spawn(INTEGRITY="1", LIST_TOOLS="1")
+    proc.wait(timeout=60)
+    out, err = proc.drained()
+    assert proc.returncode == 0, err
+    assert out == ""
+    assert err.count("[opentel-mcp] tool_integrity: current tool definition hashes") == 1
+    block = err[err.index("tool_integrity={") :]
+    assert '"enabled": True' in block and '"pins": {' in block
+    assert block.count("sha256:") >= len(harness_tool_names())
+
+
+def harness_tool_names() -> tuple[str, ...]:
+    from tests import harness
+
+    return harness.TOOL_NAMES

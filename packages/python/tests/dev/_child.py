@@ -1,7 +1,7 @@
 """Child process for the dev-mode tests: a tiny instrumented server driven through the SDK's in-memory transport.
 
 Environment: TOOL (default "silent"), EXPORTER_URL, READY_FILE + WAIT=1 (touch READY_FILE, then sleep until signalled),
-FLUSH_TIMEOUT_MS (flush_on_exit cap; default is the library's), LIST_TOOLS=1 (also call tools/list), FORCE_FLUSH=1 (call opentel_mcp.force_flush() before returning).
+FLUSH_TIMEOUT_MS (flush_on_exit cap; default is the library's), LIST_TOOLS=1 (also call tools/list), FORCE_FLUSH=1 (call opentel_mcp.force_flush() before returning), INTEGRITY=1 (tool_integrity enabled).
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ async def main() -> None:
             if os.environ.get("FLUSH_TIMEOUT_MS")
             else None,
             sdk_tracing=os.environ.get("SDK_TRACING", "replace"),  # type: ignore[arg-type]
+            tool_integrity={"enabled": True} if os.environ.get("INTEGRITY") == "1" else None,
         ),
         remove_sdk_middleware=os.environ.get("REMOVE_SDK_MIDDLEWARE") == "1",
     )
@@ -37,6 +38,8 @@ async def main() -> None:
         await client.call(os.environ.get("TOOL", "silent"), {})
         if os.environ.get("LIST_TOOLS") == "1":
             await client.list_tools()
+            if os.environ.get("INTEGRITY") == "1":
+                await client.list_tools()  # a second complete listing: the snippet must not repeat
     if os.environ.get("FORCE_FLUSH") == "1":
         force_flush()
     if os.environ.get("WAIT") == "1":

@@ -5,7 +5,14 @@
 """
 
 from ._dev import force_flush, shutdown
+from ._integrity import compute_tool_definition_hash
 from ._version import __version__
 from .instrument import instrument_mcp_server
 
-__all__ = ["__version__", "force_flush", "instrument_mcp_server", "shutdown"]
+__all__ = [
+    "__version__",
+    "compute_tool_definition_hash",
+    "force_flush",
+    "instrument_mcp_server",
+    "shutdown",
+]
