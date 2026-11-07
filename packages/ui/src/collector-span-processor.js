@@ -22,6 +22,7 @@
 
 import { SpanBuffer } from './span-buffer.js';
 import { serializeSpan } from './serialize-span.js';
+import { isSecurityListSpan } from './security-events.js';
 
 /** @typedef {import('@opentelemetry/sdk-trace').SpanProcessor} SpanProcessor */
 /** @typedef {import('./types.d.ts').SerializedSpan} SerializedSpan */
@@ -71,8 +72,16 @@ export class CollectorSpanProcessor {
    * @returns {void}
    */
   onEnd(span) {
-    if (!span.name.startsWith('tools/call')) return;
-    this.ingestSerializedSpan(serializeSpan(span));
+    if (span.name.startsWith('tools/call')) {
+      this.ingestSerializedSpan(serializeSpan(span));
+      return;
+    }
+    // ADR 033: a tools/list span is admitted only when it carries a security event (tool definition integrity), so
+    // ordinary tools/list traffic never competes with tool calls for the ring buffer.
+    if (span.name === 'tools/list') {
+      const serialized = serializeSpan(span);
+      if (isSecurityListSpan(serialized.name, serialized.events)) this.ingestSerializedSpan(serialized);
+    }
   }
 
   /**

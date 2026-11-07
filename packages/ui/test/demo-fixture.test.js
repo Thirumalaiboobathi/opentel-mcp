@@ -20,13 +20,13 @@ describe('buildDemoFixture', () => {
     const ids = new Set(spans.map((s) => s.id));
     expect(ids.size).toBe(spans.length);
     for (const span of spans) {
-      expect(span.name).toMatch(/^(tools\/call |resources\/|prompts\/)/);
+      expect(span.name).toMatch(/^(tools\/call |tools\/list$|resources\/|prompts\/)/);
       expect(['OK', 'ERROR']).toContain(span.status);
     }
   });
 
   it('includes resource and prompt calls (ADR 026), with failures, and none carries a tool name or URI', () => {
-    const spans = buildDemoFixture().filter((s) => !s.name.startsWith('tools/call'));
+    const spans = buildDemoFixture().filter((s) => !s.name.startsWith('tools/call') && s.name !== 'tools/list');
     const methods = new Set(spans.map((s) => s.attributes['mcp.method.name']));
     expect(methods).toEqual(new Set(['resources/read', 'resources/list', 'resources/templates/list', 'prompts/get', 'prompts/list']));
     expect(spans.some((s) => s.status === 'ERROR')).toBe(true);
@@ -90,5 +90,52 @@ describe('buildDemoFixture', () => {
     for (const s of withAttr) {
       expect(['empty', 'tiny', 'short', 'medium', 'long']).toContain(s.attributes['mcp.failure.content_length_bucket']);
     }
+  });
+
+  describe('security story (0.4.0, ADR 033)', () => {
+    const spans = buildDemoFixture();
+    const calls = spans.filter(isToolCallSpan);
+
+    it('the tools/list spans carry a changed + pin_mismatch + added story, with hashes only', () => {
+      const lists = spans.filter((s) => s.name === 'tools/list');
+      const events = lists.flatMap((s) => s.events ?? []).map((e) => e.name);
+      expect(events).toEqual(['mcp.tool.integrity.changed', 'mcp.tool.integrity.pin_mismatch', 'mcp.tool.integrity.added']);
+      for (const e of lists.flatMap((s) => s.events ?? [])) {
+        for (const [k, v] of Object.entries(e.attributes)) {
+          if (k.endsWith('_hash')) expect(v).toMatch(/^sha256:[0-9a-f]{64}$/);
+        }
+      }
+    });
+
+    it('one tool leaks (derived attributes only) and the fixture holds no key-shaped string', () => {
+      const leaking = calls.filter((s) => s.attributes['mcp.tool.secret_leak.detected'] === true);
+      expect(new Set(leaking.map((s) => s.toolName))).toEqual(new Set(['read_file']));
+      expect(leaking).toHaveLength(3);
+      const dump = JSON.stringify(spans);
+      expect(dump).not.toMatch(/AKIA[0-9A-Z]{16}/);
+      expect(dump).not.toMatch(/eyJ[A-Za-z0-9_-]{5,}\./);
+      expect(dump).not.toMatch(/sk-[A-Za-z0-9]{20,}/);
+    });
+
+    it('five send_email auth failures land within a minute (the burst)', () => {
+      const auth = calls.filter((s) => s.failureCategory === 'auth');
+      expect(auth).toHaveLength(5);
+      expect(new Set(auth.map((s) => s.toolName))).toEqual(new Set(['send_email']));
+      const times = auth.map((s) => s.startTimeMs);
+      expect(Math.max(...times) - Math.min(...times)).toBeLessThanOrEqual(60_000);
+    });
+
+    it('sensitive calls carry mixed outcomes, and a quote carries clock skew within tolerance', () => {
+      const outcomes = new Set(calls.flatMap((s) => s.events ?? []).map((e) => e.attributes['mcp.tool.outcome']));
+      expect(outcomes).toEqual(new Set(['success', 'silent_failure', 'error']));
+      const skews = calls.map((s) => s.attributes['mcp.tool.freshness.clock_skew_ms']).filter((v) => v !== undefined);
+      expect(skews).toEqual([1200, 3400, 4300]);
+      expect(skews.every((v) => v <= 5000)).toBe(true);
+    });
+
+    it('is oldest-first', () => {
+      const times = spans.map((s) => s.startTimeMs);
+      expect([...times].sort((a, b) => a - b)).toEqual(times);
+    });
   });
 });

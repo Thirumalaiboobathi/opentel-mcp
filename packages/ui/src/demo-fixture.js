@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * @module demo-fixture
  *
@@ -183,15 +185,17 @@ export function buildDemoFixture() {
 
   // 11 silent failures -- MISSED by standard OTel: isError: true inside
   // an otherwise-successful response. This is the product.
+  // 'auth' is core's real category name (ADR 031); five send_email failures of it, a few seconds apart, are the
+  // burst the Security panel highlights (0.4.0, ADR 033).
   const silentCategories = [
-    'validation_error',
+    'auth',
     'not_found',
-    'permission_denied',
+    'auth',
     'validation_error',
-    'rate_limited',
-    'validation_error',
+    'auth',
+    'auth',
     'not_found',
-    'timeout',
+    'auth',
     'validation_error',
     'permission_denied',
     'not_found',
@@ -268,5 +272,97 @@ export function buildDemoFixture() {
     });
   }
 
-  return spans;
+  applySecurityStory(spans, now);
+  return spans.sort((a, b) => a.startTimeMs - b.startTimeMs);
+}
+
+// --- Security story (0.4.0, core 0.18.0's security signals; ADR 033) ------------------------------------------
+// Overlaid on the calls above so the 42 / 7 / 11 mix and the per-tool grades do not move. Everything here is a
+// DERIVED signal, exactly what core emits: a boolean, type names, a count, hashes. No secret exists in this file,
+// not even assembled at runtime; the "leak" is just its attributes.
+
+/** Deterministic fake definition hashes in core's `sha256:<64 hex>` shape. */
+function fakeToolHash(tool, version) {
+  return `sha256:${createHash('sha256').update(`demo:${tool}:${version}`).digest('hex')}`;
+}
+
+function integrityEvent(name, tool, attributes, timeMs) {
+  return { name, timeMs, attributes: { 'gen_ai.tool.name': tool, ...attributes } };
+}
+
+/**
+ * @param {import('./types.d.ts').SerializedSpan[]} spans
+ * @param {number} now
+ */
+function applySecurityStory(spans, now) {
+  const SENSITIVE = new Set(['send_email', 'write_file']);
+  let readFileLeaks = 0;
+  let quoteSkews = 0;
+  const skews = [1_200, 3_400, 4_300];
+
+  for (const span of spans) {
+    if (!span.toolName || !span.name.startsWith('tools/call')) continue;
+
+    // One tool returning secret-shaped output: read_file, three times (one also trips the key=value detector).
+    if (span.toolName === 'read_file' && span.status === 'OK' && readFileLeaks < 3) {
+      span.attributes['mcp.tool.secret_leak.detected'] = true;
+      span.attributes['mcp.tool.secret_leak.types'] = readFileLeaks === 1 ? ['aws_access_key_id', 'secret_assignment'] : ['aws_access_key_id'];
+      span.attributes['mcp.tool.secret_leak.count'] = readFileLeaks === 1 ? 2 : 1;
+      readFileLeaks++;
+    }
+
+    // Sensitive tools: marked, with the audit event core adds when the call ends.
+    if (SENSITIVE.has(span.toolName)) {
+      const outcome = span.errorType === 'tool_error' ? 'silent_failure' : span.status === 'ERROR' ? 'error' : 'success';
+      span.attributes['mcp.tool.sensitive'] = true;
+      span.events = [
+        {
+          name: 'mcp.audit.sensitive_call',
+          timeMs: span.startTimeMs + span.durationMs,
+          attributes: {
+            'gen_ai.tool.name': span.toolName,
+            'mcp.tool.outcome': outcome,
+            'mcp.tool.duration_ms': span.durationMs,
+            ...(outcome !== 'success' && span.failureCategory ? { 'mcp.failure.category': span.failureCategory } : {}),
+          },
+        },
+      ];
+    }
+
+    // A quote whose producer clock runs ahead, still inside the 5 s tolerance (ADR 027 amendment).
+    if (span.toolName === 'get_quote' && span.attributes['mcp.tool.freshness.verdict'] === 'fresh' && quoteSkews < skews.length) {
+      span.attributes['mcp.tool.freshness.clock_skew_ms'] = skews[quoteSkews++];
+    }
+  }
+
+  // tools/list spans: a cold start, then a re-list in which send_email's definition changed and no longer matches
+  // its pin (core reports both), and a new tool appeared.
+  const listSpan = (offsetMs, events) => ({
+    id: nextId('span'),
+    traceId: nextId('trace'),
+    name: 'tools/list',
+    startTimeMs: now - offsetMs,
+    durationMs: 4,
+    status: 'OK',
+    attributes: { 'mcp.method.name': 'tools/list' },
+    ...(events.length > 0 ? { events } : {}),
+  });
+  const at = now - 90_000;
+  spans.push(
+    listSpan(4 * 60_000, []),
+    listSpan(90_000, [
+      integrityEvent('mcp.tool.integrity.changed', 'send_email', { 'mcp.tool.integrity.old_hash': fakeToolHash('send_email', 1), 'mcp.tool.integrity.new_hash': fakeToolHash('send_email', 2) }, at),
+      integrityEvent(
+        'mcp.tool.integrity.pin_mismatch',
+        'send_email',
+        {
+          'mcp.tool.integrity.expected_hash': fakeToolHash('send_email', 1),
+          'mcp.tool.integrity.actual_hash': fakeToolHash('send_email', 2),
+          'mcp.tool.integrity.severity': 'high',
+        },
+        at,
+      ),
+      integrityEvent('mcp.tool.integrity.added', 'export_data', { 'mcp.tool.integrity.new_hash': fakeToolHash('export_data', 1) }, at),
+    ]),
+  );
 }

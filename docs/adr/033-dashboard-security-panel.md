@@ -91,13 +91,15 @@ omitted.
 
 ### 5. Demo fixtures
 
-`--demo` gains spans that tell the story: one pinned tool with a mismatch, one
-tool leaking a fake AWS-style key, an auth-failure burst, sensitive calls with
-mixed outcomes, a skewed quote. The fake key is **assembled at runtime** from
-fragments, never present as a literal in the repository, so GitHub push
-protection and scanners do not flag it. Fixtures contain no real secrets, and
-the leak is represented by its derived attributes (detected, types, count), not
-by any content.
+`--demo` tells the story on the existing demo calls (so the 42 / 7 / 11 mix and the per-tool grades do not move):
+`send_email`'s definition changes and no longer matches its pin (changed and pin-mismatch events on a `tools/list`
+span, plus an added tool), `read_file` returns secret-shaped output three times, five `send_email` auth failures
+land seconds apart (the burst), `send_email` and `write_file` are sensitive tools with mixed outcomes, and three
+`get_quote` responses carry a producer clock ahead of the observer.
+
+The fixture contains **no key in any form**. The leak is represented only by what core emits: `detected`,
+`types: ["aws_access_key_id"]`, `count`. There is nothing for GitHub push protection or a scanner to flag, and no
+way to confuse the demo with a real leak. Tests that need a key-shaped string assemble it at runtime from fragments.
 
 ## Alternatives considered
 
