@@ -306,7 +306,10 @@ with the JavaScript package for the same definition (keys sorted by UTF-16 code 
   ```python
   instrument_mcp_server(
       server,
-      tool_integrity={"enabled": True, "pins": {"get_quote": "sha256:5c95b6691da4153e7d523b1ba96336dc56bb500ec5a77e53021815906fb3873e"}},
+      tool_integrity={
+          "enabled": True,
+          "pins": {"get_quote": "sha256:5c95b6691da4153e7d523b1ba96336dc56bb500ec5a77e53021815906fb3873e"},
+      },
   )
   ```
 * `added` / `removed` are reported only on **complete** listings (a request with a `cursor`, or a result with
@@ -319,7 +322,9 @@ Getting the hashes to pin:
 ```python
 from opentel_mcp import compute_tool_definition_hash
 
-compute_tool_definition_hash({"name": "get_quote", "description": "Latest quote", "inputSchema": {"type": "object"}})
+compute_tool_definition_hash(
+    {"name": "get_quote", "description": "Latest quote", "inputSchema": {"type": "object"}}
+)
 # 'sha256:...'  (also accepts an mcp Tool model; returns None for something that is not a hashable definition)
 
 server.get_tool_integrity_hashes()  # {"get_quote": "sha256:..."} from the last tools/list the server answered
