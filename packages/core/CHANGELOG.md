@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.18.1
+
+A patch release: no new features and no change to the signals or metrics
+(no new attribute or metric label keys).
+
+### Fixed
+
+- **No more deprecation warnings on install.** `@opentelemetry/sdk-trace-node`
+  and `@opentelemetry/sdk-trace-base` are deprecated upstream (`npm warn
+  deprecated ... Use @opentelemetry/sdk-trace package`). The dev-mode tracer
+  (`setupNodeSdk: true`) now uses the supported `@opentelemetry/sdk-trace`
+  (`TracerProvider`). The old `NodeTracerProvider.register()` also installed
+  the global async-context manager and the W3C trace-context + baggage
+  propagator, so those are now registered explicitly, with
+  `@opentelemetry/context-async-hooks` and `@opentelemetry/core` as direct
+  dependencies (both were already in the install tree). Span processors, the
+  stderr exporter, OTLP export, `flushOnExit` and the single-shutdown guarantee
+  are unchanged, and `OTEL_BSP_*` batch tuning keeps working. One difference
+  to know about: the replacement SDK package no longer reads `OTEL_TRACES_SAMPLER*`
+  and `OTEL_SPAN_*_LIMIT` from the environment, so the dev-mode provider
+  always uses the default sampler (parent-based, always on) and default span
+  limits. Only hosts that set those variables *and* use `setupNodeSdk: true`
+  are affected; hosts that bring their own provider are not.
+
+### Release process
+
+- **First release published with npm provenance via the release workflow.**
+  0.18.0 (and earlier) were published manually and carry no provenance.
+
 ## 0.18.0
 
 Security observability: five small signals that help you notice some attacks
@@ -9,8 +38,8 @@ of it records tool arguments, result content, tool descriptions or matched
 secrets (derived signals only: booleans, counts, type names, hashes, tool
 names). Every new feature is off by default except the auth failure counter,
 which adds no new data. No new metric label keys. Python (0.1.0) is not
-affected; these signals are JS-only (ADR 034). This is the first release made
-by the signed release workflow (npm provenance, SBOM).
+affected; these signals are JS-only (ADR 034). (Correction, see 0.18.1: this
+release was published by hand and has no npm provenance or SBOM.)
 
 ### Security
 

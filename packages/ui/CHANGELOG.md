@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.1
+
+### Fixed
+
+- **Resources & prompts now fill from a live server.** The in-process
+  collector and the OTLP receiver only admitted `tools/call` spans (plus
+  `tools/list` with a security event), so spans from core's opt-in
+  `coverage: { resources, prompts }` (`resources/read`, `resources/list`,
+  `resources/templates/list`, `prompts/get`, `prompts/list`) appeared only in
+  `--demo`. Both paths now admit them. They keep only the method, the prompt
+  name, timing, status and `error.type` (no events, no other attributes), and
+  everything else still counts only `tools/call`: the hero stat, matrix,
+  summary, health grades and the silent-failure feed are unchanged. Resource
+  URIs and prompt arguments are not sent by core and are not stored or shown.
+  They share the span ring buffer with tool calls.
+- **`package.json`:** the `bin` path is normalized (`bin/opentel-mcp-ui.js`),
+  which silences npm's "auto-corrected some errors" warning on publish.
+- **No deprecation warnings on install.** The dashboard's test and type
+  dependencies moved from the deprecated `@opentelemetry/sdk-trace-node` /
+  `-base` to `@opentelemetry/sdk-trace`. The package still has no runtime
+  dependencies, and the peer range (`opentel-mcp >=0.8.0 <1.0.0`) accepts
+  core 0.18.1.
+
+### Release process
+
+- **First release published with npm provenance via the release workflow.**
+  0.4.0 (and earlier) were published manually and carry no provenance.
+
 ## 0.4.0
 
 A read-only **Security** section for opentel-mcp core 0.18.0's security
