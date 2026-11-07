@@ -45,18 +45,32 @@ describe('conformance/contract.json (ADR 028)', () => {
     }
   });
 
-  it('jsOnly (ADR 034): v0.18 signals are listed apart from the contract, use only allow-listed metric labels, and are not in `metrics`', () => {
+  it('security (ADR 034 amendment): the v0.18 signals are in the shared contract, with allow-listed labels only', () => {
+    const names = committed.metrics.map((m) => m.name);
+    expect(names).toEqual([
+      'mcp.tool.calls',
+      'mcp.tool.errors',
+      'mcp.tool.silent_failures',
+      'mcp.tool.duration',
+      'mcp.tool.auth_failures',
+      'mcp.tool.secret_leaks',
+      'mcp.tool.integrity_violations',
+    ]);
+    for (const m of committed.metrics.slice(4)) expect(m.labelKeys).toEqual(['gen_ai.tool.name']);
+    const sec = committed.security;
+    for (const e of sec.spanEvents) expect(e.name).toMatch(/^mcp\.(tool\.integrity|audit)\./);
+    expect(sec.secretTypes).toEqual(['url_credentials', 'jwt', 'http_auth_credential', 'aws_access_key_id', 'provider_api_key', 'secret_assignment']);
+    expect(sec.secretLeak.budgetUnit).toBe('utf16-code-units');
+    // every secret step in patterns.json names one of the types
+    const patterns = JSON.parse(readFileSync(path.join(CONFORMANCE_DIR, 'patterns.json'), 'utf8'));
+    for (const step of patterns.secretSteps) expect(sec.secretTypes).toContain(step.type);
+  });
+
+  it('jsOnly now lists only what the Python port does not implement (clock skew)', () => {
     const js = committed.jsOnly;
-    expect(js.since).toBe('core 0.18.0');
-    const contractNames = new Set(committed.metrics.map((m) => m.name));
-    const allowed = new Set([...committed.allowlists.metricSafeAttributes, ...committed.allowlists.fingerprintMetricSafeAttributes]);
-    expect(js.metrics.map((m) => m.name)).toEqual(['mcp.tool.auth_failures', 'mcp.tool.secret_leaks', 'mcp.tool.integrity_violations']);
-    for (const m of js.metrics) {
-      expect(contractNames.has(m.name)).toBe(false);
-      expect(m.labelKeys).toEqual(['gen_ai.tool.name']);
-      for (const k of [...m.labelKeys, ...m.optionalLabelKeys]) expect(allowed.has(k), `${m.name}: ${k}`).toBe(true);
-    }
-    for (const k of js.spanAttributes) expect(Object.values(committed.span.attributes)).not.toContain(k);
-    for (const e of js.spanEvents) expect(e.name).toMatch(/^mcp\.(tool\.integrity|audit)\./);
+    expect(js.spanAttributes).toEqual(['mcp.tool.freshness.clock_skew_ms']);
+    expect(js.options).toEqual(['staleness.clockSkewToleranceMs']);
+    expect(js).not.toHaveProperty('metrics');
+    expect(js).not.toHaveProperty('spanEvents');
   });
 });

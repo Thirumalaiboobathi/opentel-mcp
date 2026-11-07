@@ -98,6 +98,9 @@ def test_registered_metrics_match_the_contract_and_the_allowlist(contract: Any) 
     rec.record_silent_failure("t")
     rec.record_duration("t", 1.0, "silent_failure", "internal")
     rec.record_duration("t", 1.0, "success")
+    rec.record_auth_failure("t")
+    rec.record_secret_leak("t")
+    rec.record_integrity_violation("t")
 
     data = reader.get_metrics_data()
     assert data is not None
@@ -120,3 +123,36 @@ def test_registered_metrics_match_the_contract_and_the_allowlist(contract: Any) 
             }
             assert union <= allowed, (m.name, union - allowed)
     assert [seen[m["name"]] for m in contract["metrics"]] == contract["metrics"]
+
+
+def test_security_section_is_mirrored(contract: Any) -> None:
+    """ADR 034 amendment: the v0.18 signals are part of the shared contract (names, caps, option spellings)."""
+    sec = contract["security"]
+    assert list(c.SECURITY_SPAN_ATTRIBUTES) == sec["spanAttributes"]
+    assert list(c.SECURITY_SPAN_EVENTS) == sec["spanEvents"]
+    assert list(c.SECURITY_OPTIONS) == sec["options"]  # JS spelling -> Python snake_case, same order
+    assert c.AUTH_FAILURE_CATEGORY == sec["authFailureCategory"]
+    assert list(c.SECRET_TYPES) == sec["secretTypes"]
+    leak = sec["secretLeak"]
+    assert leak["budgetUnit"] == "utf16-code-units"
+    assert c.DEFAULT_MAX_SCAN_BYTES == leak["defaultMaxScanBytes"]
+    assert c.SCAN_CHUNK_SIZE == leak["chunkSize"]
+    assert c.SCAN_CHUNK_OVERLAP == leak["chunkOverlap"]
+    assert c.MAX_CONTENT_ITEMS == leak["maxContentItems"]
+    assert c.MAX_DETECTED_MATCHES == leak["maxDetectedMatches"]
+    st = sec["sensitiveTools"]
+    assert c.MAX_SENSITIVE_PATTERNS == st["maxPatterns"]
+    assert c.MAX_SENSITIVE_PATTERN_LENGTH == st["maxPatternLength"]
+    assert c.MAX_MATCHED_NAME_LENGTH == st["maxMatchedNameLength"]
+    ig = sec["integrity"]
+    assert c.TOOL_HASH_PREFIX == ig["hashPrefix"]
+    assert c.TOOL_HASH_PATTERN == ig["hashPattern"]
+    assert list(c.HASHED_DEFINITION_FIELDS) == ig["hashedFields"]
+    assert c.INTEGRITY_SEVERITY_HIGH == ig["severityHigh"]
+    assert c.MAX_PINS == ig["maxPins"]
+    assert c.MAX_TRACKED_TOOLS == ig["maxTrackedTools"]
+
+
+def test_security_metrics_use_only_the_tool_label(contract: Any) -> None:
+    for m in contract["metrics"][4:]:
+        assert m["labelKeys"] == ["gen_ai.tool.name"] and m["optionalLabelKeys"] == []

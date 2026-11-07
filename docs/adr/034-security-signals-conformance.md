@@ -68,3 +68,29 @@ patch release forced an edit in `packages/python`. The contract now has its own 
 
 Version 1 is the contract as of core 0.18.1 (jsOnly section present). Version 2 moves the four security features to
 the shared contract (see the amendment below).
+
+## Amendment (contract version 2: the security signals become shared)
+
+Python 0.2.0 implements ADRs 029 to 032, so their names move out of `jsOnly`:
+
+- `metrics` now lists seven counters/histograms: the original four plus `mcp.tool.auth_failures`,
+  `mcp.tool.secret_leaks` and `mcp.tool.integrity_violations` (label `gen_ai.tool.name` only; the allowlists are
+  unchanged). The Python registered-metrics test exercises all seven.
+- A new `security` section carries the span attributes and events, the option names (JS spelling; Python uses
+  snake_case: `sensitive_tools`, `secret_leak_detection`, `tool_integrity`), the closed secret type enum, and every
+  cap both ports must share (`defaultMaxScanBytes`, `chunkSize`, `chunkOverlap`, `maxContentItems`,
+  `maxDetectedMatches`, sensitive-tool limits, integrity hash format, `maxPins`, `maxTrackedTools`). To export the
+  constants that were module-private, core now `export`s `CHUNK_SIZE`, `CHUNK_OVERLAP`, `MAX_CONTENT_ITEMS` and
+  `MAX_MATCHED_NAME_LENGTH` (no behavior change).
+- `patterns.json` secret steps gain a `type` field (the ADR 030 enum). `source`, `flags` and `replacement` are
+  unchanged, so scrubbing and fingerprints are byte-identical.
+- `jsOnly` keeps only `mcp.tool.freshness.clock_skew_ms` and `staleness.clockSkewToleranceMs` (Python has no
+  staleness detection yet). The Python test still asserts Python emits neither.
+- Six new fixture files (see `conformance/README.md`): `tool-hash`, `secret-types`, `secret-scan`, `auth`,
+  `sensitive-tools`, `integrity-tracker`. `tool-hash` cases carry the definition as JSON **text**
+  (`definitionJson`) so each language's own parser sees number spellings (`1`, `1.0`, `1e0`, `-0`), escapes and a
+  `__proto__` key exactly as written. All `expect` values are produced by the unmodified JS implementation.
+- `CONTRACT_VERSION` is now 2.
+
+The alternative recorded above ("add the metrics to the contract's `metrics` list: rejected, would force false
+conformance work") no longer applies: the work is real and done.

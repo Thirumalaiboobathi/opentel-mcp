@@ -18,6 +18,12 @@ conformance/
     channel.json           result / {code, message} -> failure channel
     classify.json          stack-less thrown record (name/code/status/message) -> category, fingerprint, channel
     error-recording.json   (mode, error) -> exception event, status message, error.type
+    tool-hash.json         tool definition JSON text -> exact "sha256:<64 hex>" (or null), incl. UTF-16 key order, numbers
+    secret-types.json      text -> secret types and match count (detectSecretTypes)
+    secret-scan.json       tool result + maxScanBytes -> types, count, truncated (UTF-16 code-unit budget, windows)
+    auth.json              failed call -> does mcp.tool.auth_failures increment (category == "auth")
+    sensitive-tools.json   sensitiveTools patterns + tool names -> match / no match, compiled size
+    integrity-tracker.json sequences of tools/list observations + pins -> edge-triggered findings, violations
     thrown.py.json         Python only: synthetic frames -> stack signature, fingerprint (hand-written)
   gen_thrown_py.py         writes cases/thrown.py.json
 ```

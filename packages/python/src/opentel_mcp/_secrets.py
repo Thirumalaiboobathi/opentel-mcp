@@ -33,6 +33,18 @@ SECRET_STEP_SOURCES: tuple[tuple[str, str, str], ...] = (
     (rf"\b({_SECRET_KEY_NAMES})(\s*:\s*)(?=[^\s,;]*\d)[^\s,;]{{4,}}", "gi", f"$1$2{SECRET_PLACEHOLDER}"),
 )
 
+#: The detector type of each step above, in order (``conformance/patterns.json`` -> ``secretSteps[].type``, ADR 030).
+SECRET_STEP_TYPES: tuple[str, ...] = (
+    "url_credentials",
+    "jwt",
+    "http_auth_credential",
+    "aws_access_key_id",
+    "provider_api_key",
+    "secret_assignment",
+    "secret_assignment",
+    "secret_assignment",
+)
+
 SECRET_STEPS = tuple(
     (compile_js(src, flags), js_replacement_to_python(rep)) for src, flags, rep in SECRET_STEP_SOURCES
 )

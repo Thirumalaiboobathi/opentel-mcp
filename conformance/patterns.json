@@ -6,42 +6,50 @@
     {
       "source": "\\b([a-zA-Z][a-zA-Z0-9+.-]*:\\/\\/)[^\\s/?#@\"'<>:]+:[^\\s/?#@\"'<>]+@",
       "flags": "g",
-      "replacement": "$1<SECRET>@"
+      "replacement": "$1<SECRET>@",
+      "type": "url_credentials"
     },
     {
       "source": "\\beyJ[A-Za-z0-9_-]{5,}\\.eyJ[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{10,}",
       "flags": "g",
-      "replacement": "<SECRET>"
+      "replacement": "<SECRET>",
+      "type": "jwt"
     },
     {
       "source": "\\b(Bearer|Basic)\\s+[A-Za-z0-9\\-._~+/]{16,}=*",
       "flags": "gi",
-      "replacement": "$1 <SECRET>"
+      "replacement": "$1 <SECRET>",
+      "type": "http_auth_credential"
     },
     {
       "source": "\\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\\b",
       "flags": "g",
-      "replacement": "<SECRET>"
+      "replacement": "<SECRET>",
+      "type": "aws_access_key_id"
     },
     {
       "source": "\\b(?:sk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})",
       "flags": "g",
-      "replacement": "<SECRET>"
+      "replacement": "<SECRET>",
+      "type": "provider_api_key"
     },
     {
       "source": "\\b((?:access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|x-api-key|api[_-]?key|apikey|client[_-]?secret|secret[_-]?key|secret|password|passwd|pwd|private[_-]?key|aws[_-]?secret[_-]?access[_-]?key|credentials?|signature|sig))(=)([\"']?)[^\\s&\"',;)]+",
       "flags": "gi",
-      "replacement": "$1$2$3<SECRET>"
+      "replacement": "$1$2$3<SECRET>",
+      "type": "secret_assignment"
     },
     {
       "source": "\\b((?:access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|x-api-key|api[_-]?key|apikey|client[_-]?secret|secret[_-]?key|secret|password|passwd|pwd|private[_-]?key|aws[_-]?secret[_-]?access[_-]?key|credentials?|signature|sig))([\"']?\\s*:\\s*)([\"'])[^\"'\\n]+\\3",
       "flags": "gi",
-      "replacement": "$1$2$3<SECRET>$3"
+      "replacement": "$1$2$3<SECRET>$3",
+      "type": "secret_assignment"
     },
     {
       "source": "\\b((?:access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|x-api-key|api[_-]?key|apikey|client[_-]?secret|secret[_-]?key|secret|password|passwd|pwd|private[_-]?key|aws[_-]?secret[_-]?access[_-]?key|credentials?|signature|sig))(\\s*:\\s*)(?=[^\\s,;]*\\d)[^\\s,;]{4,}",
       "flags": "gi",
-      "replacement": "$1$2<SECRET>"
+      "replacement": "$1$2<SECRET>",
+      "type": "secret_assignment"
     }
   ],
   "normalizeSteps": [

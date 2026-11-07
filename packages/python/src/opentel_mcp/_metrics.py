@@ -1,4 +1,4 @@
-"""The four core metrics (port of ``metrics.js``), recorded with the contract's labels only."""
+"""The core metrics (port of ``metrics.js``), recorded with the contract's labels only."""
 
 from __future__ import annotations
 
@@ -23,6 +23,16 @@ class MetricsRecorder:
         )
         self._duration = meter.create_histogram(
             c.METRIC_DURATION, unit="ms", description=str(spec[c.METRIC_DURATION]["description"])
+        )
+
+        self._auth_failures = meter.create_counter(
+            c.METRIC_AUTH_FAILURES, description=str(spec[c.METRIC_AUTH_FAILURES]["description"])
+        )
+        self._secret_leaks = meter.create_counter(
+            c.METRIC_SECRET_LEAKS, description=str(spec[c.METRIC_SECRET_LEAKS]["description"])
+        )
+        self._integrity_violations = meter.create_counter(
+            c.METRIC_INTEGRITY_VIOLATIONS, description=str(spec[c.METRIC_INTEGRITY_VIOLATIONS]["description"])
         )
 
     @staticmethod
@@ -51,3 +61,12 @@ class MetricsRecorder:
         if category:
             attrs[c.FINGERPRINT_ATTRIBUTE_KEYS["CATEGORY"]] = category
         self._duration.record(duration_ms, attrs)
+
+    def record_auth_failure(self, tool_name: str | None) -> None:
+        self._auth_failures.add(1, self._tool(tool_name))
+
+    def record_secret_leak(self, tool_name: str | None) -> None:
+        self._secret_leaks.add(1, self._tool(tool_name))
+
+    def record_integrity_violation(self, tool_name: str | None) -> None:
+        self._integrity_violations.add(1, self._tool(tool_name))
