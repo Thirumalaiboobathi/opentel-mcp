@@ -307,6 +307,15 @@ export const METRIC_SAFE_ATTRIBUTES = Object.freeze([
   ATTR_MCP_TOOL_MODEL,
 ]);
 
+/** ADR 030 (v0.18.0): `true` when a tool result's text looked like it contained a credential. Span-only. */
+export const ATTR_MCP_TOOL_SECRET_LEAK_DETECTED = 'mcp.tool.secret_leak.detected';
+/** ADR 030: sorted, deduplicated secret TYPE names (a closed enum, see SECRET_TYPES). Never the matched text. */
+export const ATTR_MCP_TOOL_SECRET_LEAK_TYPES = 'mcp.tool.secret_leak.types';
+/** ADR 030: number of matches (a magnitude, capped at 1000; overlapping detectors can count one string twice). */
+export const ATTR_MCP_TOOL_SECRET_LEAK_COUNT = 'mcp.tool.secret_leak.count';
+/** ADR 030: `true` only when the result had more text than `maxScanBytes` and the rest was not scanned. */
+export const ATTR_MCP_TOOL_SECRET_LEAK_SCAN_TRUNCATED = 'mcp.tool.secret_leak.scan_truncated';
+
 /** ADR 032 (v0.18.0): boolean span attribute, `true` on a call to a tool listed in `sensitiveTools`. Span-only. */
 export const ATTR_MCP_TOOL_SENSITIVE = 'mcp.tool.sensitive';
 /** ADR 032: span event added when a sensitive tool call ends. Carries outcome and duration, never arguments. */

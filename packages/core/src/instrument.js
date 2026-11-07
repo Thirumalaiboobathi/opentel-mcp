@@ -36,6 +36,7 @@ import { registerFlushOnExit } from './flush-on-exit.js';
 import { applyUnactionableAttributes } from './unactionable.js';
 import { applyStaleness, createStalenessState } from './staleness.js';
 import { markSensitive, recordSensitiveAudit } from './sensitive-tools.js';
+import { applySecretLeak } from './secret-leak.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_PROMPT_NAME,
@@ -592,7 +593,7 @@ export function instrumentMcpServer(input, options) {
     resolved.schemaDrift.enabled && resolved.enableMetrics ? createSchemaDriftEmitter(PACKAGE_VERSION) : null;
 
   // v0.18.0 (ADRs 030, 032): resolved once; all off unless configured.
-  const securityOptions = { sensitive: resolved.sensitiveTools };
+  const securityOptions = { sensitive: resolved.sensitiveTools, secretLeak: resolved.secretLeakDetection };
 
   const originalSetRequestHandler = server.setRequestHandler.bind(server);
   // ADR 015 Phase 2: the two SDKs dispatch spec methods differently (ADR
@@ -2002,7 +2003,7 @@ function recordThrownException(span, err, errorRecordingConfig, errorRecordingSt
  *   to recordThrownException()/applyRedactor() — see redactor.js's own docblock for what "once" means here.
  * @param {import('./staleness.js').StalenessConfig} stalenessConfig - ADR 027: resolved `staleness` option.
  * @param {{ warnedTools: Set<string> }} stalenessState - ADR 027: once-per-tool malformed-freshness warnings.
- * @param {{ sensitive: import('./sensitive-tools.js').SensitiveToolMatcher | null }} securityOptions - v0.18.0
+ * @param {{ sensitive: import('./sensitive-tools.js').SensitiveToolMatcher | null, secretLeak: import('./secret-leak.js').SecretLeakConfig }} securityOptions - v0.18.0
  *   security observability (ADRs 030, 032): resolved, opt-in features; every member is null/off by default.
  */
 function wrapToolCallHandler(
@@ -2093,6 +2094,8 @@ function wrapToolCallHandler(
           // try/catch, before fingerprinting so a classifier problem can't
           // suppress it. Doesn't feed the fingerprint or the category.
           applyUnactionableAttributes(span, result, unactionableErrorsConfig);
+          // ADR 030: opt-in; boolean/types/count only, and it never changes the status set just above.
+          if (securityOptions.secretLeak.enabled) applySecretLeak(span, metricsRecorder, toolName, result, securityOptions.secretLeak);
 
           let failureCategory = '';
           let failure = null;
@@ -2170,6 +2173,7 @@ function wrapToolCallHandler(
           // ADR 027: freshness verdict from the tool's own _meta. Success
           // branch only, and it never touches status: stale is not an error.
           applyStaleness(span, metricsRecorder, toolName, result, stalenessConfig, stalenessState);
+          if (securityOptions.secretLeak.enabled) applySecretLeak(span, metricsRecorder, toolName, result, securityOptions.secretLeak);
           applyCostAttribution(span, metricsRecorder, toolName, sessionId, result, costTracking, budgetTracker, costAttributionState);
           if (thrashSessionId !== null) {
             applyThrashSuccessClear(thrashConfig, thrashDetector, thrashSessionId, toolName);

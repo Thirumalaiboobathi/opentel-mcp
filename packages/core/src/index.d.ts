@@ -146,6 +146,22 @@ export interface InstrumentOptions {
   };
 
   /**
+   * ADR 030 (0.18.0), opt-in: look for credential-shaped strings in the `text` items of tool results, successful
+   * and `isError` alike, using the same detectors that scrub error text. When something is found the span gets
+   * `mcp.tool.secret_leak.detected` (true), `.types` (a sorted list from a closed set: `url_credentials`, `jwt`,
+   * `http_auth_credential`, `aws_access_key_id`, `provider_api_key`, `secret_assignment`) and `.count`, plus
+   * `.scan_truncated` when the cap cut the scan short, and `mcp.tool.secret_leaks` counts the call (label: tool
+   * name only). The matched text, its position and its surroundings are never recorded. Span status is not
+   * changed: a leak is a signal, not an error. Pattern-based: it misses formats and can fire on look-alikes.
+   */
+  secretLeakDetection?: {
+    /** @default false */
+    enabled?: boolean;
+    /** Most characters (JavaScript string length) scanned per result; the rest is skipped, not rejected. @default 65536 */
+    maxScanBytes?: number;
+  };
+
+  /**
    * ADR 032 (0.18.0), opt-in: tool names to audit. Exact names, plus `*` wildcards that match any run of
    * characters (`"delete_*"`). A matching call gets the span attribute `mcp.tool.sensitive = true` and one span
    * event `mcp.audit.sensitive_call` with `mcp.tool.outcome` (`success` | `silent_failure` | `error`),

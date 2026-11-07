@@ -14,6 +14,7 @@ import { resolveFlushTimeout } from './flush-on-exit.js';
 import { resolveUnactionableErrorsConfig } from './unactionable.js';
 import { resolveStalenessConfig } from './staleness.js';
 import { compileSensitiveTools } from './sensitive-tools.js';
+import { resolveSecretLeakConfig } from './secret-leak.js';
 
 /**
  * @typedef {object} CostTrackingOptions
@@ -120,6 +121,11 @@ import { compileSensitiveTools } from './sensitive-tools.js';
  *   (default 10) characters of text with no image/audio/resource item. `{ enabled: true, minTextLength: 10 }`
  *   by default; independent of `fingerprinting`. Span-only: never a metric label. Also settable via
  *   `OTEL_MCP_UNACTIONABLE_ERRORS_ENABLED` / `OTEL_MCP_UNACTIONABLE_ERRORS_MIN_TEXT_LENGTH` (lower precedence).
+ * @property {{ enabled?: boolean, maxScanBytes?: number }} [secretLeakDetection] - ADR 030 (docs/adr/030-secret-leak-detection.md),
+ *   opt-in (`enabled: false` by default): scan the `text` items of tool results (successful and `isError`) for
+ *   credential-shaped strings, using the same detectors that scrub error text. Span attributes
+ *   `mcp.tool.secret_leak.{detected,types,count,scan_truncated}` and the `mcp.tool.secret_leaks` counter. Never the
+ *   matched text. `maxScanBytes` (default 65536) caps the characters scanned per result.
  * @property {string[]} [sensitiveTools=[]] - ADR 032 (docs/adr/032-sensitive-tool-auditing.md), opt-in: tool names (exact,
  *   or with `*` wildcards such as `delete_*`) to audit. A matching call gets the span attribute `mcp.tool.sensitive`
  *   and one `mcp.audit.sensitive_call` span event with its outcome and duration. Never arguments or results.
@@ -364,5 +370,6 @@ export function resolveOptions(options) {
     coverage: resolveCoverage(opts.coverage),
     staleness: resolveStalenessConfig(opts.staleness),
     sensitiveTools: compileSensitiveTools(opts.sensitiveTools),
+    secretLeakDetection: resolveSecretLeakConfig(opts.secretLeakDetection),
   };
 }

@@ -79,6 +79,7 @@ import { ATTRIBUTE_KEYS } from './fingerprint/attributes.js';
  *   recordOperationDuration: (method: string, durationMs: number, errorType?: string) => void,
  *   recordStaleResponse: (toolName: string | undefined) => void,
  *   recordAuthFailure: (toolName: string | undefined) => void,
+ *   recordSecretLeak: (toolName: string | undefined) => void,
  * }}
  */
 export function setupMeter(packageVersion) {
@@ -131,7 +132,19 @@ export function setupMeter(packageVersion) {
       'Number of failed MCP tool calls (isError result or thrown) classified as authentication/authorization failures (ADR 031).',
   });
 
+  // ADR 030 (v0.18.0): tool results whose text looked like it contained a credential (opt-in detection).
+  // gen_ai.tool.name only -- the secret type is span-only, no new label key.
+  const secretLeaks = meter.createCounter('mcp.tool.secret_leaks', {
+    description:
+      'Number of MCP tool results whose text looked like it contained a credential (ADR 030). A signal, not an error; opt-in.',
+  });
+
   return {
+    recordSecretLeak(toolName) {
+      secretLeaks.add(1, {
+        [ATTR_GEN_AI_TOOL_NAME]: toolName,
+      });
+    },
     recordAuthFailure(toolName) {
       authFailures.add(1, {
         [ATTR_GEN_AI_TOOL_NAME]: toolName,
