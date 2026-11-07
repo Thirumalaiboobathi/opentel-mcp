@@ -168,6 +168,14 @@ export interface InstrumentOptions {
      * value (negative, non-finite) is ignored with a `diag.warn`.
      */
     tools?: Record<string, { maxAgeMs: number }>;
+    /**
+     * How far in the future (ms) a tool's `asOf` may be before the verdict is `unknown` (`future_as_of`). Within
+     * this window the age clamps to 0. Either way the producer's lead is recorded on the span as
+     * `mcp.tool.freshness.clock_skew_ms`. Must be a finite number >= 0; anything else is ignored with a
+     * `diag.warn`. ADR 027 amendment (0.18.0).
+     * @default 5000
+     */
+    clockSkewToleranceMs?: number;
   };
 
   /**

@@ -35,12 +35,17 @@ export const ATTR_MCP_TOOL_FRESHNESS_MAX_AGE_MS = 'mcp.tool.freshness.max_age_ms
 export const ATTR_MCP_TOOL_FRESHNESS_LIMIT_SOURCE = 'mcp.tool.freshness.limit_source';
 /** Why the verdict is `unknown`; one of UNKNOWN_REASONS. */
 export const ATTR_MCP_TOOL_FRESHNESS_UNKNOWN_REASON = 'mcp.tool.freshness.unknown_reason';
+/** Integer ms the producer's `asOf` is ahead of this process's clock (positive = producer ahead). Span-only. */
+export const ATTR_MCP_TOOL_FRESHNESS_CLOCK_SKEW_MS = 'mcp.tool.freshness.clock_skew_ms';
 
 export const VERDICTS = Object.freeze(['fresh', 'stale', 'unknown']);
 export const LIMIT_SOURCES = Object.freeze(['max_age_ms', 'fresh_until', 'config']);
 export const UNKNOWN_REASONS = Object.freeze(['invalid_as_of', 'future_as_of', 'missing_window', 'invalid_window']);
 
-/** `asOf` up to this far in the future is clock skew: age clamps to 0. */
+/**
+ * Default for `staleness.clockSkewToleranceMs`: `asOf` up to this far in the future is clock skew, so age clamps to
+ * 0. Whatever the tolerance, the skew itself is recorded (ADR 027 amendment, 0.18.0).
+ */
 export const FUTURE_SKEW_TOLERANCE_MS = 5_000;
 
 /** A numeric timestamp below this (March 1973 as ms) is almost certainly epoch seconds. */
@@ -58,6 +63,7 @@ const MAX_WARNED_TOOLS = 256;
  * @typedef {object} StalenessConfig
  * @property {boolean} enabled
  * @property {Map<string, number>} overrides - tool name -> maxAgeMs override.
+ * @property {number} clockSkewToleranceMs - How far in the future `asOf` may be before the verdict is `unknown`.
  */
 
 /**
@@ -70,9 +76,19 @@ const MAX_WARNED_TOOLS = 256;
 export function resolveStalenessConfig(partial) {
   const overrides = new Map();
   let enabled = true;
+  let clockSkewToleranceMs = FUTURE_SKEW_TOLERANCE_MS;
   try {
     const p = isPlainObject(partial) ? partial : {};
     enabled = p.enabled !== false;
+    if (p.clockSkewToleranceMs !== undefined) {
+      if (typeof p.clockSkewToleranceMs === 'number' && Number.isFinite(p.clockSkewToleranceMs) && p.clockSkewToleranceMs >= 0) {
+        clockSkewToleranceMs = p.clockSkewToleranceMs;
+      } else {
+        diag.warn(
+          `opentel-mcp: staleness.clockSkewToleranceMs must be a finite number >= 0; using the default of ${FUTURE_SKEW_TOLERANCE_MS} ms. See ADR 027.`,
+        );
+      }
+    }
     const tools = isPlainObject(p.tools) ? p.tools : {};
     for (const toolName of Object.keys(tools)) {
       const entry = tools[toolName];
@@ -89,7 +105,7 @@ export function resolveStalenessConfig(partial) {
   } catch (err) {
     diag.warn('opentel-mcp: could not read the staleness option; ignoring its overrides. See ADR 027.', err);
   }
-  return { enabled, overrides };
+  return { enabled, overrides, clockSkewToleranceMs };
 }
 
 /**
@@ -127,6 +143,7 @@ export function parseTimestamp(value) {
  * @property {number} [maxAgeMs]
  * @property {'max_age_ms' | 'fresh_until' | 'config'} [limitSource]
  * @property {'invalid_as_of' | 'future_as_of' | 'missing_window' | 'invalid_window'} [unknownReason]
+ * @property {number} [clockSkewMs] - Set when `asOf` is ahead of `now` (rounded ms, > 0), whatever the verdict.
  * @property {string} [warning] - Set for a malformed input worth one diag.warn.
  */
 
@@ -138,9 +155,10 @@ export function parseTimestamp(value) {
  * @param {unknown} freshness - `result._meta[FRESHNESS_META_KEY]`, known to be present.
  * @param {number | undefined} overrideMaxAgeMs - From config; replaces the tool's window.
  * @param {number} now - Epoch ms.
+ * @param {number} [toleranceMs] - `staleness.clockSkewToleranceMs`; defaults to {@link FUTURE_SKEW_TOLERANCE_MS}.
  * @returns {FreshnessAssessment}
  */
-export function assessFreshness(freshness, overrideMaxAgeMs, now) {
+export function assessFreshness(freshness, overrideMaxAgeMs, now, toleranceMs = FUTURE_SKEW_TOLERANCE_MS) {
   if (!isPlainObject(freshness)) {
     return { verdict: 'unknown', unknownReason: 'invalid_as_of', warning: 'the freshness value is not an object' };
   }
@@ -159,8 +177,16 @@ export function assessFreshness(freshness, overrideMaxAgeMs, now) {
   }
 
   const rawAge = now - asOf;
-  if (rawAge < -FUTURE_SKEW_TOLERANCE_MS) {
-    return { verdict: 'unknown', unknownReason: 'future_as_of', warning: 'asOf is more than 5 s in the future' };
+  // ADR 027 amendment: the producer's lead is recorded whenever it exists, including within tolerance.
+  const skew = Math.round(-rawAge);
+  /** @type {(a: FreshnessAssessment) => FreshnessAssessment} */
+  const withSkew = (a) => (skew > 0 ? { ...a, clockSkewMs: skew } : a);
+  if (rawAge < -toleranceMs) {
+    return withSkew({
+      verdict: 'unknown',
+      unknownReason: 'future_as_of',
+      warning: `asOf is more than ${toleranceMs} ms in the future (staleness.clockSkewToleranceMs)`,
+    });
   }
   const dataAgeMs = Math.max(0, Math.round(rawAge));
 
@@ -176,21 +202,21 @@ export function assessFreshness(freshness, overrideMaxAgeMs, now) {
     const hasMaxAge = rawMaxAge !== undefined;
     const hasFreshUntil = rawFreshUntil !== undefined;
     if (!hasMaxAge && !hasFreshUntil) {
-      return {
+      return withSkew({
         verdict: 'unknown',
         dataAgeMs,
         unknownReason: 'missing_window',
         warning: 'asOf was given without maxAgeMs or freshUntil',
-      };
+      });
     }
     const freshUntil = hasFreshUntil ? parseTimestamp(rawFreshUntil) : null;
     if ((hasMaxAge && !isValidMaxAge(rawMaxAge)) || (hasFreshUntil && (freshUntil === null || freshUntil < asOf))) {
-      return {
+      return withSkew({
         verdict: 'unknown',
         dataAgeMs,
         unknownReason: 'invalid_window',
         warning: 'maxAgeMs must be a finite number >= 0, and freshUntil a timestamp no earlier than asOf',
-      };
+      });
     }
     // Both given: the earlier deadline wins (ADR 027 §1).
     const fromMaxAge = hasMaxAge ? asOf + /** @type {number} */ (rawMaxAge) : Infinity;
@@ -208,7 +234,7 @@ export function assessFreshness(freshness, overrideMaxAgeMs, now) {
   const maxAgeMs = Math.round(Math.min(deadline, MAX_EPOCH_MS) - asOf);
   // Skew within tolerance counts as "now == asOf".
   const verdict = Math.max(now, asOf) > deadline ? 'stale' : 'fresh';
-  return { verdict, dataAgeMs, maxAgeMs, limitSource };
+  return withSkew({ verdict, dataAgeMs, maxAgeMs, limitSource });
 }
 
 /**
@@ -239,13 +265,14 @@ export function applyStaleness(span, metricsRecorder, toolName, result, config, 
     if (freshness === undefined) return;
 
     const override = typeof toolName === 'string' ? config.overrides.get(toolName) : undefined;
-    const assessment = assessFreshness(freshness, override, now);
+    const assessment = assessFreshness(freshness, override, now, config.clockSkewToleranceMs);
 
     span.setAttribute(ATTR_MCP_TOOL_FRESHNESS_VERDICT, assessment.verdict);
     if (assessment.dataAgeMs !== undefined) span.setAttribute(ATTR_MCP_TOOL_FRESHNESS_DATA_AGE_MS, assessment.dataAgeMs);
     if (assessment.maxAgeMs !== undefined) span.setAttribute(ATTR_MCP_TOOL_FRESHNESS_MAX_AGE_MS, assessment.maxAgeMs);
     if (assessment.limitSource) span.setAttribute(ATTR_MCP_TOOL_FRESHNESS_LIMIT_SOURCE, assessment.limitSource);
     if (assessment.unknownReason) span.setAttribute(ATTR_MCP_TOOL_FRESHNESS_UNKNOWN_REASON, assessment.unknownReason);
+    if (assessment.clockSkewMs !== undefined) span.setAttribute(ATTR_MCP_TOOL_FRESHNESS_CLOCK_SKEW_MS, assessment.clockSkewMs);
 
     if (assessment.verdict === 'stale') metricsRecorder?.recordStaleResponse(toolName);
     if (assessment.warning) warnOnce(state, toolName, assessment.warning);
