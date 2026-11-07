@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.18.0
+
+Security observability: five small signals that help you notice some attacks
+and mistakes on an MCP server. This is **observability, not enforcement**:
+nothing here blocks a call, alters a response or authenticates anyone, and none
+of it records tool arguments, result content, tool descriptions or matched
+secrets (derived signals only: booleans, counts, type names, hashes, tool
+names). Every new feature is off by default except the auth failure counter,
+which adds no new data. No new metric label keys. Python (0.1.0) is not
+affected; these signals are JS-only (ADR 034). This is the first release made
+by the signed release workflow (npm provenance, SBOM).
+
+### Security
+
+- **Tool definition integrity (ADR 029).** New opt-in `toolIntegrity: {
+  enabled, pins }`. Each tool definition seen in `tools/list` (name, title,
+  description, inputSchema, outputSchema, annotations) is hashed with SHA-256
+  over a canonical JSON form (`computeToolDefinitionHash()`, new export).
+  Span events on the `tools/list` span report `mcp.tool.integrity.changed`
+  (differs from the first hash seen), `.pin_mismatch` (differs from `pins`;
+  high severity), `.added` and `.removed`, once per distinct new state, with
+  hashes and tool names only. New counter `mcp.tool.integrity_violations`
+  (label: `gen_ai.tool.name`). `server.getToolIntegrityHashes()` returns the
+  current hashes, and in dev mode (`setupNodeSdk: true`) a copy-pasteable
+  `pins` snippet is printed once to stderr. Works with `schemaDrift` disabled
+  and does not change the ADR 010 drift hash. Detection only: the first hash
+  seen is trusted unless pinned.
+- **Secret leak detection in tool output (ADR 030).** New opt-in
+  `secretLeakDetection: { enabled, maxScanBytes }` (default 65536). Text
+  content of successful and `isError` results is checked in-process with the
+  same detectors that scrub error text. Span attributes
+  `mcp.tool.secret_leak.detected`, `.types` (a closed set of six names),
+  `.count` and `.scan_truncated`; counter `mcp.tool.secret_leaks` (label:
+  `gen_ai.tool.name`). Never the matched text, its position or its
+  surroundings; the type is span-only; span status is unchanged. Pattern
+  based: it misses formats and can fire on look-alikes. The detectors gained
+  internal type names without any change to scrubbing, fingerprints or
+  `conformance/patterns.json`.
+- **Auth failure counter (ADR 031).** New always-on counter
+  `mcp.tool.auth_failures` (label: `gen_ai.tool.name`), +1 per failed call,
+  silent or thrown, classified into the existing `auth` category. Stays at zero
+  with `fingerprinting: false`. Burst detection is not in the library.
+- **Sensitive tool auditing (ADR 032).** New opt-in `sensitiveTools` (exact
+  names and `*` wildcards, matched in linear time). A matching call gets the
+  span attribute `mcp.tool.sensitive` and an `mcp.audit.sensitive_call` event
+  with outcome, duration and failure category. Never arguments or results. It
+  is telemetry, not a tamper-evident audit log.
+- **Clock-skew visibility (ADR 027 amendment).** A producer whose `asOf` is
+  ahead of this process's clock is now recorded as the span attribute
+  `mcp.tool.freshness.clock_skew_ms`, including inside the tolerance (an
+  `asOf` up to 5 s ahead used to be silently treated as "now"). New option
+  `staleness.clockSkewToleranceMs` (default `5000`, today's behavior; invalid
+  values are warned about and ignored). Verdicts are unchanged. Credit: the
+  r/mcp community.
+
+### Internal
+
+- **Test reliability.** Timing-sensitive tests were made deterministic: the
+  flush-on-exit child-process tests (the shutdown flush is now told apart from
+  the 5 s periodic metric print by a stderr readiness marker, a longer hang
+  guard, a monotonic clock for the cap check), the thrash benchmark (no spy on
+  the timed loop, a relative bound instead of an absolute throughput floor)
+  and a staleness test that assumed the wall clock never steps backwards. The
+  global `testTimeout` raise was reverted; two tests carry their own timeouts.
+- **Tooling.** Test tooling moved from vitest 5 (which requires Node 22.12+)
+  to vitest 4.1.12 so the suites run on every Node version in `engines`
+  (`>=20`). The `engines` field is unchanged. Runtime dependencies are
+  unchanged.
+
 ## 0.17.0
 
 Staleness detection: a read tool that returns data older than its own

@@ -873,10 +873,13 @@ await server.connect(new StdioServerTransport());
  echo '{"jsonrpc":"2.0","id":3,"method":"tools/list"}'; sleep 1) | node server.js
 ```
 
-The first `tools/list` span carries a `mcp.tool.integrity.pin_mismatch` event and
-the third a `mcp.tool.integrity.changed` event (the dev exporter prints event
-attributes collapsed as `[Object]`; a real backend shows them), and stderr ends
-with `mcp.tool.integrity_violations{gen_ai.tool.name=get_quote}`.
+The first `tools/list` span carries a `mcp.tool.integrity.pin_mismatch` event
+(the pin is wrong). The third carries `mcp.tool.integrity.changed` (the
+description is not what it was) and a second `pin_mismatch` (it is a new,
+different hash). The dev exporter prints event attributes collapsed as
+`[Object]`; a real backend shows them. stderr ends with
+`mcp.tool.integrity_violations{gen_ai.tool.name=get_quote} = 2` (one per
+listing that newly reported a violation).
 
 What is emitted (span events on the `tools/list` span; **hashes and tool names
 only**):
@@ -984,8 +987,30 @@ puts in its `auth` category: HTTP 401/403 statuses, `UnauthorizedError` /
 `ForbiddenError` / `AuthError`, `EACCES` / `EPERM`, and messages such as
 "unauthorized", "forbidden", "access denied", "permission denied". It is always
 on and adds no new data: the same category is already on the span as
-`mcp.failure.category`. In the example above, a tool that returns
-`401 Unauthorized: bad credentials` as an error result gives:
+`mcp.failure.category`. There is nothing to configure:
+
+```js
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { instrumentMcpServer } from 'opentel-mcp';
+
+const server = new McpServer({ name: 'my-server', version: '1.0.0' });
+
+instrumentMcpServer(server, { serviceName: 'my-mcp-server', setupNodeSdk: true });
+
+server.registerTool('login', { description: 'Log in' }, async () => ({
+  isError: true,
+  content: [{ type: 'text', text: '401 Unauthorized: bad credentials' }],
+}));
+
+await server.connect(new StdioServerTransport());
+```
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"login","arguments":{}}}' | node server.js
+```
+
+stderr (from a real run) ends with:
 
 ```
 [opentel-mcp metrics] mcp.tool.auth_failures{gen_ai.tool.name=login} = 1
@@ -1043,8 +1068,32 @@ the process controls its telemetry. If you rely on it, keep traces where
 A producer whose clock runs ahead of this process makes old data look fresh:
 up to 5 s in the future was silently treated as "now". Now the lead is recorded
 on the span as `mcp.tool.freshness.clock_skew_ms` (integer ms, positive means the
-producer is ahead), including when it is inside the tolerance. In the example
-above, a quote whose `asOf` is 3 s ahead gives:
+producer is ahead), including when it is inside the tolerance. A quote whose
+`asOf` is 3 s ahead of this process:
+
+```js
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { instrumentMcpServer, FRESHNESS_META_KEY } from 'opentel-mcp';
+
+const server = new McpServer({ name: 'my-server', version: '1.0.0' });
+
+instrumentMcpServer(server, { serviceName: 'my-mcp-server', setupNodeSdk: true });
+
+server.registerTool('get_quote', { description: 'Latest quote' }, async () => ({
+  content: [{ type: 'text', text: '101.5' }],
+  // The producer's clock is 3 s ahead of this process.
+  _meta: { [FRESHNESS_META_KEY]: { asOf: Date.now() + 3_000, maxAgeMs: 60_000 } },
+}));
+
+await server.connect(new StdioServerTransport());
+```
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_quote","arguments":{}}}' | node server.js
+```
+
+The span (from a real run) has:
 
 ```
 'mcp.tool.freshness.verdict': 'fresh',

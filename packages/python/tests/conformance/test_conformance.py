@@ -1,6 +1,6 @@
 """Runs the shared conformance suite (``/conformance``) against the Python port (ADR 028 Decision 6).
 
-Every ``py`` case in every file must pass; a failure means the port drifted from core 0.17.0.
+Every ``py`` case in every file must pass; a failure means the port drifted from core 0.18.0.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 # Security FAQ for vendor questionnaires
 
-Short answers, each linked to evidence. Status as of 2026-11-07 (core 0.17.0, ui 0.3.0, python 0.1.0). These are the
+Short answers, each linked to evidence. Status as of 2026-11-07 (core 0.18.0, ui 0.4.0, python 0.1.0). These are the
 maintainer's statements of design and current practice, not contractual commitments or certifications. Items marked
 **to be confirmed** need the maintainer's confirmation before you rely on them.
 
@@ -13,7 +13,7 @@ maintainer's statements of design and current practice, not contractual commitme
 | How are releases signed and verified? | From the first release made by [`release.yml`](../../.github/workflows/release.yml): npm provenance and PyPI PEP 740 attestations via trusted publishing, plus GitHub attestations. Earlier versions (npm 0.17.0 / ui 0.3.0 / PyPI 0.1.0) were published manually and have none. Applies once the maintainer has completed the one-time setup. | [releasing.md](releasing.md#verifying-a-release-for-consumers) |
 | Is there an SBOM? | Yes, from that same first workflow release: CycloneDX JSON per package, attached to the GitHub release and attested. | [releasing.md#sboms](releasing.md#sboms) |
 | How are vulnerabilities reported and handled? | Privately via GitHub private vulnerability reporting; goals for response times are in the policy. Fixes ship as patch releases with a GitHub Security Advisory. | [SECURITY.md](../../SECURITY.md) |
-| Which versions get security fixes? | The latest minor of each package (core 0.17.x, ui 0.3.x; PyPI 0.1.x). Pre-1.0. | [SECURITY.md](../../SECURITY.md#supported-versions) |
+| Which versions get security fixes? | The latest minor of each package (core 0.18.x, ui 0.4.x; PyPI 0.1.x). Pre-1.0. | [SECURITY.md](../../SECURITY.md#supported-versions) |
 | Dependencies and how are they monitored? | Core runtime: `@opentelemetry/exporter-trace-otlp-http`, `resources`, `sdk-metrics`, `sdk-trace-node`; ui: none (peer: `opentel-mcp`, `@opentelemetry/api`); Python: `opentelemetry-api`. Lockfiles committed; CI runs `npm audit` against the packed production trees; Dependabot weekly (npm, uv, Actions); CodeQL; OpenSSF Scorecard. | [package.json (core)](../../packages/core/package.json), [package.json (ui)](../../packages/ui/package.json), [pyproject.toml](../../packages/python/pyproject.toml), [dependabot.yml](../../.github/dependabot.yml), [ci.yml](../../.github/workflows/ci.yml) |
 | License? | MIT. | [LICENSE (core)](../../packages/core/LICENSE), [LICENSE (ui)](../../packages/ui/LICENSE), [LICENSE (python)](../../packages/python/LICENSE) |
 | Has there been an independent security audit or penetration test? | No. The model in this folder is maintainer-written. | [threat-model.md](threat-model.md) |
