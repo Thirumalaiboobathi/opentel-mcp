@@ -173,7 +173,12 @@ SECURITY_SPAN_ATTRIBUTES: Final = (
 SECURITY_SPAN_EVENTS: Final = (
     {
         "name": EVENT_AUDIT_SENSITIVE_CALL,
-        "attributes": [ATTR_GEN_AI_TOOL_NAME, ATTR_MCP_TOOL_OUTCOME, ATTR_MCP_TOOL_DURATION_MS, "mcp.failure.category"],
+        "attributes": [
+            ATTR_GEN_AI_TOOL_NAME,
+            ATTR_MCP_TOOL_OUTCOME,
+            ATTR_MCP_TOOL_DURATION_MS,
+            "mcp.failure.category",
+        ],
     },
     {
         "name": EVENT_INTEGRITY_CHANGED,
@@ -218,6 +223,13 @@ MAX_SENSITIVE_PATTERN_LENGTH: Final = 256
 MAX_MATCHED_NAME_LENGTH: Final = 1024
 TOOL_HASH_PREFIX: Final = "sha256:"
 TOOL_HASH_PATTERN: Final = "^sha256:[0-9a-f]{64}$"
-HASHED_DEFINITION_FIELDS: Final = ("name", "title", "description", "inputSchema", "outputSchema", "annotations")
+HASHED_DEFINITION_FIELDS: Final = (
+    "name",
+    "title",
+    "description",
+    "inputSchema",
+    "outputSchema",
+    "annotations",
+)
 MAX_PINS: Final = 1000
 MAX_TRACKED_TOOLS: Final = 1000

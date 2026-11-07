@@ -312,6 +312,7 @@ class ToolCallRecorder:
             span.set_attribute(c.ATTR_ERROR_TYPE, c.ERROR_TYPE_TOOL_ERROR)
 
         self._metric(lambda m: m.record_silent_failure(tool, category))
+        self._record_auth_failure(tool, category)
         self._metric(lambda m: m.record_duration(tool, duration_ms, c.OUTCOME_SILENT_FAILURE, category))
 
     def _on_thrown(self, active: _Active, exc: BaseException, start: float) -> None:
@@ -333,7 +334,13 @@ class ToolCallRecorder:
             category = fp.category
 
         self._metric(lambda m: m.record_error(tool, error_type, category))
+        self._record_auth_failure(tool, category)
         self._metric(lambda m: m.record_duration(tool, duration_ms, c.OUTCOME_ERROR, category))
+
+    def _record_auth_failure(self, tool: str | None, category: str) -> None:
+        """ADR 031: +1 per failed call (silent or thrown) classified ``auth``. Needs fingerprinting (no category otherwise)."""
+        if category == c.AUTH_FAILURE_CATEGORY:
+            self._metric(lambda m: m.record_auth_failure(tool))
 
     def _metric(self, fn: Callable[[MetricsRecorder], None]) -> None:
         if self.metrics is None:
