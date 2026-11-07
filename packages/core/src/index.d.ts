@@ -9,7 +9,7 @@ import type { ObservationState } from './observation/types.d.ts';
  */
 export interface InstrumentOptions {
   /**
-   * Names the resource of the `NodeTracerProvider` this library creates.
+   * Names the resource of the `TracerProvider` this library creates.
    *
    * Required (and must be a non-empty string) when `setupNodeSdk` is `true` —
    * omitting it in that mode throws at runtime. Has no effect when
@@ -56,7 +56,7 @@ export interface InstrumentOptions {
 
   /**
    * When `true`, {@link instrumentMcpServer} creates and registers its own
-   * `NodeTracerProvider` (always exporting to stderr; additionally to
+   * `TracerProvider` (always exporting to stderr; additionally to
    * `exporterUrl` via OTLP/HTTP if set).
    *
    * **Also stands up a dev-mode `MeterProvider` (ADR 023,
@@ -488,7 +488,7 @@ export type DuckTypedMcpServer = {
  * @param options - Instrumentation options.
  * @returns The same object that was passed in, for chaining. When
  *   `options.setupNodeSdk` is `true`, the returned object also gets a
- *   `shutdown()` method that flushes and shuts down the `NodeTracerProvider`
+ *   `shutdown()` method that flushes and shuts down the `TracerProvider`
  *   created for it — call it during your process's own shutdown sequence to
  *   avoid losing buffered spans. As of v0.15.0 (ADR 023), when dev-mode
  *   metrics were also set up (`enableMetrics` not `false`, and no

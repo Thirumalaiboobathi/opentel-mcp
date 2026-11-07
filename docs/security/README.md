@@ -6,7 +6,7 @@ prompt arguments; the one free-text exception is thrown-error messages, which ar
 can be reduced to nothing. It has no telemetry to the maintainer, a small runtime dependency set, and instrumentation
 code that is designed never to throw into the host. The optional local dashboard (`opentel-mcp-ui`) binds to loopback
 only and is hardened against cross-site and DNS-rebinding access, oversized payloads and script injection. Releases made
-by the repository's workflow carry npm provenance / PyPI attestations and a CycloneDX SBOM. This is a single-maintainer
+by the repository's workflow carry npm provenance / PyPI attestations and a CycloneDX SBOM (npm: from `opentel-mcp` 0.18.1 / `opentel-mcp-ui` 0.4.1; earlier versions, including 0.18.0 and 0.4.0, were published manually and have none). This is a single-maintainer
 project: nothing here is a warranty, a certification, or a promise of response times, and every claim cites the code or
 test that supports it.
 

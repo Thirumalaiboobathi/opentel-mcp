@@ -148,7 +148,7 @@ const { url } = await withUI(instrumented, { open: true });
 `withUI()`'s most reliable ingestion path is the exact same OTLP/HTTP
 receiver the standalone CLI exposes (`<url>/v1/traces`) — it also
 *attempts* to attach directly to your `TracerProvider` as a bonus, best
-effort only, since the installed `@opentelemetry/sdk-trace-node` (2.x) has
+effort only, since the installed `@opentelemetry/sdk-trace` (2.x) has
 no public API to add a `SpanProcessor` after construction. Don't rely on
 the direct-attach path; wire `exporterUrl` to `withUI()`'s own `url` the
 same way the two-process setup above does.

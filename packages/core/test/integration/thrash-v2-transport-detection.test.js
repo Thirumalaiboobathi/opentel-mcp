@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { trace, context, diag, metrics } from '@opentelemetry/api';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
-import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { NodeTracerProvider } from '../helpers/tracer-provider.js';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '../helpers/tracer-provider.js';
 import { MeterProvider, MetricReader } from '@opentelemetry/sdk-metrics';
 import { Server as ServerV1 } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';

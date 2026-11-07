@@ -26,6 +26,7 @@
 
 import { SpanStatusCode } from '@opentelemetry/api';
 import { sanitizeSpanEvents } from './security-events.js';
+import { OPERATION_ATTRIBUTE_KEYS } from './span-method.js';
 
 /** @typedef {import('@opentelemetry/sdk-trace').ReadableSpan} ReadableSpan */
 /** @typedef {import('./types.d.ts').SerializedSpan} SerializedSpan */
@@ -101,5 +102,33 @@ export function serializeSpan(span) {
     status: STATUS_CODE_NAMES[span.status?.code] ?? 'UNSET',
     ...spanFieldsFromAttributes(span.attributes ?? {}),
     ...(events.length > 0 ? { events } : {}),
+  };
+}
+
+/**
+ * Narrows a serialised resources/* or prompts/* span to what the
+ * Resources & prompts panel uses: identity, timing, status, `error.type`
+ * and the allowlisted attributes. No events, no extra attributes -- so
+ * nothing beyond that can reach the buffer, the API or the SSE stream.
+ *
+ * @param {SerializedSpan} serialized
+ * @returns {SerializedSpan}
+ */
+export function toOperationSpan(serialized) {
+  /** @type {SerializedSpan['attributes']} */
+  const attributes = {};
+  for (const key of OPERATION_ATTRIBUTE_KEYS) {
+    const value = serialized.attributes?.[key];
+    if (typeof value === 'string') attributes[key] = value;
+  }
+  return {
+    id: serialized.id,
+    traceId: serialized.traceId,
+    name: serialized.name,
+    startTimeMs: serialized.startTimeMs,
+    durationMs: serialized.durationMs,
+    status: serialized.status,
+    ...(serialized.errorType !== undefined ? { errorType: serialized.errorType } : {}),
+    attributes,
   };
 }

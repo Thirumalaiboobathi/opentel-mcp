@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
-import { NodeTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
-import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
+import { TracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace';
+import { InMemorySpanExporter } from '@opentelemetry/sdk-trace';
 import { JsonTraceSerializer } from '@opentelemetry/otlp-transformer';
 import { parseOtlpJsonTraceRequest } from '../src/otlp-json-receiver.js';
 
@@ -14,8 +14,8 @@ import { parseOtlpJsonTraceRequest } from '../src/otlp-json-receiver.js';
  */
 async function realOtlpJsonPayloadFor(spanName, attributeSetup) {
   const exporter = new InMemorySpanExporter();
-  const provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
-  provider.register();
+  const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+  trace.setGlobalTracerProvider(provider);
 
   const tracer = trace.getTracer('test');
   const span = tracer.startSpan(spanName);

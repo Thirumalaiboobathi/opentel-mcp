@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { trace } from '@opentelemetry/api';
 import { ExportResultCode } from '@opentelemetry/core';
-import { NodeTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import { NodeTracerProvider, SimpleSpanProcessor } from '../helpers/tracer-provider.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { instrumentMcpServer } from '../../src/instrument.js';

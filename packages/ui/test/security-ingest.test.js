@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { trace, SpanKind } from '@opentelemetry/api';
-import { NodeTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-node';
-import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
+import { TracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace';
+import { InMemorySpanExporter } from '@opentelemetry/sdk-trace';
 import { JsonTraceSerializer } from '@opentelemetry/otlp-transformer';
 import { CollectorSpanProcessor } from '../src/collector-span-processor.js';
 import { parseOtlpJsonTraceRequest } from '../src/otlp-json-receiver.js';
@@ -20,8 +20,8 @@ describe('in-process ingestion (CollectorSpanProcessor)', () => {
   let collector;
   beforeEach(() => {
     collector = new CollectorSpanProcessor({ capacity: 50 });
-    provider = new NodeTracerProvider({ spanProcessors: [collector] });
-    provider.register();
+    provider = new TracerProvider({ spanProcessors: [collector] });
+    trace.setGlobalTracerProvider(provider);
   });
   afterEach(async () => {
     trace.disable();
@@ -71,8 +71,8 @@ describe('in-process ingestion (CollectorSpanProcessor)', () => {
 
 async function otlpFor(build) {
   const exporter = new InMemorySpanExporter();
-  const provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
-  provider.register();
+  const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+  trace.setGlobalTracerProvider(provider);
   build(trace.getTracer('test'));
   const bytes = JsonTraceSerializer.serializeRequest(exporter.getFinishedSpans());
   trace.disable();

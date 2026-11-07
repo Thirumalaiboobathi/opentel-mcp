@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { trace, metrics, context, diag, DiagLogLevel } from '@opentelemetry/api';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { TracerProvider } from '@opentelemetry/sdk-trace';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { instrumentMcpServer } from '../../src/instrument.js';
 import { __resetFlushOnExitWarnedForTests } from '../../src/config.js';
@@ -209,7 +209,7 @@ describe('flushOnExit registration (in-process)', () => {
   });
 
   it('no double shutdown: explicit shutdown() twice plus a process-level flush shut the provider down once', async () => {
-    const spy = vi.spyOn(NodeTracerProvider.prototype, 'shutdown');
+    const spy = vi.spyOn(TracerProvider.prototype, 'shutdown');
     const server = instrumentMcpServer(new McpServer({ name: 'x', version: '0' }), { serviceName: 'x', setupNodeSdk: true });
     const first = server.shutdown();
     const second = server.shutdown();
@@ -219,7 +219,7 @@ describe('flushOnExit registration (in-process)', () => {
   });
 
   it('a process-level flush followed by an explicit shutdown() also shuts down once', async () => {
-    const spy = vi.spyOn(NodeTracerProvider.prototype, 'shutdown');
+    const spy = vi.spyOn(TracerProvider.prototype, 'shutdown');
     const server = instrumentMcpServer(new McpServer({ name: 'x', version: '0' }), { serviceName: 'x', setupNodeSdk: true });
     await flushAll();
     await server.shutdown();
