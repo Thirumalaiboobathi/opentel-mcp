@@ -21,7 +21,9 @@ def contract() -> Any:
 
 def test_scope_and_version(contract: Any) -> None:
     assert contract["instrumentationScope"] == c.INSTRUMENTATION_SCOPE
-    assert contract["contract"] == c.CONTRACT_VERSION
+    assert contract["contractVersion"] == c.CONTRACT_VERSION
+    assert isinstance(contract["coreVersion"], str)  # informational only: never asserted against anything
+    assert "contract" not in contract
 
 
 def test_span_attribute_keys(contract: Any) -> None:

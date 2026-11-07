@@ -55,3 +55,16 @@ in core (not hand-written), so a name cannot silently change:
 
 Anyone porting a signal later moves its names from `jsOnly` into the contract
 proper in the same change.
+
+## Amendment (contract version, Python 0.2.0 work)
+
+`contract.json` used to embed `"contract": "core <version>"` and the Python suite asserted equality, so every core
+patch release forced an edit in `packages/python`. The contract now has its own version:
+
+- `contractVersion`: an integer constant (`CONTRACT_VERSION` in `gen-conformance.mjs`), bumped by hand only when the
+  contract itself changes. Both suites assert it equals their own constant (`opentel_mcp._contract.CONTRACT_VERSION`).
+- `coreVersion`: the core package version, informational only; nothing asserts it.
+- The `contract` key is removed.
+
+Version 1 is the contract as of core 0.18.1 (jsOnly section present). Version 2 moves the four security features to
+the shared contract (see the amendment below).

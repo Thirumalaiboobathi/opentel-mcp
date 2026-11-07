@@ -39,6 +39,14 @@ escapes, which both `JSON.parse` and `json.loads` preserve.
 | JS | `packages/core/test/conformance.test.js` runs every `js` case against core; `conformance.contract.test.js` asserts `contract.json` equals what core exports and registers |
 | Python | `packages/python/tests/conformance/` runs every `py` case; `tests/test_contract.py` mirrors `contract.json`; `test_regex_source_parity.py` compares the Python regex tables to `patterns.json` |
 
+## Contract version
+
+`contract.json` carries `contractVersion` (an integer, constant `CONTRACT_VERSION` in
+`packages/core/scripts/gen-conformance.mjs`). Both test suites assert it against their own constant. Bump it **by
+hand, only when the contract changes** (a name, label key, cap, option or fixture semantics). `coreVersion` is
+informational: a core patch release regenerates it but never obliges Python to change. Python's constant is
+`opentel_mcp._contract.CONTRACT_VERSION`; bump both in the same PR.
+
 ## Regenerating
 
 Whenever core's behaviour, a regex or the contract changes on purpose:

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import * as attrs from '../src/attributes.js';
 import * as fpAttrs from '../src/fingerprint/attributes.js';
-import { CONFORMANCE_DIR, buildContract } from '../scripts/gen-conformance.mjs';
+import { CONFORMANCE_DIR, CONTRACT_VERSION, buildContract } from '../scripts/gen-conformance.mjs';
 
 /**
  * ADR 028 Decision 4: conformance/contract.json is what the Python port
@@ -16,6 +16,13 @@ describe('conformance/contract.json (ADR 028)', () => {
 
   it('equals the live core contract', async () => {
     expect(await buildContract()).toEqual(committed);
+  });
+
+  it('has its own integer contractVersion, independent of the core package version (ADR 034 amendment)', () => {
+    expect(Number.isInteger(committed.contractVersion) && committed.contractVersion >= 1).toBe(true);
+    expect(committed.contractVersion).toBe(CONTRACT_VERSION);
+    expect(typeof committed.coreVersion).toBe('string');
+    expect(committed).not.toHaveProperty('contract');
   });
 
   it('lists every span attribute key core exports for the tools/call span', () => {
