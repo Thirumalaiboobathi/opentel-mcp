@@ -97,7 +97,7 @@ export function createToolIntegrityEmitter(packageVersion, enableMetrics) {
 export function formatPinsSnippet(hashes) {
   const lines = Object.keys(hashes)
     .sort()
-    .map((name) => `    ${JSON.stringify(name)}: ${JSON.stringify(hashes[name])},`);
+    .map((name) => `      ${JSON.stringify(name)}: ${JSON.stringify(hashes[name])},`);
   return (
     '[opentel-mcp] toolIntegrity: current tool definition hashes. To pin them, pass:\n' +
     '  toolIntegrity: {\n' +
