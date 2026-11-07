@@ -46,7 +46,7 @@ over the UTF-8 bytes of a canonical JSON serialization of an object containing,
 `outputSchema`, `annotations`. Canonical form: every object's keys sorted
 (UTF-16 code-unit order, i.e. `Array.prototype.sort()` default) at every depth,
 array order preserved, `JSON.stringify` with no whitespace. `undefined`-valued
-keys are omitted; no Unicode normalization (a homoglyph or normalization-form
+keys are omitted; the canonical text is built directly (not by copying into a new object), so a key named `__proto__` is hashed like any other; no Unicode normalization (a homoglyph or normalization-form
 change is a real change and must change the hash).
 
 Anything not in the list (`_meta`, `icons`, `execution`, vendor keys) is not
@@ -107,7 +107,7 @@ observation that newly reports `changed` and/or `pin_mismatch` (one increment
 even if both fire). Not incremented for added/removed. Gated on `enableMetrics`
 like the other emitters.
 
-Events never carry description or schema text; hashes only.
+Events never carry description or schema text; hashes only. They are added to the `tools/list` span the wrapper holds, not to whatever span is active, so they appear even where the host registered no context manager.
 
 ### 5. Getting hashes to pin
 

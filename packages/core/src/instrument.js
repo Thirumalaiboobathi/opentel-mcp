@@ -37,6 +37,8 @@ import { applyUnactionableAttributes } from './unactionable.js';
 import { applyStaleness, createStalenessState } from './staleness.js';
 import { markSensitive, recordSensitiveAudit } from './sensitive-tools.js';
 import { applySecretLeak } from './secret-leak.js';
+import { ToolIntegrityTracker } from './tool-integrity/tracker.js';
+import { createToolIntegrityEmitter, formatPinsSnippet } from './tool-integrity/emitter.js';
 import {
   ATTR_MCP_METHOD_NAME,
   ATTR_GEN_AI_PROMPT_NAME,
@@ -591,6 +593,22 @@ export function instrumentMcpServer(input, options) {
     : null;
   const schemaDriftEmitter =
     resolved.schemaDrift.enabled && resolved.enableMetrics ? createSchemaDriftEmitter(PACKAGE_VERSION) : null;
+  // ADR 029 (v0.18.0): tool definition integrity rides on the same tools/list observation, but is independent of
+  // schema drift: with schemaDrift disabled and toolIntegrity enabled, tools/list is still wrapped.
+  const toolIntegrity = resolved.toolIntegrity.enabled
+    ? {
+        tracker: getOrCreateTracker(
+          resolved.instanceKey,
+          'tool-integrity',
+          () => new ToolIntegrityTracker(resolved.toolIntegrity.pins),
+        ),
+        emitter: createToolIntegrityEmitter(PACKAGE_VERSION, resolved.enableMetrics),
+        // Dev mode only: print the current hashes once, as a copy-pasteable pins snippet.
+        printPins: resolved.setupNodeSdk,
+      }
+    : null;
+  server.getToolIntegrityHashes = () => (toolIntegrity ? toolIntegrity.tracker.getHashes() : {});
+  if (outer) outer.getToolIntegrityHashes = server.getToolIntegrityHashes;
 
   // v0.18.0 (ADRs 030, 032): resolved once; all off unless configured.
   const securityOptions = { sensitive: resolved.sensitiveTools, secretLeak: resolved.secretLeakDetection };
@@ -633,7 +651,7 @@ export function instrumentMcpServer(input, options) {
           stalenessState,
           securityOptions,
         );
-      } else if (schema === v1.ListToolsRequestSchema && schemaDriftDetector) {
+      } else if (schema === v1.ListToolsRequestSchema && (schemaDriftDetector || toolIntegrity)) {
         handler = wrapToolsListHandler(
           handler,
           tracer,
@@ -643,6 +661,7 @@ export function instrumentMcpServer(input, options) {
           kind,
           resolved.errorRecording,
           errorRecordingState,
+          toolIntegrity,
         );
       } else if (coveredMethods.size > 0) {
         const method = v1CoveredMethodForSchema(v1, schema);
@@ -696,7 +715,7 @@ export function instrumentMcpServer(input, options) {
           stalenessState,
           securityOptions,
         );
-      } else if (maybeHandler === undefined && method === TOOLS_LIST_METHOD && schemaDriftDetector) {
+      } else if (maybeHandler === undefined && method === TOOLS_LIST_METHOD && (schemaDriftDetector || toolIntegrity)) {
         handlerOrSchemas = wrapToolsListHandler(
           handlerOrSchemas,
           tracer,
@@ -706,6 +725,7 @@ export function instrumentMcpServer(input, options) {
           kind,
           resolved.errorRecording,
           errorRecordingState,
+          toolIntegrity,
         );
       }
       if (maybeHandler === undefined && coveredMethods.has(method)) {
@@ -931,7 +951,7 @@ function assertInstrumentFirst(server, resolved) {
   }
   try {
     server.assertCanSetRequestHandler(TOOLS_CALL_METHOD);
-    if (resolved.schemaDrift.enabled) {
+    if (resolved.schemaDrift.enabled || resolved.toolIntegrity.enabled) {
       server.assertCanSetRequestHandler(TOOLS_LIST_METHOD);
     }
   } catch {
@@ -2304,6 +2324,7 @@ function wrapToolsListHandler(
   kind,
   errorRecordingConfig,
   errorRecordingState,
+  toolIntegrity,
 ) {
   return (request, extra) => {
     return tracer.startActiveSpan(TOOLS_LIST_METHOD, { kind: SpanKind.SERVER }, async (span) => {
@@ -2318,10 +2339,12 @@ function wrapToolsListHandler(
 
         try {
           const tools = Array.isArray(result?.tools) ? result.tools : [];
-          for (const tool of tools) {
-            const event = schemaDriftDetector.capture(schemaDriftScope, tool);
-            if (event) {
-              schemaDriftEmitter?.emit(event);
+          if (schemaDriftDetector) {
+            for (const tool of tools) {
+              const event = schemaDriftDetector.capture(schemaDriftScope, tool);
+              if (event) {
+                schemaDriftEmitter?.emit(event);
+              }
             }
           }
         } catch (err) {
@@ -2329,6 +2352,20 @@ function wrapToolsListHandler(
             'opentel-mcp: schema drift capture failed, skipping mcp.tool.schema_drift.* telemetry for this tools/list call',
             err,
           );
+        }
+
+        // ADR 029: tool definition integrity, in its own guard so neither feature can affect the other or the response.
+        if (toolIntegrity) {
+          try {
+            const complete = request?.params?.cursor === undefined && !result?.nextCursor;
+            const observation = toolIntegrity.tracker.observe(result?.tools, complete);
+            toolIntegrity.emitter.emit(observation, span);
+            if (toolIntegrity.printPins && observation.firstSnapshot) {
+              process.stderr.write(formatPinsSnippet(observation.firstSnapshot));
+            }
+          } catch (err) {
+            diag.debug('opentel-mcp: tool integrity check failed, skipping mcp.tool.integrity.* telemetry for this tools/list call', err);
+          }
         }
 
         span.setStatus({ code: SpanStatusCode.OK });

@@ -146,6 +146,26 @@ export interface InstrumentOptions {
   };
 
   /**
+   * ADR 029 (0.18.0), opt-in: tool definition integrity ("rug pull" detection). Every tool definition seen in
+   * `tools/list` (name, title, description, inputSchema, outputSchema, annotations) is hashed with
+   * {@link computeToolDefinitionHash}. Span events on the `tools/list` span report: `mcp.tool.integrity.changed`
+   * (differs from the first hash seen in this process), `.pin_mismatch` (differs from `pins[name]`; high severity),
+   * `.added` and `.removed` (tool set changed). Events are edge-triggered: once per distinct new state. The
+   * counter `mcp.tool.integrity_violations` (label: tool name only) counts changes and pin mismatches. Events carry
+   * the tool name and hashes, never definition text. Works with `schemaDrift` disabled. This detects changes; it
+   * does not block them, and the first hash seen is trusted unless pinned.
+   *
+   * `pins` maps a tool name to the expected `sha256:<64 hex>`; invalid entries are skipped with one `diag.warn`.
+   * Get the values from `server.getToolIntegrityHashes()` or, with `setupNodeSdk: true`, the snippet printed once
+   * to stderr.
+   */
+  toolIntegrity?: {
+    /** @default false */
+    enabled?: boolean;
+    pins?: Record<string, string>;
+  };
+
+  /**
    * ADR 030 (0.18.0), opt-in: look for credential-shaped strings in the `text` items of tool results, successful
    * and `isError` alike, using the same detectors that scrub error text. When something is found the span gets
    * `mcp.tool.secret_leak.detected` (true), `.types` (a sorted list from a closed set: `url_credentials`, `jwt`,
@@ -510,6 +530,11 @@ export function instrumentMcpServer<T extends DuckTypedServer | DuckTypedMcpServ
    */
   shutdown?: () => Promise<void>;
   getThrashSummary?: (options?: { topOffendersLimit?: number }) => ThrashSummary;
+  /**
+   * ADR 029 (0.18.0): the current `{ toolName: "sha256:..." }` map from the latest `tools/list` observations; `{}` when
+   * `toolIntegrity` is off or nothing has been listed yet. Use it to produce `toolIntegrity.pins`.
+   */
+  getToolIntegrityHashes?: () => Record<string, string>;
   getObservationState?: () => ObservationState;
 };
 
@@ -654,3 +679,12 @@ export type FreshnessMeta =
 
 /** `mcp.tool.freshness.verdict`. */
 export type FreshnessVerdict = 'fresh' | 'stale' | 'unknown';
+
+/**
+ * ADR 029 (0.18.0): `"sha256:" + <64 lowercase hex>` over the canonical JSON (keys sorted at every depth, no
+ * whitespace, UTF-8) of the definition's `name`, `title`, `description`, `inputSchema`, `outputSchema` and
+ * `annotations` (those present). The same definition gives the same hash on every platform. Use it to compute
+ * `toolIntegrity.pins` values. Returns `null` (never throws) for something that is not a hashable object
+ * (cyclic, BigInt, not an object).
+ */
+export function computeToolDefinitionHash(definition: unknown): string | null;

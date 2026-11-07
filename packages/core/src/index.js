@@ -9,3 +9,4 @@ export { defaultExtractor } from './cost/extractor.js';
 export { calculateCost } from './cost/calculator.js';
 
 export { FRESHNESS_META_KEY } from './staleness.js';
+export { computeToolDefinitionHash } from './tool-integrity/hash.js';

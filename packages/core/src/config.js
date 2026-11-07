@@ -15,6 +15,7 @@ import { resolveUnactionableErrorsConfig } from './unactionable.js';
 import { resolveStalenessConfig } from './staleness.js';
 import { compileSensitiveTools } from './sensitive-tools.js';
 import { resolveSecretLeakConfig } from './secret-leak.js';
+import { resolveToolIntegrityConfig } from './tool-integrity/config.js';
 
 /**
  * @typedef {object} CostTrackingOptions
@@ -121,6 +122,12 @@ import { resolveSecretLeakConfig } from './secret-leak.js';
  *   (default 10) characters of text with no image/audio/resource item. `{ enabled: true, minTextLength: 10 }`
  *   by default; independent of `fingerprinting`. Span-only: never a metric label. Also settable via
  *   `OTEL_MCP_UNACTIONABLE_ERRORS_ENABLED` / `OTEL_MCP_UNACTIONABLE_ERRORS_MIN_TEXT_LENGTH` (lower precedence).
+ * @property {{ enabled?: boolean, pins?: Record<string, string> }} [toolIntegrity] - ADR 029
+ *   (docs/adr/029-tool-definition-integrity.md), opt-in (`enabled: false` by default): hash each tool definition (name,
+ *   title, description, inputSchema, outputSchema, annotations) seen in `tools/list` and report changes since first
+ *   seen (`mcp.tool.integrity.changed`), added/removed tools, and mismatches with `pins` (tool name -> `sha256:<hex>`,
+ *   `mcp.tool.integrity.pin_mismatch`, high severity) as span events, plus the `mcp.tool.integrity_violations`
+ *   counter. Hashes only, never definition text. Detection, not enforcement. Independent of `schemaDrift`.
  * @property {{ enabled?: boolean, maxScanBytes?: number }} [secretLeakDetection] - ADR 030 (docs/adr/030-secret-leak-detection.md),
  *   opt-in (`enabled: false` by default): scan the `text` items of tool results (successful and `isError`) for
  *   credential-shaped strings, using the same detectors that scrub error text. Span attributes
@@ -371,5 +378,6 @@ export function resolveOptions(options) {
     staleness: resolveStalenessConfig(opts.staleness),
     sensitiveTools: compileSensitiveTools(opts.sensitiveTools),
     secretLeakDetection: resolveSecretLeakConfig(opts.secretLeakDetection),
+    toolIntegrity: resolveToolIntegrityConfig(opts.toolIntegrity),
   };
 }
