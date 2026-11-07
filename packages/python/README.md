@@ -227,6 +227,13 @@ trace-context extraction, never-throw, dev mode (stderr exporters, OTLP/JSON to 
 thrash detection (0.5), schema drift (0.6), resources and prompts coverage (0.7), cost attribution (0.8). The
 standalone [`fastmcp`](https://gofastmcp.com) package is not supported yet.
 
+## Security and privacy
+
+Designed to record only derived signals (counts, lengths, hashes), never tool arguments or result content, and to send
+nothing to the maintainer. Thrown-error text is credential-scrubbed by default and can be reduced further with `error_recording`.
+See the [security documentation](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/docs/security/README.md) (threat model, data handling, release verification) and
+the [security policy](https://github.com/Thirumalaiboobathi/opentel-mcp/blob/main/SECURITY.md) for how to report a vulnerability.
+
 ## License
 
 MIT

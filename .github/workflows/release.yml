@@ -1,0 +1,457 @@
+# Release workflow: npm (opentel-mcp, opentel-mcp-ui) and PyPI (opentel-mcp) via trusted publishing (OIDC),
+# with provenance / attestations, CycloneDX SBOMs, and GitHub releases.
+#
+# One file (not one per ecosystem) on purpose: npm and PyPI each register ONE workflow filename per package as
+# the trusted publisher, and workflow_dispatch "all" needs to order core before ui. Per-package jobs keep the
+# blast radius small: each publish job is separate, and only publish jobs get id-token: write.
+#
+# Primary sources checked 2026-11-07 (re-check before changing versions below):
+#   npm trusted publishing  https://docs.npmjs.com/trusted-publishers
+#       needs npm CLI >= 11.5.1 and Node >= 22.14.0; id-token: write; provenance is automatic for public
+#       packages published from a public repo via GitHub-hosted runners; the trusted publisher on npmjs.com is
+#       configured with owner, repo, workflow FILENAME (release.yml) and optional environment (release).
+#   npm provenance          https://docs.npmjs.com/generating-provenance-statements
+#   npm sbom                https://docs.npmjs.com/cli/v11/commands/npm-sbom
+#   PyPI publish action     https://github.com/pypa/gh-action-pypi-publish
+#       attestations (PEP 740) are on by default with Trusted Publishing; set explicitly below.
+#   PyPI trusted publishers https://docs.pypi.org/trusted-publishers/
+#   uv export CycloneDX     https://docs.astral.sh/uv/concepts/projects/export/ (preview feature in uv)
+#   GitHub attestations     https://github.com/actions/attest (SBOM attestation via sbom-path;
+#                           replaces the deprecated-in-favour-of-it actions/attest-sbom)
+# Operator setup: docs/security/releasing.md
+#
+# Design: every package is built and fully tested in a "build" job that has NO publish credentials, which
+# uploads the exact tarball / wheel it tested. The "publish" job (id-token: write, environment: release) only
+# downloads that artifact and publishes it - no dependency installs or repo scripts run with the OIDC token.
+name: Release
+
+on:
+  push:
+    tags:
+      - "core-v*"
+      - "ui-v*"
+      - "python-v*"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Which package to release (the version in its package.json / pyproject.toml is used)"
+        required: true
+        type: choice
+        options: [core, ui, python, all]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------------------------------------
+  # plan: decide which packages this run releases. No secrets, no checkout.
+  # ---------------------------------------------------------------------------------------------------------
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.plan.outputs.core }}
+      ui: ${{ steps.plan.outputs.ui }}
+      python: ${{ steps.plan.outputs.python }}
+    steps:
+      - name: Decide targets
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_PACKAGE: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+          core=false; ui=false; python=false
+          if [ "$EVENT_NAME" = "push" ]; then
+            case "$REF_NAME" in
+              core-v*)   core=true ;;
+              ui-v*)     ui=true ;;
+              python-v*) python=true ;;
+              *) echo "::error::Unexpected tag '$REF_NAME'"; exit 1 ;;
+            esac
+          else
+            # Manual releases come from main only; the 'release' environment adds a human approval on top.
+            if [ "$REF" != "refs/heads/main" ]; then
+              echo "::error::workflow_dispatch releases must run from main (got '$REF')"; exit 1
+            fi
+            case "$INPUT_PACKAGE" in
+              core)   core=true ;;
+              ui)     ui=true ;;
+              python) python=true ;;
+              all)    core=true; ui=true; python=true ;;
+              *) echo "::error::Unknown package '$INPUT_PACKAGE'"; exit 1 ;;
+            esac
+          fi
+          {
+            echo "core=$core"
+            echo "ui=$ui"
+            echo "python=$python"
+          } >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------------------------------------
+  # npm: core
+  # ---------------------------------------------------------------------------------------------------------
+  build-core:
+    needs: plan
+    if: needs.plan.outputs.core == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      publish: ${{ steps.meta.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.14.0"
+          package-manager-cache: false
+
+      - name: Resolve version, check tag, check registry
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          PKG_DIR: packages/core
+          TAG_PREFIX: core-v
+        run: .github/scripts/npm-meta.sh
+
+      - name: Install dependencies
+        if: steps.meta.outputs.publish == 'true'
+        run: npm ci
+
+      - name: Test, typecheck, build
+        if: steps.meta.outputs.publish == 'true'
+        run: |
+          npm run test --workspace=packages/core
+          npm run typecheck --workspace=packages/core
+          npm run build --workspace=packages/core
+
+      - name: Pack, verify tarball, generate SBOM
+        if: steps.meta.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          npm run verify:tarball --workspace=packages/core
+          mkdir -p out
+          npm pack --workspace=packages/core --pack-destination out
+          .github/scripts/npm-sbom.sh out/opentel-mcp-*.tgz out/opentel-mcp.cdx.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.meta.outputs.publish == 'true'
+        with:
+          name: dist-core
+          path: out/
+          if-no-files-found: error
+
+  publish-core:
+    needs: [plan, build-core]
+    if: needs.build-core.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC) + provenance + attestations
+      attestations: write # store build attestations
+      artifact-metadata: write # artifact storage record for attestations
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-core
+          path: out
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.14.0"
+          package-manager-cache: false
+          registry-url: "https://registry.npmjs.org"
+
+      # Node 22.14 bundles npm 10.x; trusted publishing needs npm >= 11.5.1. Pinned exact version.
+      - name: Install npm CLI with trusted-publishing support
+        run: npm install --global npm@11.21.2 && npm --version # zizmor: ignore[adhoc-packages] exact-pinned npm CLI; trusted publishing needs >= 11.5.1 and Node 22.14 bundles 10.x
+
+      - name: Publish (provenance is generated automatically by npm for trusted publishing)
+        id: publish
+        run: |
+          set -euo pipefail
+          npm publish out/opentel-mcp-*.tgz --access public --provenance
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: out/opentel-mcp-*.tgz
+          sbom-path: out/opentel-mcp.cdx.json
+
+  # ---------------------------------------------------------------------------------------------------------
+  # npm: ui (after core, when both are released)
+  # ---------------------------------------------------------------------------------------------------------
+  build-ui:
+    needs: plan
+    if: needs.plan.outputs.ui == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      publish: ${{ steps.meta.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.14.0"
+          package-manager-cache: false
+
+      - name: Resolve version, check tag, check registry
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          PKG_DIR: packages/ui
+          TAG_PREFIX: ui-v
+        run: .github/scripts/npm-meta.sh
+
+      - name: Install dependencies
+        if: steps.meta.outputs.publish == 'true'
+        run: npm ci
+
+      - name: Test, typecheck, build
+        if: steps.meta.outputs.publish == 'true'
+        run: |
+          npm run test --workspace=packages/ui
+          npm run typecheck --workspace=packages/ui
+          npm run build --workspace=packages/ui
+
+      - name: Pack, verify tarball, generate SBOM
+        if: steps.meta.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          npm run verify:tarball --workspace=packages/ui
+          mkdir -p out
+          npm pack --workspace=packages/ui --pack-destination out
+          .github/scripts/npm-sbom.sh out/opentel-mcp-ui-*.tgz out/opentel-mcp-ui.cdx.json
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.meta.outputs.publish == 'true'
+        with:
+          name: dist-ui
+          path: out/
+          if-no-files-found: error
+
+  publish-ui:
+    needs: [plan, build-ui, publish-core]
+    # publish-core is skipped when core isn't part of this run; it must not have failed or been cancelled.
+    if: >-
+      always() &&
+      needs.build-ui.outputs.publish == 'true' &&
+      (needs.publish-core.result == 'success' || needs.publish-core.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write # store build attestations
+      artifact-metadata: write # artifact storage record for attestations
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-ui
+          path: out
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.14.0"
+          package-manager-cache: false
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install npm CLI with trusted-publishing support
+        run: npm install --global npm@11.21.2 && npm --version # zizmor: ignore[adhoc-packages] exact-pinned npm CLI; trusted publishing needs >= 11.5.1 and Node 22.14 bundles 10.x
+
+      - name: Publish
+        id: publish
+        run: |
+          set -euo pipefail
+          npm publish out/opentel-mcp-ui-*.tgz --access public --provenance
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: out/opentel-mcp-ui-*.tgz
+          sbom-path: out/opentel-mcp-ui.cdx.json
+
+  # ---------------------------------------------------------------------------------------------------------
+  # PyPI: python
+  # ---------------------------------------------------------------------------------------------------------
+  build-python:
+    needs: plan
+    if: needs.plan.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      publish: ${{ steps.meta.outputs.publish }}
+    defaults:
+      run:
+        working-directory: packages/python
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Resolve version, check tag, check PyPI
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" != "python-v$version" ]; then
+            echo "::error::Tag '$REF_NAME' does not match pyproject.toml version '$version' (expected python-v$version)"
+            exit 1
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/opentel-mcp/$version/json")
+          case "$code" in
+            200) echo "::notice::opentel-mcp $version is already on PyPI - skipping publish"; publish=false ;;
+            404) publish=true ;;
+            *) echo "::error::Unexpected HTTP $code from PyPI"; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies (uv.lock)
+        if: steps.meta.outputs.publish == 'true'
+        run: uv sync --locked --group test
+
+      # Full Python suite, matching the python CI job (the e2e test skips itself without the Node dashboard build).
+      - name: Lint, type check, test
+        if: steps.meta.outputs.publish == 'true'
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
+          uv run --no-sync mypy
+          uv run --no-sync pytest --tb=short
+
+      - name: Build, twine check, generate SBOM
+        if: steps.meta.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          uv build
+          uvx twine@7.0.0 check --strict dist/*
+          # CycloneDX export of the locked production dependencies (preview feature in uv).
+          uv export --format cyclonedx1.5 --no-dev --frozen --preview --output-file dist-sbom.cdx.json
+          mkdir -p ../../out
+          cp dist/* ../../out/
+          cp dist-sbom.cdx.json ../../out/opentel-mcp-python.cdx.json
+
+      # Only dist/ goes to the publish action, SBOM and wheel/sdist are separate paths in the same artifact.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.meta.outputs.publish == 'true'
+        with:
+          name: dist-python
+          path: out/
+          if-no-files-found: error
+
+  publish-python:
+    needs: [plan, build-python]
+    if: needs.build-python.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://pypi.org/p/opentel-mcp
+    permissions:
+      contents: read
+      id-token: write # PyPI trusted publishing + PEP 740 attestations
+      attestations: write # store build attestations
+      artifact-metadata: write # artifact storage record for attestations
+    outputs:
+      published: ${{ steps.done.outputs.published }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-python
+          path: out
+
+      # The publish action uploads everything in packages-dir, so stage only the wheel and sdist.
+      - name: Stage distributions
+        run: |
+          mkdir -p dist
+          cp out/*.whl out/*.tar.gz dist/
+
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist/
+          attestations: true # PEP 740; default with trusted publishing, set explicitly
+
+      - id: done
+        run: echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*.whl
+          sbom-path: out/opentel-mcp-python.cdx.json
+
+  # ---------------------------------------------------------------------------------------------------------
+  # GitHub release (tag + notes + SBOMs + the published artifacts) for what was actually published this run.
+  # ---------------------------------------------------------------------------------------------------------
+  github-release:
+    needs:
+      - build-core
+      - build-ui
+      - build-python
+      - publish-core
+      - publish-ui
+      - publish-python
+    if: >-
+      always() && !cancelled() && (
+        needs.publish-core.outputs.published == 'true' ||
+        needs.publish-ui.outputs.published == 'true' ||
+        needs.publish-python.outputs.published == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the tag and release; the only job with write access to the repo
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TARGET_SHA: ${{ github.sha }}
+      CORE_PUBLISHED: ${{ needs.publish-core.outputs.published }}
+      UI_PUBLISHED: ${{ needs.publish-ui.outputs.published }}
+      PY_PUBLISHED: ${{ needs.publish-python.outputs.published }}
+      CORE_VERSION: ${{ needs.build-core.outputs.version }}
+      UI_VERSION: ${{ needs.build-ui.outputs.version }}
+      PY_VERSION: ${{ needs.build-python.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+          merge-multiple: false
+
+      - name: Create releases
+        run: |
+          set -euo pipefail
+          release() { # <published> <tag> <title> <files...>
+            local published=$1 tag=$2 title=$3; shift 3
+            [ "$published" = "true" ] || return 0
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "$@" --clobber
+            else
+              gh release create "$tag" "$@" --target "$TARGET_SHA" --title "$title" --generate-notes
+            fi
+          }
+          release "$CORE_PUBLISHED" "core-v$CORE_VERSION" "opentel-mcp $CORE_VERSION (npm)" artifacts/dist-core/*
+          release "$UI_PUBLISHED"   "ui-v$UI_VERSION"     "opentel-mcp-ui $UI_VERSION (npm)" artifacts/dist-ui/*
+          release "$PY_PUBLISHED"   "python-v$PY_VERSION"  "opentel-mcp $PY_VERSION (PyPI)" artifacts/dist-python/*

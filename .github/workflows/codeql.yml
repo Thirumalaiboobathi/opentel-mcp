@@ -1,0 +1,44 @@
+# CodeQL code scanning: JavaScript/TypeScript, Python, and GitHub Actions workflows.
+# Sources (checked 2026-11-07):
+#   https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/customizing-your-advanced-setup-for-code-scanning
+#   https://github.com/github/codeql-action  (languages: javascript-typescript, python, actions; build-mode none)
+# Results appear under Security > Code scanning. Requires code scanning to be available for the repo
+# (free for public repositories).
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1" # weekly, Monday 04:17 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload SARIF results
+      actions: read # read workflow run metadata (used by the analysis action)
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, python, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: "/language:${{ matrix.language }}"

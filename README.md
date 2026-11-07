@@ -14,6 +14,21 @@ The two implementations are held to one contract by a shared, language-neutral
 Runnable usage examples live under [`examples/`](examples/), and design docs
 (including all ADRs) live under [`docs/`](docs/).
 
+## Security
+
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Thirumalaiboobathi/opentel-mcp/badge)](https://scorecard.dev/viewer/?uri=github.com/Thirumalaiboobathi/opentel-mcp)
+[![CodeQL](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/codeql.yml/badge.svg)](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/codeql.yml)
+[![CI](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Thirumalaiboobathi/opentel-mcp/actions/workflows/ci.yml)
+
+The instrumentation is designed to record only derived signals, never tool arguments or result content, and sends
+nothing to the maintainer. Releases published by the [release workflow](.github/workflows/release.yml) carry npm
+provenance / PyPI attestations and a CycloneDX SBOM (check with `npm audit signatures`).
+
+- [Security documentation](docs/security/README.md): [threat model](docs/security/threat-model.md),
+  [data handling](docs/security/data-handling.md), [vendor FAQ](docs/security/security-faq.md),
+  [release and verification process](docs/security/releasing.md)
+- [Security policy and how to report a vulnerability](SECURITY.md)
+
 ## Dev setup
 
 ```bash

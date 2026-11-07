@@ -1,33 +1,55 @@
 # Security policy
 
+Reviewing `opentel-mcp` for use in your organisation? Start at [`docs/security/`](docs/security/README.md): threat
+model, data handling, a vendor-questionnaire FAQ and the release process.
+
 ## Reporting a vulnerability
 
-Please report security issues privately, not in a public issue or pull
-request.
+Please report security issues privately, not in a public issue or pull request.
 
-Use GitHub's private vulnerability reporting: open the repository's
-**Security** tab and choose **Report a vulnerability**
-(<https://github.com/Thirumalaiboobathi/opentel-mcp/security/advisories/new>).
-Only the maintainer can see the report.
+Use GitHub's private vulnerability reporting: open the repository's **Security** tab and choose **Report a
+vulnerability** (<https://github.com/Thirumalaiboobathi/opentel-mcp/security/advisories/new>). Only the maintainer can
+see the report.
 
 Include what you can of:
 
-- the package and version (`opentel-mcp` or `opentel-mcp-ui`),
+- the package and version (`opentel-mcp` on npm or PyPI, or `opentel-mcp-ui`),
 - what an attacker can do, and what they need to already have,
 - steps or a small script to reproduce it.
 
-Reports are handled on a best-effort basis by the maintainer. Once a fix is
-released, the advisory is published with credit to you, unless you'd rather
-not be named.
+### What to expect
+
+This is a single-maintainer project. These are **goals, not guarantees or service-level commitments**:
+
+- acknowledge a report within **5 business days**,
+- give an initial assessment (accepted, needs more information, or declined, with reasons) within **14 days**,
+- aim to ship a fix for a confirmed high-severity issue within **30 days**, and to coordinate disclosure timing with
+  you; lower-severity issues are fixed on a best-effort basis.
+
+If a goal is missed, a polite follow-up on the advisory is welcome.
+
+### How fixes are released
+
+A confirmed issue is fixed in a patch release of the affected package(s) and announced with a published GitHub Security
+Advisory (with a CVE where applicable), crediting you unless you'd rather not be named. Release notes and the package
+`CHANGELOG.md` link to the advisory. Releases follow [`docs/security/releasing.md`](docs/security/releasing.md).
 
 ## Supported versions
 
-Both packages are pre-1.0. Fixes go into the latest minor release only.
+Both npm packages and the Python package are pre-1.0. **Policy: the latest minor release of each package receives
+security fixes; older minors do not.** Upgrade to the latest minor to receive a fix.
 
 | Package | Supported |
 | --- | --- |
-| `opentel-mcp` | 0.17.x |
-| `opentel-mcp-ui` | 0.3.x |
+| `opentel-mcp` (npm) | 0.17.x |
+| `opentel-mcp-ui` (npm) | 0.3.x |
+| `opentel-mcp` (PyPI) | 0.1.x |
+
+## Scope
+
+In scope: the code in this repository and the packages published from it. Out of scope: vulnerabilities in the MCP SDKs
+or OpenTelemetry packages (report those upstream), the security of your MCP server or telemetry backend, and the items
+listed under "Out of scope" in the [threat model](docs/security/threat-model.md#out-of-scope).
 
 ## What the library captures, and what it doesn't
 
@@ -63,8 +85,8 @@ metrics. Where that telemetry goes is up to your OpenTelemetry setup.
 
 Tests with canary strings in every input check that none of the
 "never recorded" content reaches spans, metrics or diagnostic logs.
-Details: [`packages/core/README.md`](packages/core/README.md), section
-"What this library records".
+Details: [`docs/security/data-handling.md`](docs/security/data-handling.md) and
+[`packages/core/README.md`](packages/core/README.md).
 
 ## The local dashboard (`opentel-mcp-ui`)
 
@@ -80,3 +102,5 @@ from your own machine:
 - The OTLP endpoint accepts JSON only, up to 8 MiB per request.
 - The page is served with a strict Content-Security-Policy, and span data
   is always rendered as text.
+
+See the [threat model](docs/security/threat-model.md) for the test that covers each of these.
