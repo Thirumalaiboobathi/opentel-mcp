@@ -386,27 +386,29 @@ def test_match_count_is_capped() -> None:
     assert out is not None and out.count == 1000
 
 
+# Explicit ids: a pytest node id is exported in PYTEST_CURRENT_TEST, and Windows caps an environment variable
+# value at 32,767 characters, so the (huge) input text must never become part of the id.
 @pytest.mark.parametrize(
     "text",
     [
-        "a" * 65536,
-        "a://" + "b:" * 32000,
-        "scheme://" + "u" * 65000,
-        "x://" + "a:" * 20000 + "b" * 20000,
-        "eyJ" + "a" * 65000,
-        "eyJaaaaaa.eyJaaaaaa." + "a" * 64000,
-        "sk-" + "a" * 65000,
-        "Bearer " + "a" * 65000,
-        "Bearer " + "a" * 15 + " " + ("Bearer " + "a" * 15 + " ") * 3000,
-        "password=" * 7000,
-        "password:" + "a" * 64000,
-        "token : " * 8000,
-        ("api_key" + " " * 40) * 1500,
-        "A" * 65000 + "KIA",
-        ("ab" * 40 + ":") * 800 + "//",
-        "\U0001f680" * 32000,
-        "http://" + "\u00e9" * 60000,
-        ("." * 255 + ":") * 250,
+        pytest.param("a" * 65536, id="plain-a"),
+        pytest.param("a://" + "b:" * 32000, id="url-colon-pairs"),
+        pytest.param("scheme://" + "u" * 65000, id="scheme-long-user"),
+        pytest.param("x://" + "a:" * 20000 + "b" * 20000, id="scheme-colon-pairs-then-b"),
+        pytest.param("eyJ" + "a" * 65000, id="jwt-prefix-only"),
+        pytest.param("eyJaaaaaa.eyJaaaaaa." + "a" * 64000, id="jwt-two-segments-long-tail"),
+        pytest.param("sk-" + "a" * 65000, id="provider-key-long"),
+        pytest.param("Bearer " + "a" * 65000, id="bearer-long"),
+        pytest.param("Bearer " + "a" * 15 + " " + ("Bearer " + "a" * 15 + " ") * 3000, id="bearer-repeated"),
+        pytest.param("password=" * 7000, id="assignment-repeated"),
+        pytest.param("password:" + "a" * 64000, id="assignment-colon-long"),
+        pytest.param("token : " * 8000, id="spaced-colon-repeated"),
+        pytest.param(("api_key" + " " * 40) * 1500, id="key-name-then-spaces"),
+        pytest.param("A" * 65000 + "KIA", id="aws-prefix-near-miss"),
+        pytest.param(("ab" * 40 + ":") * 800 + "//", id="dotted-colon-slash"),
+        pytest.param("\U0001f680" * 32000, id="astral-only"),
+        pytest.param("http://" + "\u00e9" * 60000, id="url-userinfo-latin1"),
+        pytest.param(("." * 255 + ":") * 250, id="dots-and-colons"),
     ],
 )
 def test_pathological_inputs_stay_fast_at_the_cap(text: str) -> None:
