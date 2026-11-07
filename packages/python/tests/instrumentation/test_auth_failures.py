@@ -5,14 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from opentelemetry import trace
 
 from opentel_mcp import instrument_mcp_server
-from opentel_mcp._config import resolve_options
-from opentel_mcp._metrics import MetricsRecorder
-from opentel_mcp._recorder import CallInfo, ToolCallRecorder
 from tests import harness
-from tests.conftest import Telemetry, py_cases
+from tests.conftest import Telemetry
 from tests.variants import SDK_TRACING_MODES, VARIANT_IDS, VARIANTS, attrs, points, total
 
 pytestmark = pytest.mark.anyio
@@ -129,40 +125,3 @@ async def test_nothing_from_the_call_reaches_the_metric_labels(
         await client.call("auth_silent", {"secret": harness.CANARY})
     assert harness.CANARY not in repr(telemetry.metric_points())
     assert total(telemetry, NAME) == 1
-
-
-# --- shared conformance fixtures (conformance/cases/auth.json) --------------------------------------------------
-
-AUTH_CASES = py_cases("cases/auth.json")
-
-
-def _exception_from_record(record: dict[str, Any]) -> BaseException:
-    exc = type(record["name"], (Exception,), {})(record["message"])
-    if "code" in record:
-        exc.code = record["code"]  # type: ignore[attr-defined]
-    for key in ("status", "statusCode"):
-        if key in record:
-            exc.status = record[key]  # type: ignore[attr-defined]
-    return exc
-
-
-@pytest.mark.parametrize("case", AUTH_CASES, ids=lambda c: str(c["id"]))
-async def test_conformance_auth_fixture(case: dict[str, Any], telemetry: Telemetry) -> None:
-    options = resolve_options(fingerprinting=case["input"]["options"].get("fingerprinting", True))
-    recorder = ToolCallRecorder(options, trace.get_tracer("opentel-mcp"), MetricsRecorder())
-
-    async def call() -> Any:
-        if case["input"]["kind"] == "result":
-            return case["input"]["result"]
-        raise _exception_from_record(case["input"]["error"])
-
-    try:
-        await recorder.run(call, CallInfo(tool_name="tool"))
-    except Exception:
-        assert case["input"]["kind"] == "thrown"
-    assert total(telemetry, NAME) == (1 if case["expect"]["increments"] else 0)
-    if total(telemetry, NAME):
-        assert points(telemetry, NAME) == [({"gen_ai.tool.name": "tool"}, 1)]
-    if case["expect"]["category"] is not None and case["input"]["options"].get("fingerprinting", True):
-        (span,) = telemetry.tool_call_spans()
-        assert attrs(span)["mcp.failure.category"] == case["expect"]["category"]

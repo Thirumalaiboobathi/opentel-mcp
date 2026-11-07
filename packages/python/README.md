@@ -213,7 +213,8 @@ The dashboard's **Security** panel (`npx opentel-mcp-ui`) draws all four from th
 
 Start the dashboard in one terminal (`npx opentel-mcp-ui`, it listens on http://localhost:4319), then run this in another.
 It needs `pip install "opentel-mcp[dev]" mcp` and works on mcp 1.x and 2.x. The key-shaped string is assembled at run
-time on purpose, so no credential-looking text sits in your source.
+time on purpose, so no credential-looking text sits in your source. Dev mode also prints every span and metric to
+stderr, so expect a lot of JSON in that terminal.
 
 ```python
 import anyio

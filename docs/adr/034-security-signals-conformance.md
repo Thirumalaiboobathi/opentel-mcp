@@ -1,6 +1,6 @@
 # ADR 034: Conformance status of the v0.18 security signals
 
-**Status:** Accepted (core 0.18.0, Python unchanged at 0.1.0).
+**Status:** Accepted (core 0.18.0, Python unchanged at 0.1.0). Amended for the contract version and for Python 0.2.0 (last two sections).
 
 ## Context
 

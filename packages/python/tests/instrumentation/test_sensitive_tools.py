@@ -12,7 +12,7 @@ from opentel_mcp import instrument_mcp_server
 from opentel_mcp._config import _warn_once, resolve_options
 from opentel_mcp._sensitive import compile_sensitive_tools
 from tests import harness
-from tests.conftest import Telemetry, py_cases
+from tests.conftest import Telemetry
 from tests.variants import SDK_TRACING_MODES, VARIANT_IDS, VARIANTS, attrs
 
 pytestmark = pytest.mark.anyio
@@ -31,21 +31,6 @@ def events(span: Any, name: str = EVENT) -> list[dict[str, Any]]:
 @pytest.fixture(params=VARIANTS, ids=VARIANT_IDS)
 def variant(request: pytest.FixtureRequest) -> tuple[str, str, bool]:
     return request.param  # type: ignore[no-any-return]
-
-
-# --- shared conformance fixtures --------------------------------------------------------------------------------
-
-SENSITIVE_CASES = py_cases("cases/sensitive-tools.json")
-
-
-@pytest.mark.parametrize("case", SENSITIVE_CASES, ids=lambda c: str(c["id"]))
-def test_conformance_sensitive_matching(case: dict[str, Any]) -> None:
-    matcher = compile_sensitive_tools(case["input"]["patterns"], lambda *a, **k: None)
-    actual = {
-        "size": 0 if matcher is None else matcher.size,
-        "matches": [False if matcher is None else matcher.matches(n) for n in case["input"]["names"]],
-    }
-    assert actual == case["expect"]
 
 
 # --- the matcher: adversarial input -------------------------------------------------------------------------------

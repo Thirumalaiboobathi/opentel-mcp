@@ -26,7 +26,7 @@ versions, since trusted-publishing requirements change over time.
   `package.json` / `pyproject.toml` (for example `core-v` + `0.17.1`), otherwise the build fails. The old `v0.17.0` tag (npm `opentel-mcp` 0.17.0) and
   `python-v0.1.0` remain as history; `v*` tags no longer trigger anything.
 - **Which versions have provenance:** only releases published through this workflow, starting with `opentel-mcp`
-  0.18.1 and `opentel-mcp-ui` 0.4.1. `opentel-mcp` 0.17.0 and 0.18.0, `opentel-mcp-ui` 0.3.0 and 0.4.0, and PyPI
+  0.18.1, `opentel-mcp-ui` 0.4.1 and PyPI `opentel-mcp` 0.2.0 (the first PyPI release made by the workflow). `opentel-mcp` 0.17.0 and 0.18.0, `opentel-mcp-ui` 0.3.0 and 0.4.0, and PyPI
   `opentel-mcp` 0.1.0 were published manually and are **not signed or attested**: they have no npm provenance, no
   PEP 740 attestation, no GitHub attestation and no attached SBOM.
 
@@ -128,7 +128,7 @@ pypi-attestations verify pypi --repository https://github.com/Thirumalaiboobathi
 ```
 
 This downloads the wheel and its provenance from PyPI's Integrity API, checks that the trusted publisher matches the
-repository, and verifies the wheel against the attestation. Versions before the first workflow release (0.1.0) have none.
+repository, and verifies the wheel against the attestation. Versions before the first workflow release (PyPI 0.1.0) have none; 0.2.0 is the first with an attestation.
 
 **GitHub artifact attestations** (tarball/wheel with SBOM predicate):
 
